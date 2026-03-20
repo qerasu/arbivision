@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: arbitrage_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-arb_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arb_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-arbitrage_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-arb_user} -d ${POSTGRES_DB:-arbitrage_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: arbitrage_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+
+volumes:
+  postgres_data:
+  redis_data:
