@@ -1,7 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from arbitrage_bot.core.config import settings
-from arbitrage_bot.models.orm import Base
 
 engine = create_async_engine(
     settings.database_url,
@@ -10,7 +9,6 @@ engine = create_async_engine(
     pool_size=5,
     max_overflow=10
 )
-
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,

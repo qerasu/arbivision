@@ -44,6 +44,7 @@ class MarketPair(Base):
     status = Column(String, default="candidate", nullable=False)
     match_score = Column(Float, nullable=False)
     match_reason_json = Column(JSON, nullable=True)
+    outcome_mapping_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
 

@@ -1,10 +1,15 @@
 import json
+
 from arbitrage_bot.core.redis import get_redis
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.models.orm import ArbOpportunity, Alert
+from arbitrage_bot.tg_bot.preferences import filter_reason_for_preferences
+from arbitrage_bot.tg_bot.preferences import get_global_preferences
 
 
 class AlertManager:
+
+
     def __init__(self, db_session):
         self.db = db_session
         self.dedupe_ttl = settings.ALERTS_DEDUPE_TTL_SECONDS
@@ -12,14 +17,21 @@ class AlertManager:
         self.delta_roi = settings.ALERTS_DELTA_ROI_THRESHOLD_PERCENT / 100.0
 
 
-    async def process_opportunity(self, pair, calc_result):
-        # base profit filtering
-        if calc_result["net_profit"] < settings.MIN_PROFIT_USD:
+    async def process_opportunity(self, pair, calc_result, market_a=None, market_b=None, preferences=None):
+        if preferences is None:
+            preferences = await get_global_preferences(self.db)
+        filter_reason = self._get_global_filter_reason(
+            calc_result,
+            preferences,
+            market_a,
+            market_b,
+        )
+        if filter_reason:
             return False
         if calc_result["net_roi"] < settings.MIN_ROI_PERCENT / 100.0:
             return False
 
-        direction = "A_yes_B_no"
+        direction = calc_result["direction"]
         redis = await get_redis()
         dedupe_key = f"alert-dedupe:{pair.pair_hash}:{direction}"
 
@@ -56,10 +68,19 @@ class AlertManager:
             "net_roi": calc_result["net_roi"],
             "shares": calc_result["shares"]
         }
-        alerts = await self._create_alert(opp)
-        await redis.setex(dedupe_key, self.dedupe_ttl, json.dumps(state_to_save))
+        dedupe_written = False
 
-        return alerts
+        try:
+            alerts = await self._create_alert(opp)
+            await redis.setex(dedupe_key, self.dedupe_ttl, json.dumps(state_to_save))
+            dedupe_written = True
+            await self.db.commit()
+            return alerts
+        except Exception:
+            await self.db.rollback()
+            if dedupe_written:
+                await redis.delete(dedupe_key)
+            raise
 
 
     async def _create_alert(self, opp):
@@ -74,6 +95,25 @@ class AlertManager:
             )
             self.db.add(alert)
             alerts.append(alert)
-        await self.db.commit()
 
         return alerts
+
+
+    def _get_global_filter_reason(self, calc_result, preferences, market_a, market_b):
+        if market_a is None or market_b is None:
+            return None
+
+        opportunity_view = type(
+            "OpportunityView",
+            (),
+            {
+                "net_roi": calc_result["net_roi"],
+                "capital_required": calc_result["capital_required"],
+            },
+        )()
+        return filter_reason_for_preferences(
+            opportunity_view,
+            market_a,
+            market_b,
+            preferences,
+        )

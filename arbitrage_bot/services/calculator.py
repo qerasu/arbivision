@@ -2,6 +2,8 @@ from arbitrage_bot.core.config import settings
 
 
 class ArbitrageCalculator:
+
+
     def __init__(self):
         self.fee_poly = settings.FEE_POLYMARKET_BPS / 10000.0
         self.fee_pf = settings.FEE_PREDICT_FUN_BPS / 10000.0
@@ -35,7 +37,7 @@ class ArbitrageCalculator:
                 break
 
             take_size = min(p_size, f_size)
-            
+
             shares += take_size
             cost_poly += take_size * p_price
             cost_pf += take_size * f_price
@@ -56,7 +58,7 @@ class ArbitrageCalculator:
         avg_price_pf = cost_pf / shares
 
         gross_profit = shares * 1.0 - capital
-        
+
         total_fees = cost_poly * self.fee_poly + cost_pf * self.fee_pf
         net_profit = gross_profit - total_fees
 
@@ -73,3 +75,20 @@ class ArbitrageCalculator:
             "gross_roi": gross_roi,
             "net_roi": net_roi
         }
+
+
+    def calculate_opportunities(self, direction_books):
+        opportunities = []
+
+        for direction, books in (direction_books or {}).items():
+            result = self.calculate_opportunity(
+                poly_asks=books.get("poly") or [],
+                pf_asks=books.get("pf") or [],
+            )
+            if not result:
+                continue
+
+            result["direction"] = direction
+            opportunities.append(result)
+
+        return opportunities

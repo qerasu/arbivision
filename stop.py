@@ -79,7 +79,6 @@ def main():
     # load environment only from the shared config path
     _load_env_file(ENV_FILE_PATH)
 
-
     print("=== stopping arbitrage alert bot ===")
     app_host = os.environ.get("APP_HOST", "127.0.0.1")
     app_port = os.environ.get("APP_PORT", "8000")
@@ -87,7 +86,7 @@ def main():
         app_port_int = int(app_port)
     except (TypeError, ValueError):
         app_port_int = 8000
-    
+
     # stop only the tracked uvicorn process to avoid killing unrelated services
     pid_file = _pidfile()
     if pid_file.exists():
@@ -113,7 +112,6 @@ def main():
     if _is_port_in_use(app_host, app_port_int):
         print(
             f"WARNING: port {app_host}:{app_port_int} is still busy. "
-            "I did not kill unknown processes automatically."
         )
 
     _stop_project_containers()
@@ -131,7 +129,6 @@ def _is_port_in_use(host, port):
             return False
         except OSError:
             return True
-
 
 if __name__ == "__main__":
     main()

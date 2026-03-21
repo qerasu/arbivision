@@ -25,7 +25,6 @@ def _python_exec():
     if venv_py.exists():
         return str(venv_py)
 
-
     return sys.executable
 
 
@@ -61,9 +60,38 @@ def _run_alembic_upgrade(python_exec):
     cmd = [python_exec, '-c', inline_script]
     print(f"running: {display_cmd}")
     result = subprocess.run(cmd)
-    if result.returncode != 0:
-        print(f"error while running: {display_cmd}")
-        sys.exit(result.returncode)
+    return result.returncode
+
+
+def _wait_for_tcp_ready(host, port, timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1.0)
+            try:
+                sock.connect((host, port))
+                return True
+            except OSError:
+                time.sleep(0.5)
+    return False
+
+
+def _run_alembic_upgrade_with_retry(python_exec, db_host, db_port, retries=5):
+    if not _wait_for_tcp_ready(db_host, db_port):
+        print(f"database is not ready on {db_host}:{db_port}")
+        sys.exit(1)
+
+    for attempt in range(1, retries + 1):
+        returncode = _run_alembic_upgrade(python_exec)
+        if returncode == 0:
+            return
+        if attempt == retries:
+            repo_root = Path(__file__).resolve().parent
+            display_cmd = f'{python_exec} -m alembic -c {repo_root / "alembic.ini"} upgrade head'
+            print(f"error while running: {display_cmd}")
+            sys.exit(returncode)
+        print(f"database is starting up, retrying alembic ({attempt}/{retries})...")
+        time.sleep(1.5)
 
 
 def _load_env_file(path):
@@ -141,7 +169,6 @@ def main():
     # load environment only from the shared config path
     _load_env_file(ENV_FILE_PATH)
 
-
     print('=== starting arbitrage alert bot ===')
 
     # start databases in docker
@@ -149,7 +176,9 @@ def main():
 
     # apply db migrations
     python_exec = _python_exec()
-    _run_alembic_upgrade(python_exec)
+    db_host = os.environ.get("POSTGRES_HOST", "localhost")
+    db_port = _read_int_env("POSTGRES_PORT", 5432)
+    _run_alembic_upgrade_with_retry(python_exec, db_host, db_port)
 
     # start uvicorn server in current terminal with reload for dev
     print('starting main server... (press ctrl+c to stop or use stop.py in another terminal)')
@@ -206,7 +235,6 @@ def main():
             pass
     finally:
         _pidfile().unlink(missing_ok=True)
-
 
 if __name__ == '__main__':
     main()

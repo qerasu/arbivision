@@ -29,6 +29,5 @@ def main():
     result = subprocess.run(cmd, env=env)
     raise SystemExit(result.returncode)
 
-
 if __name__ == "__main__":
     main()

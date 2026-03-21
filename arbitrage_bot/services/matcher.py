@@ -4,8 +4,9 @@ from arbitrage_bot.models.orm import MarketPair
 
 
 class MatcherService:
-    def __init__(self, db_session):
-        self.db = db_session
+
+
+    def __init__(self, db_session=None):
         self.normalizer = NormalizerService()
         self.stop_words = {
             "the", "a", "an", "on", "in", "at", "for", "to", "of", "and", "or",
@@ -34,7 +35,7 @@ class MatcherService:
             if set(poly_entities["numbers"]) != set(pf_entities["numbers"]):
                 return None
 
-        # jaccard index for basic text comparison 
+        # jaccard index for basic text comparison
         poly_words = self._tokenize(poly_norm)
         pf_words = self._tokenize(pf_norm)
 
@@ -44,9 +45,10 @@ class MatcherService:
         intersection = len(poly_words.intersection(pf_words))
         union = len(poly_words.union(pf_words))
         score = intersection / union
+        outcome_mapping = self._build_outcome_mapping(poly_market, pf_market)
 
         status = "candidate"
-        if score >= 0.85:
+        if score >= 0.85 and poly_words == pf_words and outcome_mapping:
             status = "auto_approved"
         elif score >= 0.65:
             status = "manual_review"
@@ -61,10 +63,66 @@ class MatcherService:
             pair_hash=pair_hash,
             status=status,
             match_score=score,
-            match_reason_json={"poly_title": poly_market.title, "pf_title": pf_market.title}
+            match_reason_json={"poly_title": poly_market.title, "pf_title": pf_market.title},
+            outcome_mapping_json=outcome_mapping,
         )
 
         return pair
+
+
+    def _normalize_outcome_label(self, value):
+        normalized = str(value or "").strip().lower()
+        if normalized in {"yes", "y"}:
+            return "yes"
+        if normalized in {"no", "n"}:
+            return "no"
+        return normalized
+
+
+    def _extract_binary_outcomes(self, market):
+        outcomes = getattr(market, "outcomes_json", None) or []
+        mapping = {}
+
+        for outcome in outcomes:
+            if not isinstance(outcome, dict):
+                continue
+
+            key = self._normalize_outcome_label(
+                outcome.get("slug") or outcome.get("label")
+            )
+            if key not in {"yes", "no"} or key in mapping:
+                continue
+
+            mapping[key] = {
+                "id": str(outcome.get("id", key)),
+                "label": str(outcome.get("label") or key),
+                "slug": key,
+            }
+
+        if set(mapping.keys()) != {"yes", "no"}:
+            return None
+
+        return mapping
+
+
+    def _build_outcome_mapping(self, poly_market, pf_market):
+        poly_outcomes = self._extract_binary_outcomes(poly_market)
+        pf_outcomes = self._extract_binary_outcomes(pf_market)
+        if not poly_outcomes or not pf_outcomes:
+            return None
+
+        return {
+            "market_a": {
+                "yes": poly_outcomes["yes"]["id"],
+                "no": poly_outcomes["no"]["id"],
+            },
+            "market_b": {
+                "yes": pf_outcomes["yes"]["id"],
+                "no": pf_outcomes["no"]["id"],
+            },
+            "is_inverted": False,
+            "confidence": "high",
+        }
 
 
     def _tokenize(self, normalized_text):
@@ -72,3 +130,22 @@ class MatcherService:
             word for word in normalized_text.split()
             if len(word) > 1 and word not in self.stop_words
         }
+
+
+    def build_market_signature(self, market):
+        normalized_title = self.normalizer.normalize_text(market.title)
+        return {
+            "market": market,
+            "tokens": self._tokenize(normalized_title),
+        }
+
+
+    def build_candidate_index(self, markets):
+        index = {}
+
+        for market in markets:
+            signature = self.build_market_signature(market)
+            for token in signature["tokens"]:
+                index.setdefault(token, []).append(signature)
+
+        return index

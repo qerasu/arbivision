@@ -4,6 +4,8 @@ from arbitrage_bot.worker import _extract_asks
 
 
 class ExtractAsksTests(unittest.TestCase):
+
+
     def test_extracts_and_sorts_levels_from_plain_asks(self):
         orderbook = {
             "asks": [
@@ -15,6 +17,7 @@ class ExtractAsksTests(unittest.TestCase):
         result = _extract_asks(orderbook)
 
         self.assertEqual(result, [(0.5, 2.0), (0.55, 4.0)])
+
 
     def test_extracts_levels_from_nested_orderbook(self):
         orderbook = {
@@ -29,6 +32,7 @@ class ExtractAsksTests(unittest.TestCase):
         result = _extract_asks(orderbook)
 
         self.assertEqual(result, [(0.41, 3.0), (0.44, 10.0)])
+
 
     def test_skips_invalid_entries(self):
         orderbook = {

@@ -2,6 +2,8 @@ import abc
 
 
 class BaseAdapter(abc.ABC):
+
+
     @abc.abstractmethod
     async def fetch_markets(self):
         pass

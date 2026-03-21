@@ -7,10 +7,10 @@ from arbitrage_bot.tg_bot.bot import start_polling
 
 
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(_app):
     sync_task = asyncio.create_task(run_sync_loop())
     bot_task = asyncio.create_task(start_polling())
-    
+
     try:
         yield
     finally:
@@ -18,13 +18,16 @@ async def lifespan(app):
         bot_task.cancel()
         await asyncio.gather(sync_task, bot_task, return_exceptions=True)
 
-
 app = FastAPI(title="Arbitrage Alert Bot API", lifespan=lifespan)
 
 
 @app.get("/")
 async def root():
-    return {"message": "Arbitrage Alert Bot API is running", "docs": "/docs", "health": "/api/health"}
-
+    return {
+        "message": "Arbitrage Alert Bot API is running",
+        "docs": "/docs",
+        "health": "/api/health",
+        "status": "/api/status",
+    }
 
 app.include_router(internal.router, prefix="/api")
