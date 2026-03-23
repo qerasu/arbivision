@@ -112,15 +112,6 @@ class OrderbookService:
         return platform_ids.get("polymarket"), platform_ids.get("predict_fun")
 
 
-    def _format_pair_error(self, pair, poly_platform_id, pf_platform_id, reason):
-        return (
-            f"[orderbook] pair_id={pair.id} "
-            f"polymarket_market_id={poly_platform_id or 'missing'} "
-            f"predict_fun_market_id={pf_platform_id or 'missing'} "
-            f"reason={reason}"
-        )
-
-
     async def _build_direction_books(self, pair, pf_orderbook_payload):
         mapping = getattr(pair, "outcome_mapping_json", None) or {}
         market_a = mapping.get("market_a") or {}

@@ -185,7 +185,8 @@ def filter_reason_for_preferences(opportunity, market_a, market_b, preferences, 
 
     close_at = extract_pair_close_datetime(market_a, market_b)
     if close_at is None:
-        return None
+        # unknown expiry — filter when max_days is active
+        return "max_days_to_close"
 
     reference_now = now or datetime.now(timezone.utc)
     if close_at.tzinfo is None:

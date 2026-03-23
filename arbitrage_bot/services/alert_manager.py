@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 from arbitrage_bot.core.redis import get_redis
 from arbitrage_bot.core.config import settings
@@ -100,14 +101,10 @@ class AlertManager:
         if market_a is None or market_b is None:
             return None
 
-        opportunity_view = type(
-            "OpportunityView",
-            (),
-            {
-                "net_roi": calc_result["net_roi"],
-                "capital_required": calc_result["capital_required"],
-            },
-        )()
+        opportunity_view = SimpleNamespace(
+            net_roi=calc_result["net_roi"],
+            capital_required=calc_result["capital_required"],
+        )
         return filter_reason_for_preferences(
             opportunity_view,
             market_a,

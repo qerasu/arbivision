@@ -59,6 +59,7 @@ def _format_alert_message(opportunity, pair, market_a, market_b):
     shares = _format_shares(opportunity.shares)
     leg_1_cost = _format_money(opportunity.avg_price_leg_1 * opportunity.shares)
     leg_2_cost = _format_money(opportunity.avg_price_leg_2 * opportunity.shares)
+    shares_ratio = _format_shares_ratio(opportunity.avg_price_leg_1, opportunity.avg_price_leg_2)
     expires = _format_expiry_line(market_a, market_b)
     links = _format_market_links(market_a, market_b)
 
@@ -70,7 +71,8 @@ def _format_alert_message(opportunity, pair, market_a, market_b):
         f"{expires}\n\n"
         f"🧾 Buy {shares} shares each:\n"
         f"• {direction['leg_1_label']} on Polymarket @ {_format_price(opportunity.avg_price_leg_1)} = {leg_1_cost}\n"
-        f"• {direction['leg_2_label']} on Predict.Fun @ {_format_price(opportunity.avg_price_leg_2)} = {leg_2_cost}\n\n"
+        f"• {direction['leg_2_label']} on Predict.Fun @ {_format_price(opportunity.avg_price_leg_2)} = {leg_2_cost}\n"
+        f"📊 Shares ratio: {shares_ratio}\n\n"
         f"🔗 Open markets:\n{links}"
     )
 
@@ -80,7 +82,7 @@ def _describe_direction(direction, pair=None):
     market_a = mapping.get("market_a") or {}
     market_b = mapping.get("market_b") or {}
 
-    mapping = {
+    direction_map = {
         "A_yes_B_no": {
             "leg_1_label": market_a.get("yes_label") or "YES",
             "leg_2_label": market_b.get("no_label") or "NO",
@@ -91,7 +93,7 @@ def _describe_direction(direction, pair=None):
         },
     }
 
-    return mapping.get(
+    return direction_map.get(
         direction,
         {
             "leg_1_label": "LEG 1",
@@ -174,6 +176,20 @@ def _format_shares(value):
     return f"{rounded:.2f}"
 
 
+def _format_shares_ratio(price_leg_1, price_leg_2):
+    p1 = float(price_leg_1)
+    p2 = float(price_leg_2)
+    if p1 <= 0 or p2 <= 0:
+        return "N/A"
+
+    if p1 > p2:
+        ratio = p1 / p2
+    else:
+        ratio = p2 / p1
+
+    return f"{ratio:.2f}x"
+
+
 def _is_missing_table_error(exc):
     if not isinstance(exc, ProgrammingError):
         return False
@@ -184,6 +200,18 @@ def _is_missing_table_error(exc):
 
     details = format_error_details(exc).lower()
     return "does not exist" in details and "relation" in details
+
+
+async def _send_alert(bot, alert, opportunity, pair, market_a, market_b_row):
+    await bot.send_message(
+        chat_id=alert.telegram_chat_id,
+        text=_format_alert_message(opportunity, pair, market_a, market_b_row),
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
+    alert.status = "sent"
+    alert.sent_at = datetime.now(timezone.utc)
+    alert.error_message = None
 
 
 async def _drain_queued_alerts(bot):
@@ -198,7 +226,7 @@ async def _drain_queued_alerts(bot):
                     .join(MarketPair, ArbOpportunity.market_pair_id == MarketPair.id)
                     .join(Market, MarketPair.market_id_a == Market.id)
                     .join(market_b_alias, MarketPair.market_id_b == market_b_alias.id)
-                    .where(Alert.status == "queued")
+                    .where(Alert.status.in_(["queued", "retry"]))
                     .order_by(Alert.id)
                     .limit(20)
                 )
@@ -207,23 +235,23 @@ async def _drain_queued_alerts(bot):
 
                 for alert, opportunity, pair, market_a, market_b_row in rows:
                     try:
-                        await bot.send_message(
-                            chat_id=alert.telegram_chat_id,
-                            text=_format_alert_message(
-                                opportunity,
-                                pair,
-                                market_a,
-                                market_b_row,
-                            ),
-                            parse_mode="HTML",
-                            link_preview_options=LinkPreviewOptions(is_disabled=True),
-                        )
-                        alert.status = "sent"
-                        alert.sent_at = datetime.now(timezone.utc)
-                        alert.error_message = None
+                        await _send_alert(bot, alert, opportunity, pair, market_a, market_b_row)
                     except Exception as exc:
-                        alert.status = "failed"
-                        alert.error_message = str(exc)
+                        if alert.status == "retry":
+                            # second attempt failed — give up
+                            alert.status = "failed"
+                            alert.error_message = str(exc)
+                        else:
+                            # first attempt failed — schedule retry
+                            alert.status = "retry"
+                            alert.error_message = str(exc)
+                            await session.commit()
+                            await asyncio.sleep(3)
+                            try:
+                                await _send_alert(bot, alert, opportunity, pair, market_a, market_b_row)
+                            except Exception as retry_exc:
+                                alert.status = "failed"
+                                alert.error_message = str(retry_exc)
                     await session.commit()
         except asyncio.CancelledError:
             raise

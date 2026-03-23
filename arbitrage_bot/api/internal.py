@@ -99,12 +99,12 @@ async def approve_pair(pair_id: int, db=Depends(get_db), _=Depends(require_admin
     result = await db.execute(stmt)
     pair = result.scalars().first()
 
-    if pair:
-        pair.status = "approved"
-        await db.commit()
-        return {"status": "success", "pair_id": pair_id}
+    if not pair:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="pair not found")
 
-    return {"status": "not_found"}
+    pair.status = "approved"
+    await db.commit()
+    return {"status": "success", "pair_id": pair_id}
 
 
 @router.get("/admin/matcher/debug")

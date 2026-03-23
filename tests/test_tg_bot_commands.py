@@ -16,7 +16,7 @@ from arbitrage_bot.tg_bot.handlers import _apply_setting_update
 from arbitrage_bot.tg_bot.handlers import _safe_answer_callback
 from arbitrage_bot.tg_bot.handlers import _safe_edit_text
 from arbitrage_bot.tg_bot.handlers import cmd_status
-from arbitrage_bot.tg_bot.handlers import cmd_reset
+
 from arbitrage_bot.tg_bot.handlers import _parse_set_command
 from arbitrage_bot.tg_bot.preferences import format_status_text
 from sqlalchemy.exc import ProgrammingError
@@ -77,10 +77,10 @@ class TelegramBotCommandsTests(unittest.TestCase):
     def test_build_bot_commands_contains_start(self):
         commands = _build_bot_commands()
 
+        self.assertEqual(len(commands), 3)
         self.assertEqual(commands[0].command, "start")
         self.assertEqual(commands[1].command, "status")
         self.assertEqual(commands[2].command, "settings")
-        self.assertEqual(commands[3].command, "reset")
 
 
     def test_is_missing_table_error_detects_undefined_table(self):
@@ -134,10 +134,11 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("💰 Profit: $7", text)
         self.assertIn("📈 Spread: 14.00%", text)
         self.assertIn("💵 Volume: $43", text)
-        self.assertIn("⏳ Expires: 2026-03-28 (7 days)", text)
+        self.assertIn("⏳ Max market end: 2026-03-28 (7 days)", text)
         self.assertIn("🧾 Buy 50 shares each:", text)
         self.assertIn("• NO on Polymarket @ $0.360 = $18", text)
         self.assertIn("• YES on Predict.Fun @ $0.500 = $25", text)
+        self.assertIn("📊 Shares ratio: 1.39x", text)
         self.assertIn("🔗 Open markets:", text)
         self.assertIn('<a href="https://polymarket.com/market/manchester-united-win">Polymarket</a>', text)
         self.assertIn('<a href="https://predict.fun/market/pf-123">Predict.Fun</a>', text)
@@ -210,36 +211,7 @@ class FakeSessionContext:
         return False
 
 
-class TelegramBotResetCommandTests(unittest.IsolatedAsyncioTestCase):
 
-
-    async def test_reset_settings_disables_all_filters(self):
-        message = AsyncMock()
-        message.text = "/reset"
-
-        with patch(
-            "arbitrage_bot.tg_bot.handlers.AsyncSessionLocal",
-            return_value=FakeSessionContext(),
-        ), patch(
-            "arbitrage_bot.tg_bot.handlers.clear_ui_state",
-            new=AsyncMock(),
-        ), patch(
-            "arbitrage_bot.tg_bot.handlers.reset_global_preferences",
-            new=AsyncMock(
-                return_value={
-                    "min_roi_percent": None,
-                    "max_capital_usd": None,
-                    "max_days_to_close": None,
-                }
-            ),
-        ) as reset_mock:
-            await cmd_reset(message)
-
-        reset_mock.assert_awaited_once()
-        message.answer.assert_awaited_once()
-        sent_text = message.answer.await_args.args[0]
-        self.assertIn("Global settings reset.", sent_text)
-        self.assertIn("Current: off", sent_text)
 
 
 class TelegramBotStatusCommandTests(unittest.IsolatedAsyncioTestCase):

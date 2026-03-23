@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from arbitrage_bot.api import internal
 from arbitrage_bot.worker import run_sync_loop
 from arbitrage_bot.tg_bot.bot import start_polling
+from arbitrage_bot.services.system_notifier import close_shared_bot
 
 
 @asynccontextmanager
@@ -17,6 +18,7 @@ async def lifespan(_app):
         sync_task.cancel()
         bot_task.cancel()
         await asyncio.gather(sync_task, bot_task, return_exceptions=True)
+        await close_shared_bot()
 
 app = FastAPI(title="Arbitrage Alert Bot API", lifespan=lifespan)
 

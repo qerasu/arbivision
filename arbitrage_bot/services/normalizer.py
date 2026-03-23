@@ -15,13 +15,12 @@ class NormalizerService:
         text = str(text).lower()
 
         # extract dates from text
-        dates = re.findall(
-            r'(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:,\s*\d{4})?',
-            text
-        )
+        date_pattern = r'(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:,\s*\d{4})?'
+        dates = re.findall(date_pattern, text)
 
-        # extract numbers and thresholds
-        numbers = re.findall(r'\d+(?:\.\d+)?', text)
+        # remove matched date substrings before extracting standalone numbers
+        text_without_dates = re.sub(date_pattern, '', text)
+        numbers = re.findall(r'\d+(?:\.\d+)?', text_without_dates)
 
         return {
             "dates": dates,

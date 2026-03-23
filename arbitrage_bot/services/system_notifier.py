@@ -7,6 +7,7 @@ from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.logging import get_logger
 
 _last_sent_at = {}
+_MAX_DEDUPE_ENTRIES = 500
 _MAX_ERROR_DETAILS_LENGTH = 280
 _shared_bot = None
 log = get_logger("system_notifier")
@@ -85,6 +86,11 @@ def _should_skip_notification(dedupe_key):
         return True
 
     _last_sent_at[dedupe_key] = now
+    # evict oldest entries when the dict grows too large
+    if len(_last_sent_at) > _MAX_DEDUPE_ENTRIES:
+        sorted_keys = sorted(_last_sent_at, key=_last_sent_at.get)
+        for stale_key in sorted_keys[:len(sorted_keys) // 2]:
+            _last_sent_at.pop(stale_key, None)
     return False
 
 
@@ -96,6 +102,13 @@ def _get_shared_bot():
     if _shared_bot is None:
         _shared_bot = Bot(token=token)
     return _shared_bot
+
+
+async def close_shared_bot():
+    global _shared_bot
+    if _shared_bot is not None:
+        await _shared_bot.session.close()
+        _shared_bot = None
 
 
 async def send_system_error_notification(source, operation, error):

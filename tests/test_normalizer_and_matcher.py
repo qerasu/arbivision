@@ -22,7 +22,7 @@ class NormalizerServiceTests(unittest.TestCase):
         entities = service.extract_entities("Will ETH reach 5000 by March 15, 2026?")
 
         self.assertEqual(entities["dates"], ["march 15, 2026"])
-        self.assertEqual(entities["numbers"], ["5000", "15", "2026"])
+        self.assertEqual(entities["numbers"], ["5000"])
 
 
 class MatcherServiceTests(unittest.TestCase):

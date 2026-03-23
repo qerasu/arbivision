@@ -12,7 +12,7 @@ from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.services.system_notifier import format_error_details, send_system_error_notification
 from arbitrage_bot.tg_bot.preferences import get_global_preferences
 from sqlalchemy.future import select
-from sqlalchemy import and_
+from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 
 log = get_logger("worker")
@@ -81,7 +81,8 @@ async def _upsert_market_pairs(db, matcher):
             break
 
     if not matched_pairs:
-        existing_pairs = (await db.execute(select(MarketPair))).scalars().all()
+        active_stmt = select(MarketPair).where(MarketPair.status.in_(["auto_approved", "approved"]))
+        existing_pairs = (await db.execute(active_stmt)).scalars().all()
         has_changes = _mark_stale_pairs(existing_pairs)
         if not has_changes:
             return
@@ -91,7 +92,14 @@ async def _upsert_market_pairs(db, matcher):
             await db.rollback()
         return
 
-    existing_pairs = (await db.execute(select(MarketPair))).scalars().all()
+    relevant_hashes = list(matched_pairs.keys())
+    stmt = select(MarketPair).where(
+        or_(
+            MarketPair.status.in_(["auto_approved", "approved"]),
+            MarketPair.pair_hash.in_(relevant_hashes)
+        )
+    )
+    existing_pairs = (await db.execute(stmt)).scalars().all()
     new_pairs, has_updates = _reconcile_market_pairs(existing_pairs, matched_pairs)
     if not new_pairs and not has_updates:
         return

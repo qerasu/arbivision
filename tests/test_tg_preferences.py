@@ -14,16 +14,17 @@ from arbitrage_bot.tg_bot.preferences import format_preferences_text
 class TelegramPreferencesTests(unittest.TestCase):
 
 
-    def test_filter_reason_returns_none_when_preferences_are_disabled(self):
+    def test_filter_reason_returns_none_when_opportunity_passes_all_filters(self):
         opportunity = SimpleNamespace(net_roi=0.12, capital_required=100.0)
-        market = SimpleNamespace(raw_payload_json={})
+        now = datetime(2026, 3, 21, tzinfo=timezone.utc)
+        market = SimpleNamespace(raw_payload_json={"endDate": (now + timedelta(days=7)).isoformat()})
 
         reason = filter_reason_for_preferences(
             opportunity,
             market,
             market,
             default_preferences(),
-            now=datetime(2026, 3, 21, tzinfo=timezone.utc),
+            now=now,
         )
 
         self.assertIsNone(reason)
@@ -34,7 +35,7 @@ class TelegramPreferencesTests(unittest.TestCase):
 
         self.assertIsNone(preferences["min_roi_percent"])
         self.assertIsNone(preferences["max_capital_usd"])
-        self.assertIsNone(preferences["max_days_to_close"])
+        self.assertEqual(preferences["max_days_to_close"], 30)
 
 
     def test_filter_reason_blocks_by_min_roi(self):
@@ -106,7 +107,7 @@ class TelegramPreferencesTests(unittest.TestCase):
         self.assertIn("Global alert settings", text)
         self.assertIn("Min ROI\nCurrent: 2.50%", text)
         self.assertIn("Volume\nCurrent: $500", text)
-        self.assertIn("Expires\nCurrent: 7 days", text)
+        self.assertIn("Max market end\nCurrent: 7 days", text)
         self.assertNotIn("Use text commands:", text)
 
 
