@@ -1,3 +1,4 @@
+# setting redis with aioredis
 import redis.asyncio as aioredis
 from arbitrage_bot.core.config import settings
 

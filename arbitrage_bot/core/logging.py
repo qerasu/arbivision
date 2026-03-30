@@ -15,4 +15,5 @@ structlog.configure(
 def get_logger(name=None):
     if name:
         return structlog.get_logger(component=name)
+        
     return structlog.get_logger()

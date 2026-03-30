@@ -25,17 +25,23 @@ def _get_float_setting(name, default):
 
 def _get_bool_setting(name, default):
     value = os.getenv(name, str(default)).strip().lower()
+
     if value in {"1", "true", "yes", "on", "y", "t"}:
         return True
+
     if value in {"0", "false", "no", "off", "n", "f"}:
         return False
+
     return default
 
 
+# for telegram chat ids
 def _get_list_setting(name, default):
     raw = os.getenv(name, "")
+
     if not raw:
         return default
+        
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
@@ -56,7 +62,6 @@ class Settings:
 
     FEE_POLYMARKET_BPS = _get_float_setting("FEE_POLYMARKET_BPS", 0.0)
     FEE_PREDICT_FUN_BPS = _get_float_setting("FEE_PREDICT_FUN_BPS", 0.0)
-    MIN_PROFIT_USD = _get_float_setting("MIN_PROFIT_USD", 0.0)
     MIN_ROI_PERCENT = _get_float_setting("MIN_ROI_PERCENT", 0.0)
     ALERTS_DEDUPE_TTL_SECONDS = _get_int_setting("ALERTS_DEDUPE_TTL_SECONDS", 600)
     ALERTS_DELTA_PROFIT_THRESHOLD_USD = _get_float_setting("ALERTS_DELTA_PROFIT_THRESHOLD_USD", 3.0)
@@ -64,7 +69,6 @@ class Settings:
     MAX_MARKET_PAIRS_PER_LOOP = _get_int_setting("MAX_MARKET_PAIRS_PER_LOOP", 0)
 
     MARKET_REFRESH_SECONDS = _get_int_setting("MARKET_REFRESH_SECONDS", 15)
-    FALLBACK_ORDERBOOK_POLL_SECONDS = _get_int_setting("FALLBACK_ORDERBOOK_POLL_SECONDS", 5)
 
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_DEFAULT_CHAT_IDS = _get_list_setting("TELEGRAM_DEFAULT_CHAT_IDS", [])

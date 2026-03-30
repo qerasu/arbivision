@@ -4,7 +4,7 @@ import os
 def load_env_file(path):
     # loads key=value pairs from a .env file without overriding existing env vars
     if not os.path.exists(path):
-        return
+        raise ValueError("path provided to the .env file does not exist")
 
     with open(path, "r", encoding="utf-8") as f:
         for raw_line in f:
@@ -16,7 +16,7 @@ def load_env_file(path):
                 continue
 
             key, val = line.split("=", 1)
-            key = key.strip().removeprefix("export ").strip()
+            key = key.strip().removeprefix("export ").strip() # for bash scripts
             val = val.strip()
             if not key:
                 continue
