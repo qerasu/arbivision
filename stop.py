@@ -10,7 +10,6 @@ from arbitrage_bot.core.env_loader import load_env_file
 ENV_FILE_PATH = Path.home() / ".config" / "arbivision" / ".env"
 
 
-
 def _pidfile():
     return Path(tempfile.gettempdir()) / "arbitrage_alert_bot.pid"
 
@@ -51,6 +50,18 @@ def _stop_project_containers():
         print(f"error while running: {cmd}")
         return False
     return True
+
+
+def _is_port_in_use(host, port):
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+            return False
+        except OSError:
+            return True
 
 
 def main():
@@ -95,18 +106,6 @@ def main():
     _stop_project_containers()
 
     print("bot was successfully stopped!")
-
-
-def _is_port_in_use(host, port):
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((host, port))
-            return False
-        except OSError:
-            return True
 
 
 if __name__ == "__main__":

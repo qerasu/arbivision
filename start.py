@@ -14,7 +14,6 @@ ENV_FILE_PATH = Path.home() / ".config" / "arbivision" / ".env"
 
 
 def run_cmd(cmd):
-    # runs a shell command and checks its status
     print(f"running: {cmd}")
     result = subprocess.run(cmd, shell=True)
     if result.returncode != 0:
@@ -23,10 +22,6 @@ def run_cmd(cmd):
 
 
 def _python_exec():
-    venv_py = Path('.venv/bin/python3')
-    if venv_py.exists():
-        return str(venv_py)
-
     return sys.executable
 
 
@@ -62,23 +57,27 @@ def _run_alembic_upgrade(python_exec):
     cmd = [python_exec, '-c', inline_script]
     print(f"running: {display_cmd}")
     result = subprocess.run(cmd)
+
     return result.returncode
 
 
-def _wait_for_tcp_ready(host, port, timeout=20):
+def _wait_for_tcp_ready(host, port, timeout=5):
     deadline = time.time() + timeout
+
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(1.0)
+
             try:
                 sock.connect((host, port))
                 return True
             except OSError:
                 time.sleep(0.5)
+
     return False
 
 
-def _wait_for_postgres_ready(db_user, db_name, timeout=30):
+def _wait_for_postgres_ready(db_user, db_name, timeout=5):
     deadline = time.time() + timeout
     cmd = [
         'docker',
@@ -108,27 +107,29 @@ def _wait_for_postgres_ready(db_user, db_name, timeout=30):
 
 def _run_alembic_upgrade_with_retry(python_exec, db_host, db_port, retries=5):
     if not _wait_for_tcp_ready(db_host, db_port):
-        print(f"database is not ready on {db_host}:{db_port}")
+        print(f"Database is not ready on {db_host}:{db_port}")
         sys.exit(1)
 
     db_user = os.environ.get("POSTGRES_USER", "arb_user")
     db_name = os.environ.get("POSTGRES_DB", "arbitrage_db")
+    
     if not _wait_for_postgres_ready(db_user, db_name):
-        print(f"postgres is not ready for {db_user}@{db_name}")
+        print(f"Postgres is not ready for {db_user}@{db_name}")
         sys.exit(1)
 
     for attempt in range(1, retries + 1):
         returncode = _run_alembic_upgrade(python_exec)
         if returncode == 0:
             return
+
         if attempt == retries:
             repo_root = Path(__file__).resolve().parent
             display_cmd = f'{python_exec} -m alembic -c {repo_root / "alembic.ini"} upgrade head'
-            print(f"error while running: {display_cmd}")
+            print(f"Error while running: {display_cmd}")
             sys.exit(returncode)
-        print(f"database is starting up, retrying alembic ({attempt}/{retries})...")
-        time.sleep(1.5)
 
+        print(f"Database is starting up, retrying alembic ({attempt}/{retries})...")
+        time.sleep(1.5)
 
 
 def _wait_for_exit(pid, timeout=8):
@@ -204,12 +205,11 @@ def main():
     if _is_port_in_use(host, port):
         print(f'ERROR: TCP port {host}:{port} is already in use')
         _show_port_owners(port)
-        print('Stop the existing process first: `python3 stop.py`')
+        print('Stop the existing process first by using: `python3 stop.py`')
         print(f'Or change APP_PORT in {ENV_FILE_PATH}')
 
         return
 
-    # added --reload to simplify local development
     cmd = [
         python_exec,
         '-m',
@@ -228,7 +228,6 @@ def main():
     try:
         proc.wait()
     except KeyboardInterrupt:
-        # print first, then stop gracefully
         print('\n' * 2)
         print('=== stopping server safely ===')
         try:
@@ -247,6 +246,7 @@ def main():
             pass
     finally:
         _pidfile().unlink(missing_ok=True)
+
 
 if __name__ == '__main__':
     main()
