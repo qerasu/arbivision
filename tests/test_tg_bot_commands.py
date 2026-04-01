@@ -136,7 +136,7 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("🧾 Buy 50 shares each:", text)
         self.assertIn("• NO on Polymarket @ $0.360 = $18", text)
         self.assertIn("• YES on Predict.Fun @ $0.500 = $25", text)
-        self.assertIn("📊 Shares ratio: 1.39x", text)
+        self.assertIn("📊 Volumes ratio: 1.39x", text)
         self.assertIn("🔗 Open markets:", text)
         self.assertIn('<a href="https://polymarket.com/market/manchester-united-win">Polymarket</a>', text)
         self.assertIn('<a href="https://predict.fun/market/pf-123">Predict.Fun</a>', text)
