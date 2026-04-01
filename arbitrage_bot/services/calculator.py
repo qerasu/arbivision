@@ -2,7 +2,6 @@ from arbitrage_bot.core.config import settings
 
 
 class ArbitrageCalculator:
-
     def __init__(self):
         self.fee_poly = settings.FEE_POLYMARKET_BPS / 10000.0
         self.fee_pf = settings.FEE_PREDICT_FUN_BPS / 10000.0

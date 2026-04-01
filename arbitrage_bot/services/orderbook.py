@@ -10,7 +10,6 @@ log = get_logger("orderbook")
 
 
 class OrderbookService:
-
     def __init__(self):
         self.polymarket = PolymarketAdapter()
         self.predict_fun = PredictFunAdapter()
@@ -119,6 +118,7 @@ class OrderbookService:
         poly_yes_id = market_a.get("yes")
         poly_no_id = market_a.get("no")
         pf_yes_asks, pf_no_asks = self._extract_predict_fun_directional_asks(pf_orderbook_payload)
+
         if not poly_yes_id or not poly_no_id or not pf_yes_asks or not pf_no_asks:
             return None
 
@@ -130,6 +130,7 @@ class OrderbookService:
         }
         poly_yes_asks = self._extract_asks(poly_book_map.get(str(poly_yes_id)))
         poly_no_asks = self._extract_asks(poly_book_map.get(str(poly_no_id)))
+        
         if not poly_yes_asks or not poly_no_asks:
             return None
 

@@ -9,7 +9,6 @@ from arbitrage_bot.tg_bot.preferences import get_global_preferences
 
 
 class AlertManager:
-
     def __init__(self, db_session):
         self.db = db_session
         self.dedupe_ttl = settings.ALERTS_DEDUPE_TTL_SECONDS

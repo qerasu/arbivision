@@ -5,7 +5,6 @@ from arbitrage_bot.models.orm import MarketPair
 
 
 class MatcherService:
-
     def __init__(self):
         self.normalizer = NormalizerService()
         self.max_ranked_candidates = 25
@@ -58,6 +57,7 @@ class MatcherService:
             poly_signature=poly_signature,
             pf_signature=pf_signature,
         )
+        
         if not decision["matched"]:
             return None
 

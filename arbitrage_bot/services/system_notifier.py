@@ -86,6 +86,7 @@ def _should_skip_notification(dedupe_key):
         return True
 
     _last_sent_at[dedupe_key] = now
+
     # evict oldest entries when the dict grows too large
     if len(_last_sent_at) > _MAX_DEDUPE_ENTRIES:
         sorted_keys = sorted(_last_sent_at, key=_last_sent_at.get)
@@ -114,11 +115,13 @@ async def close_shared_bot():
 async def send_system_error_notification(source, operation, error):
     bot = _get_shared_bot()
     chat_ids = _get_system_error_chat_ids()
+
     if not bot or not chat_ids:
         return False
 
     details = format_error_details(error)
     dedupe_key = f"{source}:{operation}:{type(error).__name__}:{details}"
+    
     if _should_skip_notification(dedupe_key):
         return False
 

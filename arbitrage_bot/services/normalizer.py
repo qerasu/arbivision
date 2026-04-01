@@ -2,7 +2,6 @@ import re
 
 
 class NormalizerService:
-
     def normalize_text(self, text):
         if not text:
             return ""

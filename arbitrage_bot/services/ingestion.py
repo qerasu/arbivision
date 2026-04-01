@@ -72,6 +72,7 @@ class IngestionService:
                 or outcome.get("value")
                 or ""
             )
+            
             outcome_id = (
                 outcome.get("id")
                 or outcome.get("token_id")
@@ -84,6 +85,7 @@ class IngestionService:
                 or outcome.get("slug")
                 or index
             )
+
             normalized_item = {
                 "id": str(outcome_id),
                 "label": str(label),
@@ -113,6 +115,7 @@ class IngestionService:
     def _parse_json_list(self, value):
         if isinstance(value, list):
             return value
+
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -122,6 +125,7 @@ class IngestionService:
             except json.JSONDecodeError:
                 return []
             return parsed if isinstance(parsed, list) else []
+
         return []
 
 
@@ -163,10 +167,12 @@ class IngestionService:
         title = market.get("question") or market.get("title") or market.get("name") or ""
         trading_status = str(market.get("tradingStatus") or "").upper()
         market_status = str(market.get("status") or "").upper()
+
         tradable = (
             trading_status == "OPEN"
             or market_status == "ACTIVE"
         )
+
         status = "active" if tradable else (trading_status or market_status or "unknown").lower()
 
         return {
