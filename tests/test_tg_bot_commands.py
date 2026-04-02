@@ -132,7 +132,7 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("💰 Profit: $7", text)
         self.assertIn("📈 Spread: 14.00%", text)
         self.assertIn("💵 Volume: $43", text)
-        self.assertIn("⏳ Max market end: 2026-03-28 (7 days)", text)
+        self.assertIn("⏳ Ends on: 2026-03-28 (in 7 days)", text)
         self.assertIn("🧾 Buy 50 shares each:", text)
         self.assertIn("• NO on Polymarket @ $0.360 = $18", text)
         self.assertIn("• YES on Predict.Fun @ $0.500 = $25", text)

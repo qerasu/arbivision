@@ -68,10 +68,40 @@ class PolymarketAdapter(BaseAdapter):
 
     async def fetch_books(self, token_ids):
         payload = [{"token_id": str(token_id)} for token_id in token_ids]
-        response = await self.clob_client.post("/books", json=payload)
-        response.raise_for_status()
-        
-        return response.json()
+        try:
+            response = await self.clob_client.post("/books", json=payload)
+            response.raise_for_status()
+            return response.json()
+        except self.fallback_errors as exc:
+            return await self._curl_post_books(token_ids, original_exc=exc)
+
+
+    async def _curl_post_books(self, token_ids, original_exc=None):
+        url = f"{self.clob_base_url}/books"
+        body = json.dumps([{"token_id": str(tid)} for tid in token_ids])
+
+        proc = await asyncio.create_subprocess_exec(
+            "curl",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--max-time",
+            "10",
+            "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", body,
+            url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            detail = stderr.decode().strip() or repr(original_exc)
+            raise RuntimeError(f"curl fallback failed for {url}: {detail}") from original_exc
+
+        return json.loads(stdout)
 
 
     async def _get_json(self, path, params=None):

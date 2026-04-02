@@ -65,19 +65,17 @@ class AlertManager:
             "net_roi": calc_result["net_roi"],
             "shares": calc_result["shares"]
         }
-        dedupe_written = False
-
         try:
             alerts = await self._create_alert(opp)
-            await redis.setex(dedupe_key, self.dedupe_ttl, json.dumps(state_to_save))
-            dedupe_written = True
             await self.db.commit()
-            return alerts
         except Exception:
             await self.db.rollback()
-            if dedupe_written:
-                await redis.delete(dedupe_key)
             raise
+
+        # write dedupe key after successful commit to prevent
+        # skipping alerts when the transaction rolls back
+        await redis.setex(dedupe_key, self.dedupe_ttl, json.dumps(state_to_save))
+        return alerts
 
 
     async def _create_alert(self, opp):

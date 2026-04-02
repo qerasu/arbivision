@@ -1,11 +1,14 @@
 import unittest
+from unittest.mock import patch
 
 from arbitrage_bot.services.calculator import ArbitrageCalculator
 
 
 class ArbitrageCalculatorTests(unittest.TestCase):
     def test_calculates_weighted_opportunity_across_multiple_levels(self):
-        calculator = ArbitrageCalculator()
+        with patch("arbitrage_bot.core.config.settings.FEE_POLYMARKET_BPS", 0.0), \
+             patch("arbitrage_bot.core.config.settings.FEE_PREDICT_FUN_BPS", 0.0):
+            calculator = ArbitrageCalculator()
 
         result = calculator.calculate_opportunity(
             poly_asks=[(0.40, 10), (0.45, 5)],

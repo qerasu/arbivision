@@ -316,19 +316,28 @@ def _parse_setting_value(field_name, raw_value):
         return None
 
     if field_name == "min_roi_percent":
-        parsed = float(value)
+        try:
+            parsed = float(value)
+        except (ValueError, TypeError):
+            raise ValueError("Enter a number, e.g. 1.5")
         if parsed < 0:
             raise ValueError("ROI must be zero or greater.")
         return parsed
 
     if field_name == "max_capital_usd":
-        parsed = float(value)
+        try:
+            parsed = float(value)
+        except (ValueError, TypeError):
+            raise ValueError("Enter a number, e.g. 500")
         if parsed <= 0:
             raise ValueError("Volume must be greater than zero.")
         return parsed
 
     if field_name == "max_days_to_close":
-        parsed = int(value)
+        try:
+            parsed = int(value)
+        except (ValueError, TypeError):
+            raise ValueError("Enter a whole number, e.g. 30")
         if parsed <= 0:
             raise ValueError("Max market end must be greater than zero days.")
         return parsed

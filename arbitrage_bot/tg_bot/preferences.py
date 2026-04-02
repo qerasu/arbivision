@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from arbitrage_bot.core.config import settings
 from arbitrage_bot.models.orm import SettingsRecord
 
 GLOBAL_SETTINGS_KEY = "tg_alert_prefs:global"
@@ -118,13 +117,13 @@ async def _save_global_preferences(db_session, preferences):
 
 
 def format_preferences_text(preferences):
-    min_roi = _format_percent(effective_min_roi(preferences), fallback="0")
+    min_roi_str = _format_roi_value(preferences)
     max_capital = preferences.get("max_capital_usd")
-    max_capital_str = "off" if max_capital is None else f"{_format_money(max_capital, fallback='')} USD"
+    max_capital_str = "off" if max_capital is None else _format_money(max_capital, fallback='')
     max_days = _format_days(preferences.get("max_days_to_close"))
     return (
         "⚙️ Global alert settings\n\n"
-        f"📈 Min ROI\nCurrent: {min_roi}\n\n"
+        f"📈 Min ROI\nCurrent: {min_roi_str}\n\n"
         f"💵 Volume\nCurrent: {max_capital_str}\n\n"
         f"⏳ Max market end\nCurrent: {max_days}"
     )
@@ -132,15 +131,15 @@ def format_preferences_text(preferences):
 
 def format_home_text(preferences):
     max_capital = preferences.get("max_capital_usd")
-    max_capital_str = "off" if max_capital is None else f"{_format_money(max_capital, fallback='')} USD"
+    max_capital_str = "off" if max_capital is None else _format_money(max_capital, fallback='')
     return (
         "🔎 Arbitrage Scanner\n\n"
         "Monitors Polymarket and Predict.Fun for spread inefficiencies.\n\n"
         "🟢 Status: Active\n"
         "Filters are applied globally to all alerts.\n\n"
         "Your filters:\n"
-        f"• 📈 Min ROI: {_format_percent(effective_min_roi(preferences), fallback='0')}%\n"
-        f"• 💵 Max volume: {max_capital_str}$\n"
+        f"• 📈 Min ROI: {_format_roi_value(preferences)}\n"
+        f"• 💵 Max volume: {max_capital_str}\n"
         f"• ⏳ Max market end: {_format_days(preferences.get('max_days_to_close'))}"
     )
 
@@ -205,22 +204,18 @@ def filter_reason_for_preferences(opportunity, market_a, market_b, preferences, 
 
 
 def effective_min_roi(preferences):
-    if "min_roi_percent" not in preferences:
-        return float(settings.MIN_ROI_PERCENT)
-
     min_roi = preferences.get("min_roi_percent")
     if min_roi is None:
         return None
-
     return float(min_roi)
 
 
 def _format_field_value(field_name, preferences):
     if field_name == "min_roi_percent":
-        return _format_percent(effective_min_roi(preferences), fallback="0")
+        return _format_roi_value(preferences)
     if field_name == "max_capital_usd":
         val = preferences.get(field_name)
-        return "off" if val is None else f"{_format_money(val, fallback='')} USD"
+        return "off" if val is None else _format_money(val, fallback='')
     return _format_days(preferences.get(field_name))
 
 
@@ -289,6 +284,13 @@ def _format_days(value):
     if value is None:
         return "off"
     return f"{int(value)} days"
+
+
+def _format_roi_value(preferences):
+    min_roi = effective_min_roi(preferences)
+    if min_roi is None:
+        return "off"
+    return f"{float(min_roi):.2f}%"
 
 
 def _ui_state_key(chat_id):
