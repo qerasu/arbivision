@@ -225,8 +225,9 @@ class IngestionService:
 
             raw_items = payload_or_exc.get("data", payload_or_exc) if isinstance(payload_or_exc, dict) else payload_or_exc
             mapped_items = [mapper(item) for item in raw_items if isinstance(item, dict)]
-            await self._upsert_markets(mapped_items)
-            await self.db.commit()
+            for chunk in self._chunked(mapped_items, 1000):
+                await self._upsert_markets(chunk)
+                await self.db.commit()
         except asyncio.CancelledError:
             raise
         except Exception as e:

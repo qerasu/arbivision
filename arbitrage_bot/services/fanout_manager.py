@@ -113,6 +113,9 @@ class FanoutManager:
         for target in targets:
             if not target.get("telegram_chat_id"):
                 continue
+            preferences = target.get("preferences") or {}
+            if preferences.get("muted"):
+                continue
             if filter_reason_for_preferences(
                 opportunity,
                 market_a,

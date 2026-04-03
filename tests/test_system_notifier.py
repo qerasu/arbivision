@@ -33,9 +33,13 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
         settings.TELEGRAM_DEFAULT_CHAT_IDS = ["1001"]
         settings.TELEGRAM_SYSTEM_ERROR_CHAT_IDS = []
         settings.TELEGRAM_SYSTEM_ERROR_COOLDOWN_SECONDS = 300.0
+        
+        self.redis_patcher = patch("arbitrage_bot.services.system_notifier.get_redis", new=AsyncMock(return_value=None))
+        self.redis_patcher.start()
 
 
     async def asyncTearDown(self):
+        self.redis_patcher.stop()
         settings.TELEGRAM_BOT_TOKEN = self.original_token
         settings.TELEGRAM_DEFAULT_CHAT_IDS = self.original_default_chat_ids
         settings.TELEGRAM_SYSTEM_ERROR_CHAT_IDS = self.original_error_chat_ids
@@ -47,7 +51,10 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
     async def test_sends_system_error_message_to_telegram(self):
         fake_bot = AsyncMock()
 
-        with patch.object(system_notifier, "_get_shared_bot", return_value=fake_bot):
+        with patch.object(system_notifier, "_get_shared_bot", return_value=fake_bot), patch(
+            "arbitrage_bot.services.system_notifier.get_redis",
+            new=AsyncMock(return_value=None),
+        ):
             sent = await system_notifier.send_system_error_notification(
                 "polymarket",
                 "markets sync",

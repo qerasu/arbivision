@@ -52,8 +52,9 @@ class TelegramBotCommandsTests(unittest.TestCase):
     def test_build_home_keyboard_contains_status_and_settings_buttons(self):
         keyboard = _build_home_keyboard()
 
-        self.assertEqual(keyboard.inline_keyboard[0][0].text, "Status")
-        self.assertEqual(keyboard.inline_keyboard[0][1].text, "Settings")
+        self.assertEqual(keyboard.inline_keyboard[0][0].text, "⏸ Pause")
+        self.assertEqual(keyboard.inline_keyboard[1][0].text, "Status")
+        self.assertEqual(keyboard.inline_keyboard[1][1].text, "Settings")
 
 
     def test_build_settings_keyboard_contains_expected_actions(self):
@@ -64,12 +65,18 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertEqual(keyboard.inline_keyboard[1][0].text, "→ Max market end")
 
 
-    def test_build_status_keyboard_contains_only_back_button(self):
+    def test_build_status_keyboard_contains_toggle_and_back_buttons(self):
         keyboard = _build_status_keyboard()
 
-        self.assertEqual(len(keyboard.inline_keyboard), 1)
-        self.assertEqual(len(keyboard.inline_keyboard[0]), 1)
-        self.assertEqual(keyboard.inline_keyboard[0][0].text, "← Back")
+        self.assertEqual(len(keyboard.inline_keyboard), 2)
+        self.assertEqual(keyboard.inline_keyboard[0][0].text, "⏸ Pause")
+        self.assertEqual(keyboard.inline_keyboard[1][0].text, "← Back")
+
+
+    def test_build_home_keyboard_shows_resume_when_muted(self):
+        keyboard = _build_home_keyboard({"muted": True})
+
+        self.assertEqual(keyboard.inline_keyboard[0][0].text, "▶️ Resume")
 
 
     def test_build_bot_commands_contains_start(self):
@@ -196,6 +203,20 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("🟢 Status: Active", text)
         self.assertIn("📬 Telegram alerts are enabled.", text)
         self.assertNotIn("Current filters:", text)
+
+
+    def test_format_status_text_shows_paused_when_muted(self):
+        text = format_status_text(
+            {
+                "min_roi_percent": None,
+                "max_capital_usd": None,
+                "max_days_to_close": None,
+                "muted": True,
+            }
+        )
+
+        self.assertIn("🔴 Status: Paused", text)
+        self.assertIn("📭 Telegram alerts are paused.", text)
 
 
 class FakeSessionContext:

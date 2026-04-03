@@ -323,10 +323,13 @@ def format_preferences_text(preferences):
 def format_home_text(preferences):
     max_capital = preferences.get("max_capital_usd")
     max_capital_str = "off" if max_capital is None else _format_money(max_capital, fallback='')
+    muted = preferences.get("muted", False)
+    status_icon = "🔴" if muted else "🟢"
+    status_label = "Paused" if muted else "Active"
     return (
         "🔎 Arbitrage Scanner\n\n"
         "Monitors Polymarket and Predict.Fun for spread inefficiencies.\n\n"
-        "🟢 Status: Active\n"
+        f"{status_icon} Status: {status_label}\n"
         "Filters are applied to your personal alert stream.\n\n"
         "Your filters:\n"
         f"• 📈 Min ROI: {_format_roi_value(preferences)}\n"
@@ -336,12 +339,16 @@ def format_home_text(preferences):
 
 
 def format_status_text(preferences):
+    muted = preferences.get("muted", False)
+    status_icon = "🔴" if muted else "🟢"
+    status_label = "Paused" if muted else "Active"
+    alerts_line = "📭 Telegram alerts are paused." if muted else "📬 Telegram alerts are enabled."
     return (
         "📡 Arbitrage Scanner\n\n"
         "Current bot status.\n\n"
-        "🟢 Status: Active\n"
+        f"{status_icon} Status: {status_label}\n"
         "🔄 Monitoring is running in the background.\n"
-        "📬 Telegram alerts are enabled."
+        f"{alerts_line}"
     )
 
 
@@ -486,3 +493,26 @@ def _format_roi_value(preferences):
 
 def _ui_state_key(chat_id):
     return f"{UI_STATE_KEY_PREFIX}{chat_id}"
+
+
+async def toggle_mute(db_session, chat_id):
+    telegram_chat = await ensure_telegram_user(db_session, chat_id)
+    stmt = select(UserPreference).where(UserPreference.user_id == telegram_chat.user_id)
+    result = await db_session.execute(stmt)
+    preferences = result.scalars().first()
+
+    if preferences is None:
+        preferences = UserPreference(
+            user_id=telegram_chat.user_id,
+            min_roi_percent=DEFAULT_PREFERENCES["min_roi_percent"],
+            max_capital_usd=DEFAULT_PREFERENCES["max_capital_usd"],
+            max_days_to_close=DEFAULT_PREFERENCES["max_days_to_close"],
+            muted=True,
+        )
+        db_session.add(preferences)
+    else:
+        preferences.muted = not preferences.muted
+        preferences.updated_at = datetime.now(timezone.utc)
+
+    await db_session.commit()
+    return _serialize_user_preferences(preferences)

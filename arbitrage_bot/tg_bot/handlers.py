@@ -16,6 +16,7 @@ from arbitrage_bot.tg_bot.preferences import get_user_preferences
 from arbitrage_bot.tg_bot.preferences import reset_user_preferences
 from arbitrage_bot.tg_bot.preferences import set_user_preference
 from arbitrage_bot.tg_bot.preferences import set_ui_state
+from arbitrage_bot.tg_bot.preferences import toggle_mute
 
 router = Router()
 
@@ -39,7 +40,7 @@ async def cmd_start(message):
 
     await message.answer(
         format_home_text(preferences),
-        reply_markup=_build_home_keyboard(),
+        reply_markup=_build_home_keyboard(preferences),
     )
 
 
@@ -51,7 +52,7 @@ async def cmd_status(message):
 
     await message.answer(
         format_status_text(preferences),
-        reply_markup=_build_status_keyboard(),
+        reply_markup=_build_status_keyboard(preferences),
     )
 
 
@@ -79,7 +80,7 @@ async def on_nav_callback(callback):
             await _safe_edit_text(
                 callback,
                 format_home_text(preferences),
-                reply_markup=_build_home_keyboard(),
+                reply_markup=_build_home_keyboard(preferences),
             )
         elif action == "status":
             preferences = await get_user_preferences(session, callback.message.chat.id)
@@ -87,7 +88,7 @@ async def on_nav_callback(callback):
             await _safe_edit_text(
                 callback,
                 format_status_text(preferences),
-                reply_markup=_build_status_keyboard(),
+                reply_markup=_build_status_keyboard(preferences),
             )
         elif action == "settings":
             preferences = await get_user_preferences(session, callback.message.chat.id)
@@ -97,6 +98,21 @@ async def on_nav_callback(callback):
                 format_preferences_text(preferences),
                 reply_markup=_build_settings_keyboard(),
             )
+        elif action == "toggle_mute":
+            preferences = await toggle_mute(session, callback.message.chat.id)
+            await clear_ui_state(session, callback.message.chat.id)
+            muted = preferences.get("muted", False)
+            toast = "⏸ Alerts paused" if muted else "▶️ Alerts resumed"
+            await _safe_edit_text(
+                callback,
+                format_home_text(preferences),
+                reply_markup=_build_home_keyboard(preferences),
+            )
+            try:
+                await callback.answer(toast, show_alert=False)
+                return
+            except TelegramBadRequest:
+                pass
         elif action == "reset":
             preferences = await reset_user_preferences(session, callback.message.chat.id)
             await clear_ui_state(session, callback.message.chat.id)
@@ -214,9 +230,17 @@ async def _apply_setting_update(message, field_name, value):
     )
 
 
-def _build_home_keyboard():
+def _build_home_keyboard(preferences=None):
+    muted = (preferences or {}).get("muted", False)
+    toggle_text = "▶️ Resume" if muted else "⏸ Pause"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=toggle_text,
+                    callback_data="tg_nav:toggle_mute",
+                ),
+            ],
             [
                 InlineKeyboardButton(
                     text="Status",
@@ -231,9 +255,17 @@ def _build_home_keyboard():
     )
 
 
-def _build_status_keyboard():
+def _build_status_keyboard(preferences=None):
+    muted = (preferences or {}).get("muted", False)
+    toggle_text = "▶️ Resume" if muted else "⏸ Pause"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=toggle_text,
+                    callback_data="tg_nav:toggle_mute",
+                ),
+            ],
             [
                 InlineKeyboardButton(
                     text="← Back",
