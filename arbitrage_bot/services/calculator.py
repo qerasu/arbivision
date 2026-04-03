@@ -15,7 +15,6 @@ class ArbitrageCalculator:
         pf_levels = list(pf_asks)
 
         shares = 0.0
-        capital = 0.0
         cost_poly = 0.0
         cost_pf = 0.0
 
@@ -32,19 +31,15 @@ class ArbitrageCalculator:
 
             net_p_price = p_price * (1.0 + self.fee_poly)
             net_f_price = f_price * (1.0 + self.fee_pf)
-            net_sum_price = net_p_price + net_f_price
 
-            if net_sum_price >= 1.0:
+            if net_p_price + net_f_price >= 1.0:
                 break
-
-            sum_price = p_price + f_price
 
             take_size = min(p_size, f_size)
 
             shares += take_size
-            cost_poly += take_size * p_price
-            cost_pf += take_size * f_price
-            capital += take_size * sum_price
+            cost_poly += take_size * net_p_price
+            cost_pf += take_size * net_f_price
 
             poly_levels[poly_idx] = (p_price, p_size - take_size)
             pf_levels[pf_idx] = (f_price, f_size - take_size)
@@ -57,18 +52,15 @@ class ArbitrageCalculator:
         if shares == 0:
             return None
 
-        avg_price_poly = cost_poly / shares
-        avg_price_pf = cost_pf / shares
-
-        gross_profit = shares * 1.0 - capital
-
-        total_fees = cost_poly * self.fee_poly + cost_pf * self.fee_pf
-        net_profit = gross_profit - total_fees
+        capital = cost_poly + cost_pf
+        net_profit = shares - capital
 
         if net_profit <= 0:
             return None
 
-        gross_roi = gross_profit / capital if capital > 0 else 0.0
+        avg_price_poly = cost_poly / shares
+        avg_price_pf = cost_pf / shares
+        gross_profit = shares - capital
         net_roi = net_profit / capital if capital > 0 else 0.0
 
         return {
@@ -78,8 +70,8 @@ class ArbitrageCalculator:
             "avg_price_leg_2": avg_price_pf,
             "gross_profit": gross_profit,
             "net_profit": net_profit,
-            "gross_roi": gross_roi,
-            "net_roi": net_roi
+            "gross_roi": net_roi,
+            "net_roi": net_roi,
         }
 
 

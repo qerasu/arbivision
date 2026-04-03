@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections import defaultdict
 from arbitrage_bot.core.database import AsyncSessionLocal
 from arbitrage_bot.models.orm import Market, MarketPair
@@ -16,7 +17,9 @@ from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 
 log = get_logger("worker")
-_pair_empty_counts = {} # for checking if the pair is valid and has enough liquidity
+_EMPTY_COUNTS_MAX_SIZE = 1000
+# pair_hash -> (count, monotonic_timestamp)
+_pair_empty_counts = {}
 
 
 async def run_sync_loop():
@@ -66,7 +69,11 @@ async def _upsert_market_pairs(db, matcher):
 
     pf_index = matcher.build_candidate_index(pf_markets)
     matched_pairs = {}
+    pair_limit = settings.MAX_MARKET_PAIRS_PER_LOOP
+    reached_limit = False
     for poly_market in poly_markets:
+        if reached_limit:
+            break
         poly_signature = matcher.build_market_signature(poly_market)
         for pf_signature in _candidate_markets_for_poly(poly_signature, matcher, pf_index):
             pair = matcher.match_candidates(
@@ -77,10 +84,9 @@ async def _upsert_market_pairs(db, matcher):
             )
             if pair:
                 matched_pairs[pair.pair_hash] = pair
-            if settings.MAX_MARKET_PAIRS_PER_LOOP and len(matched_pairs) >= settings.MAX_MARKET_PAIRS_PER_LOOP:
+            if pair_limit and len(matched_pairs) >= pair_limit:
+                reached_limit = True
                 break
-        if settings.MAX_MARKET_PAIRS_PER_LOOP and len(matched_pairs) >= settings.MAX_MARKET_PAIRS_PER_LOOP:
-            break
 
     if not matched_pairs:
         active_stmt = select(MarketPair).where(MarketPair.status.in_(["auto_approved", "approved"]))
@@ -165,6 +171,7 @@ def _mark_stale_pairs(pairs):
     for pair in pairs:
         if pair.status in active_statuses:
             pair.status = "stale"
+            _pair_empty_counts.pop(pair.pair_hash, None)
             changed = True
 
     return changed
@@ -218,19 +225,31 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager):
 def _filter_skippable_pairs(pairs):
     active = []
     for pair in pairs:
-        count = _pair_empty_counts.get(pair.pair_hash, 0)
-        if count >= settings.EMPTY_ORDERBOOK_THRESHOLD:
+        entry = _pair_empty_counts.get(pair.pair_hash)
+        if entry and entry[0] >= settings.EMPTY_ORDERBOOK_THRESHOLD:
             continue
         active.append(pair)
     return active
 
 
 def _update_empty_counts(checked_pairs, pairs_with_data):
+    now = time.monotonic()
     for pair in checked_pairs:
         if pair.pair_hash in pairs_with_data:
             _pair_empty_counts.pop(pair.pair_hash, None)
         else:
-            _pair_empty_counts[pair.pair_hash] = _pair_empty_counts.get(pair.pair_hash, 0) + 1
+            prev = _pair_empty_counts.get(pair.pair_hash)
+            prev_count = prev[0] if prev else 0
+            _pair_empty_counts[pair.pair_hash] = (prev_count + 1, now)
+
+    # evict oldest entries when dict grows too large
+    if len(_pair_empty_counts) > _EMPTY_COUNTS_MAX_SIZE:
+        sorted_keys = sorted(
+            _pair_empty_counts,
+            key=lambda k: _pair_empty_counts[k][1],
+        )
+        for key in sorted_keys[:len(sorted_keys) // 2]:
+            _pair_empty_counts.pop(key, None)
 
 
 def _candidate_markets_for_poly(poly_signature, matcher, pf_index):

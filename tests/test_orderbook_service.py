@@ -91,7 +91,7 @@ class OrderbookServiceTests(unittest.IsolatedAsyncioTestCase):
             {
                 "A_yes_B_no": {
                     "poly": [(0.4, 2.0)],
-                    "pf": [(0.30000000000000004, 6.0), (0.4, 7.0)],
+                    "pf": [(0.30000000000000004, 4.800000000000001), (0.4, 5.6000000000000005)],
                 },
                 "A_no_B_yes": {
                     "poly": [(0.6, 3.0)],

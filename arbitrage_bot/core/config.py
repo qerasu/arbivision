@@ -60,8 +60,8 @@ class Settings:
     PREDICT_FUN_ENABLED = _get_bool_setting("PREDICT_FUN_ENABLED", True)
     PREDICT_FUN_API_KEY = os.getenv("PREDICT_FUN_API_KEY", "")
 
-    FEE_POLYMARKET_BPS = _get_float_setting("FEE_POLYMARKET_BPS", 100.0)
-    FEE_PREDICT_FUN_BPS = _get_float_setting("FEE_PREDICT_FUN_BPS", 200.0)
+    FEE_POLYMARKET_BPS = _get_float_setting("FEE_POLYMARKET_BPS", 0.0) # 180.0 max
+    FEE_PREDICT_FUN_BPS = _get_float_setting("FEE_PREDICT_FUN_BPS", 0.0) # 200.0 max
     ALERTS_DEDUPE_TTL_SECONDS = _get_int_setting("ALERTS_DEDUPE_TTL_SECONDS", 600)
     ALERTS_DELTA_PROFIT_THRESHOLD_USD = _get_float_setting("ALERTS_DELTA_PROFIT_THRESHOLD_USD", 3.0)
     ALERTS_DELTA_ROI_THRESHOLD_PERCENT = _get_float_setting("ALERTS_DELTA_ROI_THRESHOLD_PERCENT", 0.5)

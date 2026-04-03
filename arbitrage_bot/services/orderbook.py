@@ -150,8 +150,10 @@ class OrderbookService:
         payload = orderbook_payload.get("data", orderbook_payload) if isinstance(orderbook_payload, dict) else {}
         yes_asks = self._extract_asks(payload)
         yes_bids = self._extract_bids(payload)
+        # conservative discount: yes_bid_size is a proxy for no_ask_size,
+        # real available liquidity on the no side may be lower
         no_asks = sorted(
-            [(max(0.0, 1.0 - price), size) for price, size in yes_bids if 0.0 <= price <= 1.0 and size > 0],
+            [(max(0.0, 1.0 - price), size * 0.8) for price, size in yes_bids if 0.0 <= price <= 1.0 and size > 0],
             key=lambda item: item[0],
         )
         return yes_asks, no_asks

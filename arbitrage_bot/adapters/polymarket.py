@@ -13,6 +13,7 @@ class PolymarketAdapter(BaseAdapter):
     max_pages = 100
     fallback_errors = (
         httpx.ConnectError,
+        httpx.ConnectTimeout,
         httpx.ReadTimeout,
         httpx.RemoteProtocolError,
     )

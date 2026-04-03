@@ -67,9 +67,9 @@ class WorkerPairLifecycleTests(unittest.TestCase):
 
 
     def test_mark_stale_pairs_changes_only_active_statuses(self):
-        stale_pair = SimpleNamespace(status="stale")
-        approved_pair = SimpleNamespace(status="approved")
-        failed_pair = SimpleNamespace(status="failed")
+        stale_pair = SimpleNamespace(status="stale", pair_hash="h-stale")
+        approved_pair = SimpleNamespace(status="approved", pair_hash="h-approved")
+        failed_pair = SimpleNamespace(status="failed", pair_hash="h-failed")
 
         changed = _mark_stale_pairs([stale_pair, approved_pair, failed_pair])
 

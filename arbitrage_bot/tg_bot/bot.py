@@ -247,20 +247,10 @@ async def _drain_queued_alerts(bot):
                         await _send_alert(bot, alert, opportunity, pair, market_a, market_b_row)
                     except Exception as exc:
                         if alert.status == "retry":
-                            # second attempt failed — give up
                             alert.status = "failed"
-                            alert.error_message = str(exc)
                         else:
-                            # first attempt failed — schedule retry
                             alert.status = "retry"
-                            alert.error_message = str(exc)
-                            await session.commit()
-                            await asyncio.sleep(3)
-                            try:
-                                await _send_alert(bot, alert, opportunity, pair, market_a, market_b_row)
-                            except Exception as retry_exc:
-                                alert.status = "failed"
-                                alert.error_message = str(retry_exc)
+                        alert.error_message = str(exc)
                     await session.commit()
         except asyncio.CancelledError:
             raise

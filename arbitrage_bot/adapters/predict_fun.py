@@ -13,6 +13,7 @@ class PredictFunAdapter(BaseAdapter):
     recent_start_id = None
     fallback_errors = (
         httpx.ConnectError,
+        httpx.ConnectTimeout,
         httpx.ReadTimeout,
         httpx.RemoteProtocolError,
     )
