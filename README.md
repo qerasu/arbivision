@@ -26,6 +26,7 @@ Arbivision — арбитражный бот, который мониторит 
 - [API](#api)
 - [ORM-модели](#orm-модели)
 - [Конфигурация](#конфигурация)
+- [Тесты](#тесты)
 
 ---
 
@@ -605,3 +606,65 @@ FEE_POLYMARKET_BPS=100.0
 FEE_PREDICT_FUN_BPS=200.0
 ALERTS_DEDUPE_TTL_SECONDS=600
 ```
+
+---
+
+## Тесты
+
+Тесты запускаются через скрипт `run_tests.py`, который использует `unittest discover` по директории `tests/`.
+
+### Юнит-тесты (запуск без зависимостей)
+
+```bash
+python3 run_tests.py
+```
+
+По умолчанию запускает все 86 юнит-тестов. Live-тесты пропускаются.
+
+Опции:
+- `-v` / `--verbose` — подробный вывод с именами тестов
+- `--no-buffer` — отключить буферизацию stdout
+
+### Live-тесты (требуют работающего сервера)
+
+Запускаются только при наличии переменных окружения:
+
+```bash
+# smoke-тесты FastAPI эндпоинтов (health, status, admin API)
+RUN_LIVE_TESTS=1 python3 run_tests.py
+
+# дополнительно — прямое подключение к PostgreSQL
+RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python3 run_tests.py
+```
+
+Для live-тестов необходим запущенный сервер (`python3 start.py`) и заполненный `ADMIN_API_TOKEN` в `.env`.
+
+### Ручной admin smoke-тест
+
+Файл `tests/test_admin_api.py` — отдельный скрипт (не unittest), который вызывается напрямую и выводит сводку состояния бота в терминал:
+
+```bash
+python3 tests/test_admin_api.py                    # краткий вывод
+python3 tests/test_admin_api.py --verbose          # полный JSON-ответ каждого эндпоинта
+python3 tests/test_admin_api.py --market-id 42     # отладка матчера для конкретного рынка
+python3 tests/test_admin_api.py --status approved  # показать только вручную одобренные пары
+```
+
+### Состав тестов
+
+Файл | Описание
+-----|---------
+`test_adapters.py` | HTTP-запросы адаптеров Polymarket и Predict.Fun (mock)
+`test_alert_manager.py` | Фильтрация, дедупликация и сохранение алертов
+`test_api_internal.py` | FastAPI эндпоинты (`/health`, `/status`, `/admin/*`) через TestClient
+`test_calculator.py` | Greedy-алгоритм расчёта арбитража и учёт комиссий
+`test_ingestion_outcomes.py` | Нормализация outcomes при impорте рынков
+`test_normalizer_and_matcher.py` | NormalizerService и MatcherService: токенизация, scoring, semantic diff guard
+`test_orderbook_service.py` | Построение directional books и парсинг уровней ордербука
+`test_system_notifier.py` | Дедупликация системных ошибок и форматирование сообщений
+`test_tg_bot_commands.py` | Форматирование алертов, команды бота, UI state machine
+`test_tg_preferences.py` | Фильтры preferences, парсинг дат закрытия рынков
+`test_worker_orderbook.py` | Извлечение уровней цен из различных форматов ордербуков
+`test_worker_pairs.py` | Reconcile пар: создание, обновление, stale-маркировка
+`test_live_api.py` | Smoke-тесты FastAPI (требуют `RUN_LIVE_TESTS=1`)
+`test_live_db.py` | Smoke-тесты подключения к PostgreSQL (требуют `RUN_LIVE_DB_TESTS=1`)
