@@ -2,7 +2,7 @@ from unittest.mock import patch
 import unittest
 from types import SimpleNamespace
 
-from arbitrage_bot.api.internal import debug_matcher, get_pairs, status_check
+from arbitrage_bot.api.internal import debug_matcher, get_pairs, get_runtime_metrics, status_check
 
 
 class FakeScalars:
@@ -71,10 +71,42 @@ class InternalApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["opportunity_counts"]["total"], 3)
         self.assertEqual(payload["opportunity_counts"]["queued_fanout"], 1)
         self.assertEqual(payload["alert_counts"]["queued"], 2)
+        self.assertNotIn("runtime_metrics", payload)
 
 
     def test_get_pairs_defaults_to_auto_approved_status(self):
         self.assertEqual(get_pairs.__defaults__[0], "auto_approved")
+
+
+    async def test_get_runtime_metrics_returns_snapshot_without_reset(self):
+        with patch(
+            "arbitrage_bot.api.internal.snapshot_counters",
+            return_value={"telegram.alert_sent": 7},
+        ), patch(
+            "arbitrage_bot.api.internal.snapshot_and_reset_counters",
+        ) as snapshot_and_reset_mock:
+            payload = await get_runtime_metrics()
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["metrics"]["telegram.alert_sent"], 7)
+        self.assertFalse(payload["reset_applied"])
+        snapshot_and_reset_mock.assert_not_called()
+
+
+    async def test_get_runtime_metrics_can_reset_after_snapshot(self):
+        with patch(
+            "arbitrage_bot.api.internal.snapshot_and_reset_counters",
+            return_value={"fanout.alert_created": 4},
+        ) as snapshot_and_reset_mock, patch(
+            "arbitrage_bot.api.internal.snapshot_counters",
+        ) as snapshot_mock:
+            payload = await get_runtime_metrics(reset=True)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["metrics"]["fanout.alert_created"], 4)
+        self.assertTrue(payload["reset_applied"])
+        snapshot_and_reset_mock.assert_called_once()
+        snapshot_mock.assert_not_called()
 
 
     async def test_debug_matcher_returns_not_found_for_unknown_market(self):

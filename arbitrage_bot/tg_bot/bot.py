@@ -1,6 +1,10 @@
 import asyncio
 import html
 import math
+from urllib.parse import parse_qsl
+from urllib.parse import urlencode
+from urllib.parse import urlparse
+from urllib.parse import urlunparse
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -8,17 +12,22 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 from aiogram.types import LinkPreviewOptions
 from aiogram.types import MenuButtonCommands
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import aliased
 
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.database import AsyncSessionLocal
 from arbitrage_bot.core.logging import get_logger
-from arbitrage_bot.models.orm import Alert, ArbOpportunity, Market, MarketPair
+from arbitrage_bot.core.observability import incr_counter
+from arbitrage_bot.models.orm import Alert, ArbOpportunity, Market, MarketPair, UserPreference
+from arbitrage_bot.services.calculator import ArbitrageCalculator
+from arbitrage_bot.services.orderbook import OrderbookService
 from arbitrage_bot.services.system_notifier import format_error_details, send_system_error_notification
 from arbitrage_bot.tg_bot import handlers
+from arbitrage_bot.tg_bot.preferences import default_preferences
 from arbitrage_bot.tg_bot.preferences import extract_pair_close_datetime
+from arbitrage_bot.tg_bot.preferences import filter_reason_for_preferences
 
 log = get_logger("tg_bot")
 _shared_dp = None
@@ -44,8 +53,6 @@ def setup_bot():
 def _build_bot_commands():
     return [
         BotCommand(command="start", description="open menu"),
-        BotCommand(command="status", description="show current bot status"),
-        BotCommand(command="settings", description="open your alert settings"),
     ]
 
 
@@ -145,22 +152,39 @@ def _build_market_url(market):
     for key in ("url", "marketUrl", "market_url", "shareUrl", "share_url"):
         value = raw_payload.get(key)
         if value:
-            return str(value)
+            return _append_referral_params(str(value), platform)
 
     # slug is already a full url in some cases
     if slug.startswith("http://") or slug.startswith("https://"):
-        return slug
+        return _append_referral_params(slug, platform)
 
     if platform == "polymarket" and slug:
-        return f"https://polymarket.com/market/{slug}"
+        return _append_referral_params(f"https://polymarket.com/market/{slug}", platform)
 
     if platform == "predict_fun":
         if slug:
-            return f"https://predict.fun/market/{slug}"
+            return _append_referral_params(f"https://predict.fun/market/{slug}", platform)
         if getattr(market, "platform_market_id", None):
-            return f"https://predict.fun/market/{market.platform_market_id}"
+            return _append_referral_params(f"https://predict.fun/market/{market.platform_market_id}", platform)
 
     return None
+
+
+def _append_referral_params(url, platform):
+    if not url:
+        return url
+
+    parsed = urlparse(url)
+    query_params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+
+    if platform == "predict_fun":
+        query_params["ref"] = "077A2"
+    elif platform == "polymarket":
+        query_params["r"] = "qerasuu"
+    else:
+        return url
+
+    return urlunparse(parsed._replace(query=urlencode(query_params)))
 
 
 def _format_money(value):
@@ -224,17 +248,7 @@ async def _send_alert(bot, alert, opportunity, pair, market_a, market_b_row):
     alert.next_retry_at = None
     alert.sent_at = datetime.now(timezone.utc)
     alert.error_message = None
-
-
-def _should_attempt_delivery(alert, now):
-    next_retry_at = getattr(alert, "next_retry_at", None)
-    if next_retry_at is None:
-        return True
-
-    if next_retry_at.tzinfo is None:
-        next_retry_at = next_retry_at.replace(tzinfo=timezone.utc)
-
-    return next_retry_at <= now
+    incr_counter("telegram.alert_sent")
 
 
 def _mark_alert_retry(alert, exc, now):
@@ -245,51 +259,180 @@ def _mark_alert_retry(alert, exc, now):
     if attempt_count >= settings.TELEGRAM_DELIVERY_MAX_ATTEMPTS:
         alert.status = "failed"
         alert.next_retry_at = None
+        incr_counter("telegram.alert_failed")
         return
 
     alert.status = "retry"
     alert.next_retry_at = now + timedelta(seconds=settings.TELEGRAM_DELIVERY_RETRY_SECONDS)
+    incr_counter("telegram.alert_retry")
+
+
+def _apply_calc_result_to_opportunity(opportunity, calc_result):
+    opportunity.price_leg_1 = calc_result["avg_price_leg_1"]
+    opportunity.price_leg_2 = calc_result["avg_price_leg_2"]
+    opportunity.avg_price_leg_1 = calc_result["avg_price_leg_1"]
+    opportunity.avg_price_leg_2 = calc_result["avg_price_leg_2"]
+    opportunity.shares = calc_result["shares"]
+    opportunity.capital_required = calc_result["capital_required"]
+    opportunity.gross_profit = calc_result["gross_profit"]
+    opportunity.net_profit = calc_result["net_profit"]
+    opportunity.gross_roi = calc_result["gross_roi"]
+    opportunity.net_roi = calc_result["net_roi"]
+    opportunity.calculation_json = calc_result
+
+
+async def _revalidate_alert_opportunity(session, opportunity, pair, orderbook_service, calculator):
+    orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs([pair], session)
+    if not orderbooks_data:
+        return False
+
+    current_item = orderbooks_data[0]
+    calc_results = calculator.calculate_opportunities(current_item.get("directions"))
+    if not calc_results:
+        return False
+
+    current_result = next(
+        (
+            result
+            for result in calc_results
+            if result.get("direction") == opportunity.direction
+        ),
+        None,
+    )
+    if current_result is None:
+        return False
+
+    _apply_calc_result_to_opportunity(opportunity, current_result)
+    return True
+
+
+async def _claim_deliverable_alert(session, now):
+    market_b_alias = aliased(Market)
+    stmt = (
+        select(Alert, ArbOpportunity, MarketPair, Market, market_b_alias, UserPreference)
+        .join(ArbOpportunity, Alert.opportunity_id == ArbOpportunity.id)
+        .join(MarketPair, ArbOpportunity.market_pair_id == MarketPair.id)
+        .join(Market, MarketPair.market_id_a == Market.id)
+        .join(market_b_alias, MarketPair.market_id_b == market_b_alias.id)
+        .outerjoin(UserPreference, Alert.user_id == UserPreference.user_id)
+        .where(
+            Alert.status.in_(["queued", "retry"]),
+            or_(Alert.next_retry_at.is_(None), Alert.next_retry_at <= now),
+        )
+        .order_by(Alert.id)
+        .limit(1)
+        .with_for_update(skip_locked=True, of=Alert)
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    if row is None:
+        return None
+
+    alert, _, _, _, _, _ = row
+    alert.status = "processing"
+    return row
+
+
+def _build_runtime_preferences(preferences):
+    values = default_preferences()
+    if preferences is None:
+        values["muted"] = False
+        return values
+
+    values.update(
+        {
+            "min_roi_percent": preferences.min_roi_percent,
+            "max_capital_usd": preferences.max_capital_usd,
+            "max_days_to_close": preferences.max_days_to_close,
+            "muted": preferences.muted,
+        }
+    )
+    return values
+
+
+def _should_skip_alert_for_current_preferences(alert, opportunity, market_a, market_b, preferences):
+    if getattr(alert, "user_id", None) is None:
+        return False
+
+    current_preferences = _build_runtime_preferences(preferences)
+    if current_preferences.get("muted"):
+        return True
+
+    return bool(
+        filter_reason_for_preferences(
+            opportunity,
+            market_a,
+            market_b,
+            current_preferences,
+        )
+    )
 
 
 async def _drain_queued_alerts(bot):
-    market_b_alias = aliased(Market)
+    orderbook_service = OrderbookService()
+    calculator = ArbitrageCalculator()
+    try:
+        while True:
+            try:
+                async with AsyncSessionLocal() as session:
+                    for _ in range(20):
+                        now = datetime.now(timezone.utc)
+                        row = await _claim_deliverable_alert(session, now)
+                        if row is None:
+                            break
 
-    while True:
-        try:
-            async with AsyncSessionLocal() as session:
-                now = datetime.now(timezone.utc)
-                stmt = (
-                    select(Alert, ArbOpportunity, MarketPair, Market, market_b_alias)
-                    .join(ArbOpportunity, Alert.opportunity_id == ArbOpportunity.id)
-                    .join(MarketPair, ArbOpportunity.market_pair_id == MarketPair.id)
-                    .join(Market, MarketPair.market_id_a == Market.id)
-                    .join(market_b_alias, MarketPair.market_id_b == market_b_alias.id)
-                    .where(Alert.status.in_(["queued", "retry"]))
-                    .order_by(Alert.id)
-                    .limit(20)
-                )
-                result = await session.execute(stmt)
-                rows = result.all()
+                        alert, opportunity, pair, market_a, market_b_row, preferences = row
+                        if _should_skip_alert_for_current_preferences(
+                            alert,
+                            opportunity,
+                            market_a,
+                            market_b_row,
+                            preferences,
+                        ):
+                            alert.status = "cancelled"
+                            alert.next_retry_at = None
+                            alert.error_message = "filtered by updated preferences"
+                            incr_counter("telegram.alert_cancelled_preferences")
+                            await session.commit()
+                            continue
+                        try:
+                            is_still_valid = await _revalidate_alert_opportunity(
+                                session,
+                                opportunity,
+                                pair,
+                                orderbook_service,
+                                calculator,
+                            )
+                        except Exception as exc:
+                            _mark_alert_retry(alert, exc, now)
+                            incr_counter("telegram.revalidation_error")
+                            await session.commit()
+                            continue
+                        if not is_still_valid:
+                            alert.status = "cancelled"
+                            alert.next_retry_at = None
+                            alert.error_message = "opportunity is no longer available"
+                            incr_counter("telegram.alert_cancelled_revalidation")
+                            await session.commit()
+                            continue
+                        try:
+                            await _send_alert(bot, alert, opportunity, pair, market_a, market_b_row)
+                        except Exception as exc:
+                            _mark_alert_retry(alert, exc, now)
+                        await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if _is_missing_table_error(exc):
+                    log.info("waiting for database migrations")
+                    await asyncio.sleep(settings.TELEGRAM_ALERTS_POLL_SECONDS)
+                    continue
+                log.error("alert loop error", error=format_error_details(exc))
+                await send_system_error_notification("telegram", "alert loop", exc)
 
-                for alert, opportunity, pair, market_a, market_b_row in rows:
-                    if not _should_attempt_delivery(alert, now):
-                        continue
-                    try:
-                        await _send_alert(bot, alert, opportunity, pair, market_a, market_b_row)
-                    except Exception as exc:
-                        _mark_alert_retry(alert, exc, now)
-                    await session.commit()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if _is_missing_table_error(exc):
-                log.info("waiting for database migrations")
-                await asyncio.sleep(settings.TELEGRAM_ALERTS_POLL_SECONDS)
-                continue
-            log.error("alert loop error", error=format_error_details(exc))
-            await send_system_error_notification("telegram", "alert loop", exc)
-
-        await asyncio.sleep(settings.TELEGRAM_ALERTS_POLL_SECONDS)
+            await asyncio.sleep(settings.TELEGRAM_ALERTS_POLL_SECONDS)
+    finally:
+        await orderbook_service.close()
 
 
 async def start_polling():

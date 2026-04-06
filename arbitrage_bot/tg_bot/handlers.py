@@ -10,7 +10,6 @@ from arbitrage_bot.tg_bot.preferences import ensure_telegram_user
 from arbitrage_bot.tg_bot.preferences import format_home_text
 from arbitrage_bot.tg_bot.preferences import format_preferences_text
 from arbitrage_bot.tg_bot.preferences import format_setting_prompt
-from arbitrage_bot.tg_bot.preferences import format_status_text
 from arbitrage_bot.tg_bot.preferences import get_ui_state
 from arbitrage_bot.tg_bot.preferences import get_user_preferences
 from arbitrage_bot.tg_bot.preferences import reset_user_preferences
@@ -22,7 +21,9 @@ router = Router()
 
 _SETTINGS_FIELD_ALIASES = {
     "roi": "min_roi_percent",
+    "minvolume": "min_capital_usd",
     "volume": "max_capital_usd",
+    "profit": "min_profit_usd",
     "expires": "max_days_to_close",
 }
 
@@ -44,30 +45,6 @@ async def cmd_start(message):
     )
 
 
-@router.message(Command("status"))
-async def cmd_status(message):
-    async with AsyncSessionLocal() as session:
-        preferences = await get_user_preferences(session, message.chat.id)
-        await clear_ui_state(session, message.chat.id)
-
-    await message.answer(
-        format_status_text(preferences),
-        reply_markup=_build_status_keyboard(preferences),
-    )
-
-
-@router.message(Command("settings"))
-async def cmd_settings(message):
-    async with AsyncSessionLocal() as session:
-        preferences = await get_user_preferences(session, message.chat.id)
-        await clear_ui_state(session, message.chat.id)
-
-    await message.answer(
-        format_preferences_text(preferences),
-        reply_markup=_build_settings_keyboard(),
-    )
-
-
 
 @router.callback_query(lambda callback: callback.data and callback.data.startswith("tg_nav:"))
 async def on_nav_callback(callback):
@@ -81,14 +58,6 @@ async def on_nav_callback(callback):
                 callback,
                 format_home_text(preferences),
                 reply_markup=_build_home_keyboard(preferences),
-            )
-        elif action == "status":
-            preferences = await get_user_preferences(session, callback.message.chat.id)
-            await clear_ui_state(session, callback.message.chat.id)
-            await _safe_edit_text(
-                callback,
-                format_status_text(preferences),
-                reply_markup=_build_status_keyboard(preferences),
             )
         elif action == "settings":
             preferences = await get_user_preferences(session, callback.message.chat.id)
@@ -151,19 +120,6 @@ async def on_edit_callback(callback):
     await _safe_answer_callback(callback)
 
 
-@router.message(Command("set"))
-async def cmd_set(message):
-    command_text = (message.text or "").strip()
-
-    try:
-        field_name, value = _parse_set_command(command_text)
-    except ValueError as exc:
-        await message.answer(str(exc))
-        return
-
-    await _apply_setting_update(message, field_name, value)
-
-
 @router.message()
 async def on_plain_text_setting(message):
     text = (message.text or "").strip()
@@ -219,6 +175,7 @@ async def _apply_setting_update(message, field_name, value):
                 text=text,
                 reply_markup=_build_settings_keyboard(),
             )
+            await _safe_delete_message(message)
             return
         except TelegramBadRequest as exc:
             if "message is not modified" in str(exc).lower():
@@ -228,6 +185,7 @@ async def _apply_setting_update(message, field_name, value):
         text,
         reply_markup=_build_settings_keyboard(),
     )
+    await _safe_delete_message(message)
 
 
 def _build_home_keyboard(preferences=None):
@@ -243,33 +201,8 @@ def _build_home_keyboard(preferences=None):
             ],
             [
                 InlineKeyboardButton(
-                    text="Status",
-                    callback_data="tg_nav:status",
-                ),
-                InlineKeyboardButton(
                     text="Settings",
                     callback_data="tg_nav:settings",
-                ),
-            ]
-        ]
-    )
-
-
-def _build_status_keyboard(preferences=None):
-    muted = (preferences or {}).get("muted", False)
-    toggle_text = "▶️ Resume" if muted else "⏸ Pause"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=toggle_text,
-                    callback_data="tg_nav:toggle_mute",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="← Back",
-                    callback_data="tg_nav:home",
                 ),
             ]
         ]
@@ -285,8 +218,18 @@ def _build_settings_keyboard():
                     callback_data="tg_edit:min_roi_percent",
                 ),
                 InlineKeyboardButton(
+                    text="→ Min volume",
+                    callback_data="tg_edit:min_capital_usd",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     text="→ Max volume",
                     callback_data="tg_edit:max_capital_usd",
+                ),
+                InlineKeyboardButton(
+                    text="→ Min profit",
+                    callback_data="tg_edit:min_profit_usd",
                 ),
             ],
             [
@@ -317,10 +260,6 @@ def _build_prompt_keyboard():
                     text="← Back",
                     callback_data="tg_nav:settings",
                 ),
-                InlineKeyboardButton(
-                    text="✕ Cancel",
-                    callback_data="tg_nav:home",
-                ),
             ]
         ]
     )
@@ -332,9 +271,13 @@ def _parse_set_command(command_text):
         raise ValueError(
             "Use one of these commands:\n"
             "/set roi 1.5\n"
+            "/set minvolume 50\n"
             "/set volume 500\n"
+            "/set profit 10\n"
             "/set expires 30\n"
+            "/set minvolume off\n"
             "/set volume off\n"
+            "/set profit off\n"
             "/set expires off\n"
             "/reset"
         )
@@ -342,7 +285,7 @@ def _parse_set_command(command_text):
     _, raw_key, raw_value = parts
     field_name = _SETTINGS_FIELD_ALIASES.get(raw_key.lower())
     if field_name is None:
-        raise ValueError("Unknown setting. Use: roi, volume, expires.")
+        raise ValueError("Unknown setting. Use: roi, minvolume, volume, profit, expires.")
 
     value = _parse_setting_value(field_name, raw_value)
     return field_name, value
@@ -362,13 +305,13 @@ def _parse_setting_value(field_name, raw_value):
             raise ValueError("ROI must be zero or greater.")
         return parsed
 
-    if field_name == "max_capital_usd":
+    if field_name in {"min_capital_usd", "max_capital_usd", "min_profit_usd"}:
         try:
             parsed = float(value)
         except (ValueError, TypeError):
-            raise ValueError("Enter a number, e.g. 500")
+            raise ValueError("Enter a number, e.g. 50")
         if parsed <= 0:
-            raise ValueError("Volume must be greater than zero.")
+            raise ValueError("Value must be greater than zero.")
         return parsed
 
     if field_name == "max_days_to_close":
@@ -394,6 +337,13 @@ async def _safe_edit_text(callback, text, reply_markup):
             raise
 
 
+async def _safe_delete_message(message):
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        return
+
+
 async def _safe_answer_callback(callback):
     try:
         await callback.answer()
@@ -405,7 +355,9 @@ async def _safe_answer_callback(callback):
 
 _SETTINGS_SUCCESS_LABELS = {
     "min_roi_percent": "Min ROI",
+    "min_capital_usd": "Min volume",
     "max_capital_usd": "Max volume",
+    "min_profit_usd": "Min profit",
     "max_days_to_close": "Max market end",
 }
 
@@ -417,7 +369,7 @@ def _format_success_value(field_name, value):
     if field_name == "min_roi_percent":
         return f"{float(value):.2f}%"
 
-    if field_name == "max_capital_usd":
+    if field_name in {"min_capital_usd", "max_capital_usd", "min_profit_usd"}:
         return f"${float(value):.0f}"
 
     if field_name == "max_days_to_close":

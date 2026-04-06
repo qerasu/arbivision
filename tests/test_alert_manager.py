@@ -243,6 +243,30 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(redis.data, {})
 
 
+    async def test_process_opportunity_continues_when_redis_is_unavailable(self):
+        db = FakeDbSession()
+        manager = AlertManager(db)
+        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
+        market_a, market_b = self._build_markets()
+        calc_result = {
+            "direction": "A_no_B_yes",
+            "avg_price_leg_1": 0.40,
+            "avg_price_leg_2": 0.50,
+            "shares": 10.0,
+            "capital_required": 9.0,
+            "gross_profit": 1.0,
+            "net_profit": 7.5,
+            "gross_roi": 0.11,
+            "net_roi": 0.12,
+        }
+
+        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=None):
+            opportunity = await manager.process_opportunity(pair, calc_result, market_a=market_a, market_b=market_b)
+
+        self.assertEqual(opportunity.fanout_status, "queued")
+        self.assertEqual(db.commit_calls, 1)
+
+
     async def test_persists_opportunity_even_when_global_max_capital_would_block_fanout(self):
         db = FakeDbSession()
         db.global_preferences = OrmSettings(

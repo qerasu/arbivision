@@ -1,19 +1,30 @@
 import asyncio
+import time
+
+import httpx
 from arbitrage_bot.adapters.polymarket import PolymarketAdapter
 from arbitrage_bot.adapters.predict_fun import PredictFunAdapter
+from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.logging import get_logger
+from arbitrage_bot.core.observability import incr_counter
 from arbitrage_bot.models.orm import Market
 from arbitrage_bot.services.system_notifier import format_compact_error
 from sqlalchemy.future import select
 
 log = get_logger("orderbook")
+_CACHE_MISS = object()
+_predict_fun_orderbook_cache = {}
+_polymarket_book_cache = {}
 
 
 class OrderbookService:
     def __init__(self):
         self.polymarket = PolymarketAdapter()
         self.predict_fun = PredictFunAdapter()
-        self._pair_fetch_concurrency = 4
+        self._pair_fetch_concurrency = settings.ORDERBOOK_PREDICT_FUN_CONCURRENCY
+        self._cache_ttl_seconds = settings.ORDERBOOK_CACHE_TTL_SECONDS
+        self._cache_max_items = settings.ORDERBOOK_CACHE_MAX_ITEMS
+        self._polymarket_batch_size = settings.ORDERBOOK_POLYMARKET_BATCH_SIZE
 
 
     async def close(self):
@@ -39,23 +50,9 @@ class OrderbookService:
                     "platform_market_id": platform_market_id,
                 }
 
-        semaphore = asyncio.Semaphore(self._pair_fetch_concurrency)
-        tasks = [
-            self._fetch_pair_orderbooks(
-                pair,
-                market_id_map,
-                semaphore,
-            )
-            for pair in market_pairs
-        ]
-        results = await asyncio.gather(*tasks)
-        return [item for item in results if item is not None]
-
-
-    async def _fetch_pair_orderbooks(self, pair, market_id_map, semaphore):
-        async with semaphore:
+        prepared_pairs = []
+        for pair in market_pairs:
             poly_platform_id, pf_platform_id = self._resolve_platform_market_ids(pair, market_id_map)
-
             if not poly_platform_id or not pf_platform_id:
                 log.warning(
                     "missing platform market id",
@@ -63,35 +60,173 @@ class OrderbookService:
                     poly_id=poly_platform_id or "missing",
                     pf_id=pf_platform_id or "missing",
                 )
-                return None
+                incr_counter("orderbook.missing_platform_market_id")
+                continue
 
-            try:
-                pf_ob = await self.predict_fun.fetch_orderbook(pf_platform_id)
-            except Exception as exc:
-                log.warning(
-                    "orderbook fetch failed",
-                    pair_id=pair.id,
-                    source="predict.fun",
-                    error=format_compact_error(exc),
-                )
-                return None
+            prepared_pairs.append(
+                {
+                    "pair": pair,
+                    "poly_market_id": poly_platform_id,
+                    "pf_market_id": pf_platform_id,
+                }
+            )
 
-            directions = await self._build_direction_books(pair, pf_ob)
+        if not prepared_pairs:
+            return []
+
+        pf_orderbooks = await self._fetch_predict_fun_orderbooks(prepared_pairs)
+        prepared_pairs = [
+            item
+            for item in prepared_pairs
+            if pf_orderbooks.get(item["pf_market_id"]) is not None
+        ]
+        if not prepared_pairs:
+            return []
+
+        polymarket_books = await self._fetch_polymarket_books(prepared_pairs)
+        results = []
+
+        for item in prepared_pairs:
+            pair = item["pair"]
+            pf_market_id = item["pf_market_id"]
+            pf_ob = pf_orderbooks.get(pf_market_id)
+            if pf_ob is None:
+                continue
+
+            directions = self._build_direction_books(
+                pair,
+                pf_ob,
+                polymarket_books,
+            )
             if not directions:
-                log.info(
+                log.debug(
                     "directional books unavailable",
                     pair_id=pair.id,
                 )
-                return None
+                incr_counter("orderbook.directional_books_unavailable")
+                continue
 
-            return {
-                "pair": pair,
-                "poly": None,
-                "pf": pf_ob,
-                "poly_market_id": poly_platform_id,
-                "pf_market_id": pf_platform_id,
-                "directions": directions,
+            results.append(
+                {
+                    "pair": pair,
+                    "poly": None,
+                    "pf": pf_ob,
+                    "poly_market_id": item["poly_market_id"],
+                    "pf_market_id": pf_market_id,
+                    "directions": directions,
+                }
+            )
+
+        return results
+
+
+    async def _fetch_predict_fun_orderbooks(self, prepared_pairs):
+        unique_market_ids = {
+            item["pf_market_id"]
+            for item in prepared_pairs
+            if item.get("pf_market_id")
+        }
+        if not unique_market_ids:
+            return {}
+
+        semaphore = asyncio.Semaphore(self._pair_fetch_concurrency)
+        tasks = [
+            self._fetch_single_predict_fun_orderbook(market_id, semaphore)
+            for market_id in sorted(unique_market_ids)
+        ]
+        results = await asyncio.gather(*tasks)
+        orderbooks = {}
+
+        for market_id, payload in results:
+            if payload is not None:
+                orderbooks[market_id] = payload
+
+        return orderbooks
+
+
+    async def _fetch_single_predict_fun_orderbook(self, market_id, semaphore):
+        cached_value = self._get_cache_value(_predict_fun_orderbook_cache, market_id)
+        if cached_value is _CACHE_MISS:
+            return market_id, None
+        if cached_value is not None:
+            return market_id, cached_value
+
+        async with semaphore:
+            cached_value = self._get_cache_value(_predict_fun_orderbook_cache, market_id)
+            if cached_value is _CACHE_MISS:
+                return market_id, None
+            if cached_value is not None:
+                return market_id, cached_value
+
+            try:
+                payload = await self.predict_fun.fetch_orderbook(market_id)
+            except Exception as exc:
+                if self._is_missing_predict_fun_market(exc):
+                    log.debug(
+                        "predict.fun market orderbook not found",
+                        source="predict.fun",
+                        market_id=market_id,
+                    )
+                    incr_counter("orderbook.predict_fun_not_found")
+                    self._set_cache_value(_predict_fun_orderbook_cache, market_id, _CACHE_MISS)
+                else:
+                    log.warning(
+                        "orderbook fetch failed",
+                        source="predict.fun",
+                        market_id=market_id,
+                        error=format_compact_error(exc),
+                    )
+                    incr_counter("orderbook.predict_fun_fetch_failed")
+                return market_id, None
+
+            self._set_cache_value(_predict_fun_orderbook_cache, market_id, payload)
+            return market_id, payload
+
+
+    async def _fetch_polymarket_books(self, prepared_pairs):
+        token_ids = set()
+        for item in prepared_pairs:
+            pair_mapping = getattr(item["pair"], "outcome_mapping_json", None) or {}
+            market_a = pair_mapping.get("market_a") or {}
+            poly_yes_id = market_a.get("yes")
+            poly_no_id = market_a.get("no")
+            if poly_yes_id:
+                token_ids.add(str(poly_yes_id))
+            if poly_no_id:
+                token_ids.add(str(poly_no_id))
+
+        if not token_ids:
+            return {}
+
+        missing_token_ids = []
+        books = {}
+        for token_id in sorted(token_ids):
+            cached_value = self._get_cache_value(_polymarket_book_cache, token_id)
+            if cached_value is _CACHE_MISS:
+                continue
+            if cached_value is None:
+                missing_token_ids.append(token_id)
+                continue
+            books[token_id] = cached_value
+
+        for chunk in self._chunked(missing_token_ids, self._polymarket_batch_size):
+            fetched_books = await self.polymarket.fetch_books(chunk)
+            fetched_by_token_id = {
+                str(item.get("asset_id")): item
+                for item in fetched_books
+                if isinstance(item, dict) and item.get("asset_id") is not None
             }
+
+            for token_id in chunk:
+                book = fetched_by_token_id.get(token_id)
+                if book is None:
+                    incr_counter("orderbook.polymarket_book_missing")
+                    self._set_cache_value(_polymarket_book_cache, token_id, _CACHE_MISS)
+                    continue
+                self._set_cache_value(_polymarket_book_cache, token_id, book)
+                books[token_id] = book
+
+        return books
 
 
     def _resolve_platform_market_ids(self, pair, market_id_map):
@@ -111,7 +246,15 @@ class OrderbookService:
         return platform_ids.get("polymarket"), platform_ids.get("predict_fun")
 
 
-    async def _build_direction_books(self, pair, pf_orderbook_payload):
+    def _is_missing_predict_fun_market(self, exc):
+        if isinstance(exc, httpx.HTTPStatusError):
+            response = getattr(exc, "response", None)
+            return getattr(response, "status_code", None) == 404
+
+        return "404" in str(exc)
+
+
+    def _build_direction_books(self, pair, pf_orderbook_payload, polymarket_books):
         mapping = getattr(pair, "outcome_mapping_json", None) or {}
         market_a = mapping.get("market_a") or {}
 
@@ -122,14 +265,8 @@ class OrderbookService:
         if not poly_yes_id or not poly_no_id or not pf_yes_asks or not pf_no_asks:
             return None
 
-        poly_books = await self.polymarket.fetch_books([poly_yes_id, poly_no_id])
-        poly_book_map = {
-            str(item.get("asset_id")): item
-            for item in poly_books
-            if isinstance(item, dict) and item.get("asset_id") is not None
-        }
-        poly_yes_asks = self._extract_asks(poly_book_map.get(str(poly_yes_id)))
-        poly_no_asks = self._extract_asks(poly_book_map.get(str(poly_no_id)))
+        poly_yes_asks = self._extract_asks(polymarket_books.get(str(poly_yes_id)))
+        poly_no_asks = self._extract_asks(polymarket_books.get(str(poly_no_id)))
         
         if not poly_yes_asks or not poly_no_asks:
             return None
@@ -150,13 +287,57 @@ class OrderbookService:
         payload = orderbook_payload.get("data", orderbook_payload) if isinstance(orderbook_payload, dict) else {}
         yes_asks = self._extract_asks(payload)
         yes_bids = self._extract_bids(payload)
-        # conservative discount: yes_bid_size is a proxy for no_ask_size,
-        # real available liquidity on the no side may be lower
         no_asks = sorted(
-            [(max(0.0, 1.0 - price), size * 0.8) for price, size in yes_bids if 0.0 <= price <= 1.0 and size > 0],
+            [(max(0.0, 1.0 - price), size) for price, size in yes_bids if 0.0 <= price <= 1.0 and size > 0],
             key=lambda item: item[0],
         )
         return yes_asks, no_asks
+
+
+    def _chunked(self, values, chunk_size):
+        for index in range(0, len(values), chunk_size):
+            yield values[index:index + chunk_size]
+
+
+    def _get_cache_value(self, cache, key):
+        entry = cache.get(key)
+        if not entry:
+            return None
+
+        value, expires_at = entry
+        if expires_at <= time.monotonic():
+            cache.pop(key, None)
+            return None
+
+        return value
+
+
+    def _set_cache_value(self, cache, key, value):
+        cache[key] = (
+            value,
+            time.monotonic() + self._cache_ttl_seconds,
+        )
+        self._trim_cache(cache)
+
+
+    def _trim_cache(self, cache):
+        if len(cache) <= self._cache_max_items:
+            return
+
+        expired_keys = [
+            key
+            for key, (_, expires_at) in cache.items()
+            if expires_at <= time.monotonic()
+        ]
+        for key in expired_keys:
+            cache.pop(key, None)
+
+        if len(cache) <= self._cache_max_items:
+            return
+
+        keys_by_expiry = sorted(cache, key=lambda item_key: cache[item_key][1])
+        for key in keys_by_expiry[: max(1, len(keys_by_expiry) // 4)]:
+            cache.pop(key, None)
 
 
     def _extract_bids(self, orderbook_data):

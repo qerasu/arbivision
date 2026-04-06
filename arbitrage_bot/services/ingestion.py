@@ -142,8 +142,23 @@ class IngestionService:
         for index, token_id in enumerate(clob_token_ids):
             if index >= len(normalized_outcomes):
                 break
-            normalized_outcomes[index]["id"] = str(token_id)
-            normalized_outcomes[index]["clob_token_id"] = str(token_id)
+            normalized_outcome = normalized_outcomes[index]
+            clob_token_id = str(token_id)
+            normalized_outcome["clob_token_id"] = clob_token_id
+
+            has_explicit_token_id = any(
+                normalized_outcome.get(field_name)
+                for field_name in (
+                    "token_id",
+                    "asset_id",
+                    "contract_id",
+                    "on_chain_id",
+                )
+            )
+            uses_fallback_index = normalized_outcome.get("id") == str(index)
+
+            if uses_fallback_index or not has_explicit_token_id:
+                normalized_outcome["id"] = clob_token_id
 
         if tradable is None:
             tradable = bool(active) and not bool(closed)
@@ -228,6 +243,11 @@ class IngestionService:
             for chunk in self._chunked(mapped_items, 1000):
                 await self._upsert_markets(chunk)
                 await self.db.commit()
+            await self._mark_missing_markets_closed(
+                mapped_items[0]["platform"] if mapped_items else None,
+                {item["platform_market_id"] for item in mapped_items},
+            )
+            await self.db.commit()
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -311,3 +331,23 @@ class IngestionService:
         market.category = data["category"]
         market.slug = data["slug"]
         market.updated_at = datetime.now(timezone.utc)
+
+
+    async def _mark_missing_markets_closed(self, platform, seen_market_ids):
+        if not platform:
+            return
+
+        stmt = select(Market).where(
+            Market.platform == platform,
+            Market.status == "active",
+        )
+        active_markets = (await self.db.execute(stmt)).scalars().all()
+        if not active_markets:
+            return
+
+        for market in active_markets:
+            if market.platform_market_id in seen_market_ids:
+                continue
+            market.status = "closed"
+            market.tradable = False
+            market.updated_at = datetime.now(timezone.utc)

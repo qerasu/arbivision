@@ -15,6 +15,8 @@ def _python_exec():
 def main():
     env = os.environ.copy()
     env["PYTHONPYCACHEPREFIX"] = "/tmp/arbivision-pyc"
+    env["PYTHONASYNCIODEBUG"] = "0"
+    env.pop("PYTHONDEVMODE", None)
     verbose = any(arg in {"-v", "--verbose"} for arg in sys.argv[1:])
     no_buffer = any(arg == "--no-buffer" for arg in sys.argv[1:])
 

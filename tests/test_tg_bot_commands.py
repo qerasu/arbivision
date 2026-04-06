@@ -6,16 +6,20 @@ from unittest.mock import AsyncMock
 from unittest.mock import patch
 
 from aiogram.exceptions import TelegramBadRequest
+from arbitrage_bot.models.orm import UserPreference
+from arbitrage_bot.tg_bot.bot import _apply_calc_result_to_opportunity
 from arbitrage_bot.tg_bot.bot import _build_bot_commands
 from arbitrage_bot.tg_bot.bot import _format_alert_message
 from arbitrage_bot.tg_bot.bot import _is_missing_table_error
+from arbitrage_bot.tg_bot.bot import _revalidate_alert_opportunity
+from arbitrage_bot.tg_bot.bot import _should_skip_alert_for_current_preferences
 from arbitrage_bot.tg_bot.handlers import _build_home_keyboard
+from arbitrage_bot.tg_bot.handlers import _build_prompt_keyboard
 from arbitrage_bot.tg_bot.handlers import _build_settings_keyboard
-from arbitrage_bot.tg_bot.handlers import _build_status_keyboard
 from arbitrage_bot.tg_bot.handlers import _apply_setting_update
 from arbitrage_bot.tg_bot.handlers import _safe_answer_callback
+from arbitrage_bot.tg_bot.handlers import _safe_delete_message
 from arbitrage_bot.tg_bot.handlers import _safe_edit_text
-from arbitrage_bot.tg_bot.handlers import cmd_status
 
 from arbitrage_bot.tg_bot.handlers import _parse_set_command
 from arbitrage_bot.tg_bot.preferences import format_status_text
@@ -37,6 +41,20 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertEqual(value, 500.0)
 
 
+    def test_parse_set_command_for_min_volume(self):
+        field_name, value = _parse_set_command("/set minvolume 50")
+
+        self.assertEqual(field_name, "min_capital_usd")
+        self.assertEqual(value, 50.0)
+
+
+    def test_parse_set_command_for_profit(self):
+        field_name, value = _parse_set_command("/set profit 10")
+
+        self.assertEqual(field_name, "min_profit_usd")
+        self.assertEqual(value, 10.0)
+
+
     def test_parse_set_command_for_expires_off(self):
         field_name, value = _parse_set_command("/set expires off")
 
@@ -49,28 +67,21 @@ class TelegramBotCommandsTests(unittest.TestCase):
             _parse_set_command("/set")
 
 
-    def test_build_home_keyboard_contains_status_and_settings_buttons(self):
+    def test_build_home_keyboard_contains_pause_and_settings_buttons(self):
         keyboard = _build_home_keyboard()
 
         self.assertEqual(keyboard.inline_keyboard[0][0].text, "⏸ Pause")
-        self.assertEqual(keyboard.inline_keyboard[1][0].text, "Status")
-        self.assertEqual(keyboard.inline_keyboard[1][1].text, "Settings")
+        self.assertEqual(keyboard.inline_keyboard[1][0].text, "Settings")
 
 
     def test_build_settings_keyboard_contains_expected_actions(self):
         keyboard = _build_settings_keyboard()
 
         self.assertEqual(keyboard.inline_keyboard[0][0].text, "→ Min ROI")
-        self.assertEqual(keyboard.inline_keyboard[0][1].text, "→ Max volume")
-        self.assertEqual(keyboard.inline_keyboard[1][0].text, "→ Max market end")
-
-
-    def test_build_status_keyboard_contains_toggle_and_back_buttons(self):
-        keyboard = _build_status_keyboard()
-
-        self.assertEqual(len(keyboard.inline_keyboard), 2)
-        self.assertEqual(keyboard.inline_keyboard[0][0].text, "⏸ Pause")
-        self.assertEqual(keyboard.inline_keyboard[1][0].text, "← Back")
+        self.assertEqual(keyboard.inline_keyboard[0][1].text, "→ Min volume")
+        self.assertEqual(keyboard.inline_keyboard[1][0].text, "→ Max volume")
+        self.assertEqual(keyboard.inline_keyboard[1][1].text, "→ Min profit")
+        self.assertEqual(keyboard.inline_keyboard[2][0].text, "→ Max market end")
 
 
     def test_build_home_keyboard_shows_resume_when_muted(self):
@@ -79,13 +90,19 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertEqual(keyboard.inline_keyboard[0][0].text, "▶️ Resume")
 
 
+    def test_build_prompt_keyboard_contains_only_back_button(self):
+        keyboard = _build_prompt_keyboard()
+
+        self.assertEqual(len(keyboard.inline_keyboard), 1)
+        self.assertEqual(len(keyboard.inline_keyboard[0]), 1)
+        self.assertEqual(keyboard.inline_keyboard[0][0].text, "← Back")
+
+
     def test_build_bot_commands_contains_start(self):
         commands = _build_bot_commands()
 
-        self.assertEqual(len(commands), 3)
+        self.assertEqual(len(commands), 1)
         self.assertEqual(commands[0].command, "start")
-        self.assertEqual(commands[1].command, "status")
-        self.assertEqual(commands[2].command, "settings")
 
 
     def test_is_missing_table_error_detects_undefined_table(self):
@@ -145,8 +162,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("• YES on Predict.Fun @ $0.500 = $25", text)
         self.assertIn("📊 Volumes ratio: 1.39x", text)
         self.assertIn("🔗 Open markets:", text)
-        self.assertIn('<a href="https://polymarket.com/market/manchester-united-win">Polymarket</a>', text)
-        self.assertIn('<a href="https://predict.fun/market/pf-123">Predict.Fun</a>', text)
+        self.assertIn('<a href="https://polymarket.com/market/manchester-united-win?r=qerasuu">Polymarket</a>', text)
+        self.assertIn('<a href="https://predict.fun/market/pf-123?ref=077A2">Predict.Fun</a>', text)
 
 
     def test_format_alert_message_uses_outcome_labels_from_mapping(self):
@@ -194,7 +211,9 @@ class TelegramBotCommandsTests(unittest.TestCase):
         text = format_status_text(
             {
                 "min_roi_percent": None,
+                "min_capital_usd": None,
                 "max_capital_usd": None,
+                "min_profit_usd": None,
                 "max_days_to_close": None,
             }
         )
@@ -209,7 +228,9 @@ class TelegramBotCommandsTests(unittest.TestCase):
         text = format_status_text(
             {
                 "min_roi_percent": None,
+                "min_capital_usd": None,
                 "max_capital_usd": None,
+                "min_profit_usd": None,
                 "max_days_to_close": None,
                 "muted": True,
             }
@@ -217,6 +238,64 @@ class TelegramBotCommandsTests(unittest.TestCase):
 
         self.assertIn("🔴 Status: Paused", text)
         self.assertIn("📭 Telegram alerts are paused.", text)
+
+
+    def test_should_skip_alert_for_current_preferences_when_updated_volume_filter_blocks(self):
+        alert = SimpleNamespace(user_id=10)
+        opportunity = SimpleNamespace(net_roi=0.20, capital_required=1382.22)
+        market = SimpleNamespace(raw_payload_json={})
+        preferences = UserPreference(
+            user_id=10,
+            min_roi_percent=5.0,
+            max_capital_usd=150.0,
+            max_days_to_close=5,
+            muted=False,
+        )
+
+        should_skip = _should_skip_alert_for_current_preferences(
+            alert,
+            opportunity,
+            market,
+            market,
+            preferences,
+        )
+
+        self.assertTrue(should_skip)
+
+
+    def test_apply_calc_result_to_opportunity_updates_runtime_values(self):
+        opportunity = SimpleNamespace(
+            price_leg_1=0.0,
+            price_leg_2=0.0,
+            avg_price_leg_1=0.0,
+            avg_price_leg_2=0.0,
+            shares=0.0,
+            capital_required=0.0,
+            gross_profit=0.0,
+            net_profit=0.0,
+            gross_roi=0.0,
+            net_roi=0.0,
+            calculation_json=None,
+        )
+        calc_result = {
+            "avg_price_leg_1": 0.41,
+            "avg_price_leg_2": 0.52,
+            "shares": 12.0,
+            "capital_required": 11.16,
+            "gross_profit": 0.84,
+            "net_profit": 0.84,
+            "gross_roi": 0.075,
+            "net_roi": 0.075,
+            "direction": "A_yes_B_no",
+        }
+
+        _apply_calc_result_to_opportunity(opportunity, calc_result)
+
+        self.assertEqual(opportunity.avg_price_leg_1, 0.41)
+        self.assertEqual(opportunity.avg_price_leg_2, 0.52)
+        self.assertEqual(opportunity.shares, 12.0)
+        self.assertEqual(opportunity.capital_required, 11.16)
+        self.assertEqual(opportunity.calculation_json, calc_result)
 
 
 class FakeSessionContext:
@@ -228,38 +307,12 @@ class FakeSessionContext:
         return False
 
 
-class TelegramBotStatusCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_status_clears_pending_ui_state(self):
-        message = AsyncMock()
-        message.chat.id = 123
-
-        with patch(
-            "arbitrage_bot.tg_bot.handlers.AsyncSessionLocal",
-            return_value=FakeSessionContext(),
-        ), patch(
-            "arbitrage_bot.tg_bot.handlers.get_user_preferences",
-            new=AsyncMock(
-                return_value={
-                    "min_roi_percent": None,
-                    "max_capital_usd": None,
-                    "max_days_to_close": None,
-                }
-            ),
-        ), patch(
-            "arbitrage_bot.tg_bot.handlers.clear_ui_state",
-            new=AsyncMock(),
-        ) as clear_mock:
-            await cmd_status(message)
-
-        clear_mock.assert_awaited_once()
-        message.answer.assert_awaited_once()
-
-
 class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
     async def test_apply_setting_update_reuses_prompt_message_when_available(self):
         message = AsyncMock()
         message.chat.id = 123
         message.bot.edit_message_text = AsyncMock()
+        message.delete = AsyncMock()
 
         with patch(
             "arbitrage_bot.tg_bot.handlers.AsyncSessionLocal",
@@ -290,11 +343,13 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
 
         message.bot.edit_message_text.assert_awaited_once()
         message.answer.assert_not_awaited()
+        message.delete.assert_awaited_once()
 
 
     async def test_apply_setting_update_falls_back_to_new_message_when_edit_fails(self):
         message = AsyncMock()
         message.chat.id = 123
+        message.delete = AsyncMock()
         message.bot.edit_message_text = AsyncMock(
             side_effect=TelegramBadRequest(
                 method="editMessageText",
@@ -331,6 +386,7 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
 
         message.bot.edit_message_text.assert_awaited_once()
         message.answer.assert_awaited_once()
+        message.delete.assert_awaited_once()
 
 
 class TelegramBotCallbackTests(unittest.IsolatedAsyncioTestCase):
@@ -378,3 +434,121 @@ class TelegramBotCallbackTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(TelegramBadRequest):
             await _safe_answer_callback(callback)
+
+
+    async def test_safe_delete_message_ignores_bad_request(self):
+        message = SimpleNamespace(
+            delete=AsyncMock(
+                side_effect=TelegramBadRequest(
+                    method="deleteMessage",
+                    message="Bad Request: message can't be deleted",
+                )
+            )
+        )
+
+        await _safe_delete_message(message)
+
+
+class TelegramBotRevalidationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_revalidate_alert_opportunity_returns_false_when_direction_disappears(self):
+        opportunity = SimpleNamespace(direction="A_yes_B_no")
+        pair = SimpleNamespace(id=7)
+        orderbook_service = SimpleNamespace(
+            fetch_orderbooks_for_pairs=AsyncMock(
+                return_value=[
+                    {
+                        "directions": {
+                            "A_no_B_yes": {
+                                "poly": [(0.40, 10)],
+                                "pf": [(0.50, 10)],
+                            }
+                        }
+                    }
+                ]
+            )
+        )
+        calculator = SimpleNamespace(
+            calculate_opportunities=lambda directions: [
+                {
+                    "direction": "A_no_B_yes",
+                    "avg_price_leg_1": 0.40,
+                    "avg_price_leg_2": 0.50,
+                    "shares": 10.0,
+                    "capital_required": 9.0,
+                    "gross_profit": 1.0,
+                    "net_profit": 1.0,
+                    "gross_roi": 0.11,
+                    "net_roi": 0.11,
+                }
+            ]
+        )
+
+        result = await _revalidate_alert_opportunity(
+            object(),
+            opportunity,
+            pair,
+            orderbook_service,
+            calculator,
+        )
+
+        self.assertFalse(result)
+
+
+    async def test_revalidate_alert_opportunity_refreshes_opportunity_values(self):
+        opportunity = SimpleNamespace(
+            direction="A_yes_B_no",
+            price_leg_1=0.0,
+            price_leg_2=0.0,
+            avg_price_leg_1=0.0,
+            avg_price_leg_2=0.0,
+            shares=0.0,
+            capital_required=0.0,
+            gross_profit=0.0,
+            net_profit=0.0,
+            gross_roi=0.0,
+            net_roi=0.0,
+            calculation_json=None,
+        )
+        pair = SimpleNamespace(id=7)
+        orderbook_service = SimpleNamespace(
+            fetch_orderbooks_for_pairs=AsyncMock(
+                return_value=[
+                    {
+                        "directions": {
+                            "A_yes_B_no": {
+                                "poly": [(0.41, 12)],
+                                "pf": [(0.52, 12)],
+                            }
+                        }
+                    }
+                ]
+            )
+        )
+        calculator = SimpleNamespace(
+            calculate_opportunities=lambda directions: [
+                {
+                    "direction": "A_yes_B_no",
+                    "avg_price_leg_1": 0.41,
+                    "avg_price_leg_2": 0.52,
+                    "shares": 12.0,
+                    "capital_required": 11.16,
+                    "gross_profit": 0.84,
+                    "net_profit": 0.84,
+                    "gross_roi": 0.075,
+                    "net_roi": 0.075,
+                }
+            ]
+        )
+
+        result = await _revalidate_alert_opportunity(
+            object(),
+            opportunity,
+            pair,
+            orderbook_service,
+            calculator,
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(opportunity.avg_price_leg_1, 0.41)
+        self.assertEqual(opportunity.avg_price_leg_2, 0.52)
+        self.assertEqual(opportunity.shares, 12.0)

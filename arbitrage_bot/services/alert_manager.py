@@ -18,7 +18,13 @@ class AlertManager:
         redis = await get_redis()
         dedupe_key = f"alert-dedupe:{pair.pair_hash}:{direction}"
 
-        last_alert_data = await redis.get(dedupe_key)
+        last_alert_data = None
+        if redis is not None:
+            try:
+                last_alert_data = await redis.get(dedupe_key)
+            except Exception:
+                last_alert_data = None
+
         if last_alert_data:
             last_state = json.loads(last_alert_data)
             profit_diff = calc_result["net_profit"] - last_state["net_profit"]
@@ -60,5 +66,9 @@ class AlertManager:
 
         # write dedupe key after successful commit to prevent
         # skipping alerts when the transaction rolls back
-        await redis.setex(dedupe_key, self.dedupe_ttl, json.dumps(state_to_save))
+        if redis is not None:
+            try:
+                await redis.setex(dedupe_key, self.dedupe_ttl, json.dumps(state_to_save))
+            except Exception:
+                pass
         return opp

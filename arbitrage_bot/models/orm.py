@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, JSON, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, JSON, ForeignKey, Text, UniqueConstraint, Index
 
 Base = declarative_base()
 
@@ -9,6 +9,7 @@ class Market(Base):
     __tablename__ = "markets"
     __table_args__ = (
         UniqueConstraint("platform", "platform_market_id", name="uq_markets_platform_market_id"),
+        Index("ix_markets_platform_status", "platform", "status"),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     platform = Column(String, nullable=False)
@@ -37,6 +38,11 @@ class MarketEntity(Base):
 
 class MarketPair(Base):
     __tablename__ = "market_pairs"
+    __table_args__ = (
+        Index("ix_market_pairs_status", "status"),
+        Index("ix_market_pairs_market_id_a", "market_id_a"),
+        Index("ix_market_pairs_market_id_b", "market_id_b"),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     market_id_a = Column(Integer, ForeignKey("markets.id"), nullable=False)
     market_id_b = Column(Integer, ForeignKey("markets.id"), nullable=False)
@@ -50,6 +56,10 @@ class MarketPair(Base):
 
 class ArbOpportunity(Base):
     __tablename__ = "arb_opportunities"
+    __table_args__ = (
+        Index("ix_arb_opportunities_fanout_status_created_at", "fanout_status", "created_at"),
+        Index("ix_arb_opportunities_market_pair_id", "market_pair_id"),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     market_pair_id = Column(Integer, ForeignKey("market_pairs.id"), nullable=False)
     direction = Column(String, nullable=False)
@@ -102,7 +112,9 @@ class UserPreference(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     min_roi_percent = Column(Float, nullable=True)
+    min_capital_usd = Column(Float, nullable=True)
     max_capital_usd = Column(Float, nullable=True)
+    min_profit_usd = Column(Float, nullable=True)
     max_days_to_close = Column(Integer, nullable=True)
     muted = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -111,6 +123,10 @@ class UserPreference(Base):
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
+    __table_args__ = (
+        UniqueConstraint("channel", "destination", name="uq_subscriptions_channel_destination"),
+        Index("ix_subscriptions_user_id_status", "user_id", "status"),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     channel = Column(String, nullable=False)
@@ -122,6 +138,11 @@ class Subscription(Base):
 
 class Alert(Base):
     __tablename__ = "alerts"
+    __table_args__ = (
+        UniqueConstraint("opportunity_id", "telegram_chat_id", name="uq_alerts_opportunity_chat"),
+        Index("ix_alerts_status_next_retry_at_id", "status", "next_retry_at", "id"),
+        Index("ix_alerts_opportunity_id", "opportunity_id"),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     opportunity_id = Column(Integer, ForeignKey("arb_opportunities.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)

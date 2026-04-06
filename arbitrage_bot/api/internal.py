@@ -3,6 +3,8 @@ from sqlalchemy import func
 from sqlalchemy.future import select
 from arbitrage_bot.core.database import get_db
 from arbitrage_bot.core.config import settings
+from arbitrage_bot.core.observability import snapshot_and_reset_counters
+from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.models.orm import Alert
 from arbitrage_bot.models.orm import ArbOpportunity
 from arbitrage_bot.models.orm import Market
@@ -12,7 +14,7 @@ from arbitrage_bot.services.matcher import MatcherService
 router = APIRouter()
 
 
-def require_admin_token(x_admin_token: str | None = Header(default=None)):
+def require_admin_token(x_admin_token=Header(default=None)):
     expected_token = settings.ADMIN_API_TOKEN
     if not expected_token or x_admin_token != expected_token:
         raise HTTPException(
@@ -96,8 +98,25 @@ async def get_pairs(
     }
 
 
+@router.get("/admin/runtime-metrics")
+async def get_runtime_metrics(
+    reset=False,
+    _=Depends(require_admin_token),
+):
+    if reset:
+        metrics = snapshot_and_reset_counters()
+    else:
+        metrics = snapshot_counters()
+
+    return {
+        "status": "ok",
+        "metrics": metrics,
+        "reset_applied": reset,
+    }
+
+
 @router.post("/admin/pairs/{pair_id}/approve")
-async def approve_pair(pair_id: int, db=Depends(get_db), _=Depends(require_admin_token)):
+async def approve_pair(pair_id, db=Depends(get_db), _=Depends(require_admin_token)):
     stmt = select(MarketPair).where(MarketPair.id == pair_id)
     result = await db.execute(stmt)
     pair = result.scalars().first()
@@ -112,8 +131,8 @@ async def approve_pair(pair_id: int, db=Depends(get_db), _=Depends(require_admin
 
 @router.get("/admin/matcher/debug")
 async def debug_matcher(
-    market_id: int,
-    limit: int = 10,
+    market_id,
+    limit=10,
     db=Depends(get_db),
     _=Depends(require_admin_token),
 ):

@@ -1,7 +1,7 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = '6aa3a18e4724'
+revision = '0db3520d2b8d'
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -33,6 +33,7 @@ def upgrade():
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('platform', 'platform_market_id', name='uq_markets_platform_market_id')
     )
+    op.create_index('ix_markets_platform_status', 'markets', ['platform', 'status'], unique=False)
     op.create_table('settings',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('key', sa.String(), nullable=False),
@@ -65,6 +66,9 @@ def upgrade():
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('pair_hash')
     )
+    op.create_index('ix_market_pairs_market_id_a', 'market_pairs', ['market_id_a'], unique=False)
+    op.create_index('ix_market_pairs_market_id_b', 'market_pairs', ['market_id_b'], unique=False)
+    op.create_index('ix_market_pairs_status', 'market_pairs', ['status'], unique=False)
     op.create_table('users',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('status', sa.String(), nullable=False),
@@ -90,7 +94,9 @@ def upgrade():
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('user_id', sa.Integer(), nullable=False),
     sa.Column('min_roi_percent', sa.Float(), nullable=True),
+    sa.Column('min_capital_usd', sa.Float(), nullable=True),
     sa.Column('max_capital_usd', sa.Float(), nullable=True),
+    sa.Column('min_profit_usd', sa.Float(), nullable=True),
     sa.Column('max_days_to_close', sa.Integer(), nullable=True),
     sa.Column('muted', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
@@ -107,9 +113,11 @@ def upgrade():
     sa.Column('status', sa.String(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint('channel', 'destination', name='uq_subscriptions_channel_destination'),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
+    op.create_index('ix_subscriptions_user_id_status', 'subscriptions', ['user_id', 'status'], unique=False)
     op.create_table('arb_opportunities',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('market_pair_id', sa.Integer(), nullable=False),
@@ -133,6 +141,8 @@ def upgrade():
     sa.PrimaryKeyConstraint('id')
     )
     op.alter_column('arb_opportunities', 'fanout_status', server_default=None)
+    op.create_index('ix_arb_opportunities_fanout_status_created_at', 'arb_opportunities', ['fanout_status', 'created_at'], unique=False)
+    op.create_index('ix_arb_opportunities_market_pair_id', 'arb_opportunities', ['market_pair_id'], unique=False)
 
     op.create_table('alerts',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
@@ -150,19 +160,31 @@ def upgrade():
     sa.ForeignKeyConstraint(['opportunity_id'], ['arb_opportunities.id'], ),
     sa.ForeignKeyConstraint(['subscription_id'], ['subscriptions.id'], name='fk_alerts_subscription_id_subscriptions'),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], name='fk_alerts_user_id_users'),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('opportunity_id', 'telegram_chat_id', name='uq_alerts_opportunity_chat')
     )
     op.alter_column('alerts', 'attempt_count', server_default=None)
+    op.create_index('ix_alerts_opportunity_id', 'alerts', ['opportunity_id'], unique=False)
+    op.create_index('ix_alerts_status_next_retry_at_id', 'alerts', ['status', 'next_retry_at', 'id'], unique=False)
 
 def downgrade():
+    op.drop_index('ix_alerts_status_next_retry_at_id', table_name='alerts')
+    op.drop_index('ix_alerts_opportunity_id', table_name='alerts')
     op.drop_table('alerts')
+    op.drop_index('ix_arb_opportunities_market_pair_id', table_name='arb_opportunities')
+    op.drop_index('ix_arb_opportunities_fanout_status_created_at', table_name='arb_opportunities')
     op.drop_table('arb_opportunities')
+    op.drop_index('ix_subscriptions_user_id_status', table_name='subscriptions')
     op.drop_table('subscriptions')
     op.drop_table('user_preferences')
     op.drop_table('telegram_chats')
     op.drop_table('users')
+    op.drop_index('ix_market_pairs_status', table_name='market_pairs')
+    op.drop_index('ix_market_pairs_market_id_b', table_name='market_pairs')
+    op.drop_index('ix_market_pairs_market_id_a', table_name='market_pairs')
     op.drop_table('market_pairs')
     op.drop_table('market_entities')
     op.drop_table('settings')
+    op.drop_index('ix_markets_platform_status', table_name='markets')
     op.drop_table('markets')
     op.drop_table('blacklist_rules')
