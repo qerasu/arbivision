@@ -561,6 +561,32 @@ Endpoint | Auth | Описание
 
 Admin-endpoint'ы требуют заголовок `X-Admin-Token` со значением из `ADMIN_API_TOKEN`.
 
+### Как посмотреть admin endpoint со статистикой
+
+1. Убедитесь, что сервер запущен:
+```bash
+python3 start.py
+```
+
+2. Считайте admin token из `~/.config/arbivision/.env`:
+```bash
+ADMIN_TOKEN=$(grep '^ADMIN_API_TOKEN=' ~/.config/arbivision/.env | cut -d= -f2-)
+```
+
+3. Посмотрите runtime-статистику:
+```bash
+curl -H "X-Admin-Token: $ADMIN_TOKEN" \
+  http://127.0.0.1:8000/api/admin/runtime-metrics
+```
+
+4. Если нужно вернуть counters и сразу их сбросить:
+```bash
+curl -H "X-Admin-Token: $ADMIN_TOKEN" \
+  "http://127.0.0.1:8000/api/admin/runtime-metrics?reset=true"
+```
+
+5. Через веб-интерфейс можно открыть `http://127.0.0.1:8000/docs`, найти `GET /api/admin/runtime-metrics`, нажать `Try it out` и передать заголовок `X-Admin-Token`.
+
 ---
 
 ## ORM-модели
