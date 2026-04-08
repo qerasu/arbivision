@@ -248,6 +248,9 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         }
 
     market_map = await _load_market_map_for_pairs(db, active_pairs)
+    orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs(active_pairs, db)
+    pairs_with_data = {item["pair"].pair_hash for item in orderbooks_data}
+    await _update_empty_counts(active_pairs, pairs_with_data)
     pairs_with_books_count = 0
     opportunity_count = 0
     delivery_targets = None
@@ -256,29 +259,17 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         remaining_warmup_promotions = None
     if not suppress_alerts:
         delivery_targets = await fanout_manager.get_delivery_targets()
-    for pair in active_pairs:
+    for item in orderbooks_data:
+        pair = item["pair"]
         market_a = market_map.get(pair.market_id_a)
         market_b = market_map.get(pair.market_id_b)
         if market_a is None or market_b is None:
-            await _update_empty_counts([pair], set())
-            continue
-
-        orderbook_item = await orderbook_service.fetch_orderbook_for_pair(
-            pair,
-            market_a,
-            market_b,
-        )
-        await _update_empty_counts(
-            [pair],
-            {pair.pair_hash} if orderbook_item is not None else set(),
-        )
-        if orderbook_item is None:
             continue
 
         pairs_with_books_count += 1
         incr_counter("worker.pairs_with_orderbooks")
 
-        directions = orderbook_item.get("directions")
+        directions = item.get("directions")
         calc_results = calculator.calculate_opportunities(directions)
         if not calc_results:
             incr_counter("calculator.drop.no_profitable_directions")

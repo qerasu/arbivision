@@ -333,11 +333,13 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
 
         fake_db = FakeDb()
         orderbook_service = SimpleNamespace(
-            fetch_orderbook_for_pair=AsyncMock(
-                return_value={
-                    "pair": SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20),
-                    "directions": {"A_yes_B_no": {"poly": [(0.4, 2)], "pf": [(0.7, 2)]}},
-                }
+            fetch_orderbooks_for_pairs=AsyncMock(
+                return_value=[
+                    {
+                        "pair": SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20),
+                        "directions": {"A_yes_B_no": {"poly": [(0.4, 2)], "pf": [(0.7, 2)]}},
+                    }
+                ],
             )
         )
         calculator = SimpleNamespace(calculate_opportunities=Mock(return_value=[]))
@@ -392,11 +394,13 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
 
         fake_db = FakeDb()
         orderbook_service = SimpleNamespace(
-            fetch_orderbook_for_pair=AsyncMock(
-                return_value={
-                    "pair": SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20),
-                    "directions": {"A_yes_B_no": {"poly": [(0.4, 2)], "pf": [(0.5, 2)]}},
-                }
+            fetch_orderbooks_for_pairs=AsyncMock(
+                return_value=[
+                    {
+                        "pair": SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20),
+                        "directions": {"A_yes_B_no": {"poly": [(0.4, 2)], "pf": [(0.5, 2)]}},
+                    }
+                ]
             )
         )
         calculator = SimpleNamespace(
@@ -499,11 +503,11 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             "directions": {"A_yes_B_no": {"poly": [(0.4, 2)], "pf": [(0.5, 2)]}},
         }
         orderbook_service = SimpleNamespace(
-            fetch_orderbook_for_pair=AsyncMock(
-                side_effect=[
-                    {"pair": SimpleNamespace(id=1), **orderbook_payload},
-                    {"pair": SimpleNamespace(id=2), **orderbook_payload},
-                    {"pair": SimpleNamespace(id=3), **orderbook_payload},
+            fetch_orderbooks_for_pairs=AsyncMock(
+                return_value=[
+                    {"pair": SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20), **orderbook_payload},
+                    {"pair": SimpleNamespace(id=2, pair_hash="pair-2", market_id_a=30, market_id_b=40), **orderbook_payload},
+                    {"pair": SimpleNamespace(id=3, pair_hash="pair-3", market_id_a=50, market_id_b=60), **orderbook_payload},
                 ]
             )
         )
@@ -581,3 +585,59 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         send_mock.assert_not_awaited()
         counters = snapshot_counters()
         self.assertEqual(counters["worker.opportunity_warmup_deferred"], 1)
+
+
+    async def test_process_candidates_uses_batched_orderbook_fetch(self):
+        class FakeScalarResult:
+            def __init__(self, items):
+                self.items = items
+
+
+            def scalars(self):
+                return self
+
+
+            def all(self):
+                return list(self.items)
+
+
+        class FakeDb:
+            async def execute(self, stmt):
+                return FakeScalarResult([SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20)])
+
+
+        fake_db = FakeDb()
+        orderbook_service = SimpleNamespace(
+            fetch_orderbooks_for_pairs=AsyncMock(
+                return_value=[
+                    {
+                        "pair": SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20),
+                        "directions": {"A_yes_B_no": {"poly": [(0.4, 2)], "pf": [(0.5, 2)]}},
+                    }
+                ]
+            ),
+            fetch_orderbook_for_pair=AsyncMock(side_effect=AssertionError("sequential orderbook fetch should not be used")),
+        )
+        calculator = SimpleNamespace(calculate_opportunities=Mock(return_value=[]))
+        alert_manager = SimpleNamespace(process_opportunity=AsyncMock())
+        fanout_manager = SimpleNamespace(
+            create_alert_deliveries=AsyncMock(return_value=[]),
+            get_delivery_targets=AsyncMock(return_value=[]),
+        )
+
+        with patch("arbitrage_bot.worker._filter_skippable_pairs", new=AsyncMock(return_value=[
+            SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20),
+        ])), patch(
+            "arbitrage_bot.worker._load_market_map_for_pairs",
+            new=AsyncMock(return_value={
+                10: SimpleNamespace(id=10, platform="polymarket", platform_market_id="poly-10"),
+                20: SimpleNamespace(id=20, platform="predict_fun", platform_market_id="pf-20"),
+            }),
+        ), patch(
+            "arbitrage_bot.worker._update_empty_counts",
+            new=AsyncMock(),
+        ):
+            await _process_candidates(fake_db, orderbook_service, calculator, alert_manager, fanout_manager)
+
+        orderbook_service.fetch_orderbooks_for_pairs.assert_awaited_once()
+        orderbook_service.fetch_orderbook_for_pair.assert_not_awaited()
