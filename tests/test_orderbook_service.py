@@ -72,39 +72,6 @@ class OrderbookServiceTests(unittest.IsolatedAsyncioTestCase):
         service.polymarket.fetch_books.assert_awaited_once_with(["poly-no", "poly-yes"])
 
 
-    async def test_fetch_orderbook_for_pair_uses_provided_market_rows(self):
-        service = OrderbookService()
-        service.predict_fun.fetch_orderbook = AsyncMock(
-            return_value={"data": {"asks": [[0.5, 2]], "bids": [[0.4, 3]]}}
-        )
-        service.polymarket.fetch_books = AsyncMock(
-            return_value=[
-                {"asset_id": "poly-yes", "asks": [{"price": "0.4", "size": "2"}]},
-                {"asset_id": "poly-no", "asks": [{"price": "0.6", "size": "3"}]},
-            ]
-        )
-
-        pair = SimpleNamespace(
-            id=9,
-            market_id_a=200,
-            market_id_b=100,
-            outcome_mapping_json={
-                "market_a": {"yes": "poly-yes", "no": "poly-no"},
-                "market_b": {"yes": "pf-yes", "no": "pf-no"},
-            },
-        )
-        market_a = SimpleNamespace(platform="predict_fun", platform_market_id="pf-200")
-        market_b = SimpleNamespace(platform="polymarket", platform_market_id="poly-100")
-
-        result = await service.fetch_orderbook_for_pair(pair, market_a, market_b)
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result["poly_market_id"], "poly-100")
-        self.assertEqual(result["pf_market_id"], "pf-200")
-        service.predict_fun.fetch_orderbook.assert_awaited_once_with("pf-200")
-        service.polymarket.fetch_books.assert_awaited_once_with(["poly-no", "poly-yes"])
-
-
     async def test_builds_directional_books_from_mapping(self):
         service = OrderbookService()
         pair = SimpleNamespace(

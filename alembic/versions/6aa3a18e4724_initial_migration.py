@@ -42,15 +42,6 @@ def upgrade():
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('key')
     )
-    op.create_table('market_entities',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('market_id', sa.Integer(), nullable=False),
-    sa.Column('entity_type', sa.String(), nullable=False),
-    sa.Column('entity_value', sa.String(), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(['market_id'], ['markets.id'], ),
-    sa.PrimaryKeyConstraint('id')
-    )
     op.create_table('market_pairs',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('market_id_a', sa.Integer(), nullable=False),
@@ -96,6 +87,8 @@ def upgrade():
     sa.Column('min_roi_percent', sa.Float(), nullable=True),
     sa.Column('min_capital_usd', sa.Float(), nullable=True),
     sa.Column('max_capital_usd', sa.Float(), nullable=True),
+    sa.Column('max_polymarket_capital_usd', sa.Float(), nullable=True),
+    sa.Column('max_predict_fun_capital_usd', sa.Float(), nullable=True),
     sa.Column('min_profit_usd', sa.Float(), nullable=True),
     sa.Column('max_days_to_close', sa.Integer(), nullable=True),
     sa.Column('muted', sa.Boolean(), nullable=False),
@@ -143,6 +136,7 @@ def upgrade():
     op.alter_column('arb_opportunities', 'fanout_status', server_default=None)
     op.create_index('ix_arb_opportunities_fanout_status_created_at', 'arb_opportunities', ['fanout_status', 'created_at'], unique=False)
     op.create_index('ix_arb_opportunities_market_pair_id', 'arb_opportunities', ['market_pair_id'], unique=False)
+    op.create_index('ix_arb_opportunities_pair_direction_status', 'arb_opportunities', ['market_pair_id', 'direction', 'fanout_status'], unique=False)
 
     op.create_table('alerts',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
@@ -171,6 +165,7 @@ def downgrade():
     op.drop_index('ix_alerts_status_next_retry_at_id', table_name='alerts')
     op.drop_index('ix_alerts_opportunity_id', table_name='alerts')
     op.drop_table('alerts')
+    op.drop_index('ix_arb_opportunities_pair_direction_status', table_name='arb_opportunities')
     op.drop_index('ix_arb_opportunities_market_pair_id', table_name='arb_opportunities')
     op.drop_index('ix_arb_opportunities_fanout_status_created_at', table_name='arb_opportunities')
     op.drop_table('arb_opportunities')
@@ -183,7 +178,6 @@ def downgrade():
     op.drop_index('ix_market_pairs_market_id_b', table_name='market_pairs')
     op.drop_index('ix_market_pairs_market_id_a', table_name='market_pairs')
     op.drop_table('market_pairs')
-    op.drop_table('market_entities')
     op.drop_table('settings')
     op.drop_index('ix_markets_platform_status', table_name='markets')
     op.drop_table('markets')

@@ -76,7 +76,7 @@ async def _configure_bot_ui(bot):
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
-def _format_alert_message(opportunity, pair, market_a, market_b, chat_id=None):
+def _format_alert_message(opportunity, pair, market_a, market_b, language=None):
     direction = _describe_direction(opportunity.direction, pair)
     title = html.escape(market_a.title or market_b.title or "ARBITRAGE OPPORTUNITY")
     profit = _format_money(opportunity.net_profit)
@@ -85,23 +85,23 @@ def _format_alert_message(opportunity, pair, market_a, market_b, chat_id=None):
     shares = _format_shares(opportunity.shares)
     leg_1_cost = _format_money(opportunity.avg_price_leg_1 * opportunity.shares)
     leg_2_cost = _format_money(opportunity.avg_price_leg_2 * opportunity.shares)
-    leg_1_price = _format_leg_price_details(opportunity, 1, chat_id=chat_id)
-    leg_2_price = _format_leg_price_details(opportunity, 2, chat_id=chat_id)
-    volumes_ratio = _format_volumes_ratio(opportunity.avg_price_leg_1, opportunity.avg_price_leg_2, chat_id=chat_id)
-    expires = _format_expiry_line(market_a, market_b, chat_id=chat_id)
+    leg_1_price = _format_leg_price_details(opportunity, 1, language=language)
+    leg_2_price = _format_leg_price_details(opportunity, 2, language=language)
+    volumes_ratio = _format_volumes_ratio(opportunity.avg_price_leg_1, opportunity.avg_price_leg_2, language=language)
+    expires = _format_expiry_line(market_a, market_b, language=language)
     links = _format_market_links(market_a, market_b)
 
     return (
         f"🚨 {title}\n\n"
-        f"💰 {translate(chat_id, 'Profit', 'Прибыль')}: {profit}\n"
-        f"📈 {translate(chat_id, 'Spread', 'Спред')}: {spread}\n"
-        f"💵 {translate(chat_id, 'Volume', 'Объём')}: {capital}\n"
+        f"💰 {translate(language, 'Profit', 'Прибыль')}: {profit}\n"
+        f"📈 {translate(language, 'Spread', 'Спред')}: {spread}\n"
+        f"💵 {translate(language, 'Volume', 'Объём')}: {capital}\n"
         f"{expires}\n\n"
-        f"🧾 {translate(chat_id, f'Buy {shares} shares each', f'Купить по {shares} shares')}:\n"
-        f"• {direction['leg_1_label']} {translate(chat_id, 'on', 'на')} Polymarket: {leg_1_price} = {leg_1_cost}\n"
-        f"• {direction['leg_2_label']} {translate(chat_id, 'on', 'на')} Predict.Fun: {leg_2_price} = {leg_2_cost}\n"
-        f"📊 {translate(chat_id, 'Volumes ratio', 'Соотношение объёмов')}: {volumes_ratio}x\n\n"
-        f"🔗 {translate(chat_id, 'Open markets', 'Открыть рынки')}:\n{links}"
+        f"🧾 {translate(language, f'Buy {shares} shares each', f'Купить по {shares} shares')}:\n"
+        f"• {direction['leg_1_label']} {translate(language, 'on', 'на')} Polymarket: {leg_1_price} = {leg_1_cost}\n"
+        f"• {direction['leg_2_label']} {translate(language, 'on', 'на')} Predict.Fun: {leg_2_price} = {leg_2_cost}\n"
+        f"📊 {translate(language, 'Volumes ratio', 'Соотношение объёмов')}: {volumes_ratio}x\n\n"
+        f"🔗 {translate(language, 'Open markets', 'Открыть рынки')}:\n{links}"
     )
 
 
@@ -130,10 +130,10 @@ def _describe_direction(direction, pair=None):
     )
 
 
-def _format_expiry_line(market_a, market_b, chat_id=None):
+def _format_expiry_line(market_a, market_b, language=None):
     close_at = extract_pair_close_datetime(market_a, market_b)
     if close_at is None:
-        return translate(chat_id, "⏳ Ends in: Unknown", "⏳ Окончание: неизвестно")
+        return translate(language, "⏳ Ends in: Unknown", "⏳ Окончание: неизвестно")
 
     if close_at.tzinfo is None:
         close_at = close_at.replace(tzinfo=timezone.utc)
@@ -145,7 +145,7 @@ def _format_expiry_line(market_a, market_b, chat_id=None):
     )
 
     return translate(
-        chat_id,
+        language,
         f"⏳ Ends on: {close_at.date().isoformat()} (in {remaining_days} days)",
         f"⏳ Завершится: {close_at.date().isoformat()} (через {remaining_days} дн.)",
     )
@@ -241,20 +241,20 @@ def _format_price(value):
     return f"${float(value):.3f}"
 
 
-def _format_leg_price_details(opportunity, leg_index, chat_id=None):
+def _format_leg_price_details(opportunity, leg_index, language=None):
     avg_price = float(getattr(opportunity, f"avg_price_leg_{leg_index}", 0.0) or 0.0)
     calc_payload = getattr(opportunity, "calculation_json", None) or {}
     best_price = calc_payload.get(f"best_price_leg_{leg_index}")
 
     if best_price is None:
-        return translate(chat_id, f"avg fill {_format_price(avg_price)}", f"ср. цена {_format_price(avg_price)}")
+        return translate(language, f"avg fill {_format_price(avg_price)}", f"ср. цена {_format_price(avg_price)}")
 
     best_price_value = float(best_price)
     if abs(best_price_value - avg_price) < 0.0005:
-        return translate(chat_id, f"avg fill {_format_price(avg_price)}", f"ср. цена {_format_price(avg_price)}")
+        return translate(language, f"avg fill {_format_price(avg_price)}", f"ср. цена {_format_price(avg_price)}")
 
     return translate(
-        chat_id,
+        language,
         f"avg fill {_format_price(avg_price)} (best ask {_format_price(best_price_value)})",
         f"ср. цена {_format_price(avg_price)} (лучший ask {_format_price(best_price_value)})",
     )
@@ -269,11 +269,11 @@ def _format_shares(value):
     return f"{rounded:.2f}"
 
 
-def _format_volumes_ratio(price_leg_1, price_leg_2, chat_id=None):
+def _format_volumes_ratio(price_leg_1, price_leg_2, language=None):
     p1 = float(price_leg_1)
     p2 = float(price_leg_2)
     if p1 <= 0 or p2 <= 0:
-        return translate(chat_id, "N/A", "н/д")
+        return translate(language, "N/A", "н/д")
 
     if p1 > p2:
         ratio = p1 / p2
@@ -296,7 +296,7 @@ def _is_missing_table_error(exc):
     return "does not exist" in details and "relation" in details
 
 
-async def _send_alert(bot, alert, opportunity, pair, market_a, market_b_row):
+async def _send_alert(bot, alert, opportunity, pair, market_a, market_b_row, preferences=None):
     if await _is_duplicate_delivery(alert):
         alert.status = "sent"
         alert.next_retry_at = None
@@ -304,9 +304,11 @@ async def _send_alert(bot, alert, opportunity, pair, market_a, market_b_row):
         alert.error_message = "delivery deduped after restart"
         return
 
+    language = _extract_language_from_preferences(preferences)
+
     await bot.send_message(
         chat_id=alert.telegram_chat_id,
-        text=_format_alert_message(opportunity, pair, market_a, market_b_row, chat_id=alert.telegram_chat_id),
+        text=_format_alert_message(opportunity, pair, market_a, market_b_row, language=language),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
@@ -378,11 +380,17 @@ def _clone_opportunity(opportunity):
 
 def _recalculate_opportunity_from_directions(opportunity, directions, calculator, preferences=None):
     max_capital = None
+    max_polymarket_capital = None
+    max_predict_fun_capital = None
     if preferences is not None:
         max_capital = preferences.get("max_capital_usd")
+        max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
+        max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
     calc_results = calculator.calculate_opportunities(
         directions,
         max_capital=max_capital,
+        max_polymarket_capital=max_polymarket_capital,
+        max_predict_fun_capital=max_predict_fun_capital,
     )
     current_result = next(
         (
@@ -441,7 +449,7 @@ async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, p
 
     now = datetime.now(timezone.utc)
     try:
-        await _send_alert(bot, alert, prepared_opportunity, pair, market_a, market_b)
+        await _send_alert(bot, alert, prepared_opportunity, pair, market_a, market_b, preferences=current_preferences)
         return True
     except Exception as exc:
         _mark_alert_retry(alert, exc, now)
@@ -485,11 +493,17 @@ async def _revalidate_alert_opportunity(session, opportunity, pair, orderbook_se
 
     current_item = orderbooks_data[0]
     max_capital = None
+    max_polymarket_capital = None
+    max_predict_fun_capital = None
     if preferences is not None:
         max_capital = preferences.get("max_capital_usd")
+        max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
+        max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
     calc_results = calculator.calculate_opportunities(
         current_item.get("directions"),
         max_capital=max_capital,
+        max_polymarket_capital=max_polymarket_capital,
+        max_predict_fun_capital=max_predict_fun_capital,
     )
     if not calc_results:
         return False
@@ -552,12 +566,22 @@ def _build_runtime_preferences(preferences):
             "min_roi_percent": preferences.min_roi_percent,
             "min_capital_usd": preferences.min_capital_usd,
             "max_capital_usd": preferences.max_capital_usd,
+            "max_polymarket_capital_usd": preferences.max_polymarket_capital_usd,
+            "max_predict_fun_capital_usd": preferences.max_predict_fun_capital_usd,
             "min_profit_usd": preferences.min_profit_usd,
             "max_days_to_close": preferences.max_days_to_close,
             "muted": preferences.muted,
         }
     )
     return values
+
+
+def _extract_language_from_preferences(preferences):
+    if preferences is None:
+        return None
+    if isinstance(preferences, dict):
+        return preferences.get("language")
+    return getattr(preferences, "language", None)
 
 
 def _should_skip_alert_for_current_preferences(alert, _opportunity, _market_a, _market_b, preferences):
@@ -631,7 +655,7 @@ async def _drain_queued_alerts(bot):
                             await session.commit()
                             continue
                         try:
-                            await _send_alert(bot, alert, opportunity, pair, market_a, market_b_row)
+                            await _send_alert(bot, alert, opportunity, pair, market_a, market_b_row, preferences=current_preferences)
                         except Exception as exc:
                             _mark_alert_retry(alert, exc, now)
                         await session.commit()

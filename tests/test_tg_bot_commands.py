@@ -48,7 +48,9 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertEqual(keyboard.inline_keyboard[0][1].text, "→ Min volume")
         self.assertEqual(keyboard.inline_keyboard[1][0].text, "→ Max volume")
         self.assertEqual(keyboard.inline_keyboard[1][1].text, "→ Min profit")
-        self.assertEqual(keyboard.inline_keyboard[2][0].text, "→ Max market end")
+        self.assertEqual(keyboard.inline_keyboard[2][0].text, "→ Polymarket balance")
+        self.assertEqual(keyboard.inline_keyboard[2][1].text, "→ Predict.Fun balance")
+        self.assertEqual(keyboard.inline_keyboard[3][0].text, "→ Max market end")
 
 
     def test_build_home_keyboard_shows_resume_when_muted(self):
@@ -57,13 +59,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertEqual(keyboard.inline_keyboard[0][0].text, "▶️ Resume")
 
 
-    def test_build_home_keyboard_uses_russian_for_andrei_chat(self):
-        original_chat_id = settings.ANDREI_KURILOV_ID
-        settings.ANDREI_KURILOV_ID = "777"
-        try:
-            keyboard = _build_home_keyboard({"muted": False}, chat_id=777)
-        finally:
-            settings.ANDREI_KURILOV_ID = original_chat_id
+    def test_build_home_keyboard_uses_russian_when_language_is_ru(self):
+        keyboard = _build_home_keyboard({"muted": False, "language": "ru"})
 
         self.assertEqual(keyboard.inline_keyboard[0][0].text, "⏸ Пауза")
         self.assertEqual(keyboard.inline_keyboard[1][0].text, "Настройки")
@@ -286,6 +283,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
                 "min_roi_percent": None,
                 "min_capital_usd": None,
                 "max_capital_usd": None,
+                "max_polymarket_capital_usd": None,
+                "max_predict_fun_capital_usd": None,
                 "min_profit_usd": None,
                 "max_days_to_close": None,
             }
@@ -303,6 +302,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
                 "min_roi_percent": None,
                 "min_capital_usd": None,
                 "max_capital_usd": None,
+                "max_polymarket_capital_usd": None,
+                "max_predict_fun_capital_usd": None,
                 "min_profit_usd": None,
                 "max_days_to_close": None,
                 "muted": True,
@@ -317,13 +318,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("/start", _format_inactive_chat_text())
 
 
-    def test_format_inactive_chat_text_uses_russian_for_andrei_chat(self):
-        original_chat_id = settings.ANDREI_KURILOV_ID
-        settings.ANDREI_KURILOV_ID = "777"
-        try:
-            text = _format_inactive_chat_text(chat_id=777)
-        finally:
-            settings.ANDREI_KURILOV_ID = original_chat_id
+    def test_format_inactive_chat_text_uses_russian_when_language_is_ru(self):
+        text = _format_inactive_chat_text(language="ru")
 
         self.assertIn("Нажмите /start", text)
 
@@ -334,6 +330,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
                 "min_roi_percent": 5.0,
                 "min_capital_usd": 10.0,
                 "max_capital_usd": 150.0,
+                "max_polymarket_capital_usd": None,
+                "max_predict_fun_capital_usd": None,
                 "min_profit_usd": None,
                 "max_days_to_close": 5,
                 "muted": False,
@@ -345,40 +343,35 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("Arbitrage Scanner", text)
 
 
-    def test_format_alert_message_uses_russian_for_andrei_chat(self):
-        original_chat_id = settings.ANDREI_KURILOV_ID
-        settings.ANDREI_KURILOV_ID = "777"
-        try:
-            opportunity = SimpleNamespace(
-                direction="A_no_B_yes",
-                net_profit=7.0,
-                net_roi=0.14,
-                capital_required=43.0,
-                shares=50.0,
-                avg_price_leg_1=0.36,
-                avg_price_leg_2=0.50,
-                calculation_json={},
-            )
-            pair = SimpleNamespace(match_score=1.0)
-            market_a = SimpleNamespace(
-                platform="polymarket",
-                title="Will Manchester United FC win on 2026-03-20?",
-                slug="manchester-united-win",
-                raw_payload_json={"endDate": "2026-03-28T00:00:00+00:00"},
-            )
-            market_b = SimpleNamespace(
-                platform="predict_fun",
-                title="Manchester United FC",
-                slug="",
-                platform_market_id="pf-123",
-                raw_payload_json={"resolveDate": "2026-03-27T00:00:00+00:00"},
-            )
+    def test_format_alert_message_uses_russian_when_language_is_ru(self):
+        opportunity = SimpleNamespace(
+            direction="A_no_B_yes",
+            net_profit=7.0,
+            net_roi=0.14,
+            capital_required=43.0,
+            shares=50.0,
+            avg_price_leg_1=0.36,
+            avg_price_leg_2=0.50,
+            calculation_json={},
+        )
+        pair = SimpleNamespace(match_score=1.0)
+        market_a = SimpleNamespace(
+            platform="polymarket",
+            title="Will Manchester United FC win on 2026-03-20?",
+            slug="manchester-united-win",
+            raw_payload_json={"endDate": "2026-03-28T00:00:00+00:00"},
+        )
+        market_b = SimpleNamespace(
+            platform="predict_fun",
+            title="Manchester United FC",
+            slug="",
+            platform_market_id="pf-123",
+            raw_payload_json={"resolveDate": "2026-03-27T00:00:00+00:00"},
+        )
 
-            with patch("arbitrage_bot.tg_bot.bot.datetime") as datetime_mock:
-                datetime_mock.now.return_value = datetime(2026, 3, 21, tzinfo=timezone.utc)
-                text = _format_alert_message(opportunity, pair, market_a, market_b, chat_id=777)
-        finally:
-            settings.ANDREI_KURILOV_ID = original_chat_id
+        with patch("arbitrage_bot.tg_bot.bot.datetime") as datetime_mock:
+            datetime_mock.now.return_value = datetime(2026, 3, 21, tzinfo=timezone.utc)
+            text = _format_alert_message(opportunity, pair, market_a, market_b, language="ru")
 
         self.assertIn("Прибыль", text)
         self.assertIn("Объём", text)
@@ -394,6 +387,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
             user_id=10,
             min_roi_percent=5.0,
             max_capital_usd=150.0,
+            max_polymarket_capital_usd=None,
+            max_predict_fun_capital_usd=None,
             max_days_to_close=5,
             muted=False,
         )
@@ -417,6 +412,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
             user_id=10,
             min_roi_percent=5.0,
             max_capital_usd=150.0,
+            max_polymarket_capital_usd=None,
+            max_predict_fun_capital_usd=None,
             max_days_to_close=5,
             muted=True,
         )
@@ -439,6 +436,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
         preferences = {
             "min_roi_percent": 5.0,
             "max_capital_usd": 150.0,
+            "max_polymarket_capital_usd": None,
+            "max_predict_fun_capital_usd": None,
             "max_days_to_close": 5,
             "muted": True,
         }
@@ -570,6 +569,8 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
                 return_value={
                     "min_roi_percent": 1.5,
                     "max_capital_usd": None,
+                    "max_polymarket_capital_usd": None,
+                    "max_predict_fun_capital_usd": None,
                     "max_days_to_close": None,
                 }
             ),
@@ -613,6 +614,8 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
                 return_value={
                     "min_roi_percent": 1.5,
                     "max_capital_usd": None,
+                    "max_polymarket_capital_usd": None,
+                    "max_predict_fun_capital_usd": None,
                     "max_days_to_close": None,
                 }
             ),
@@ -648,6 +651,8 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
                     "min_roi_percent": 5.0,
                     "min_capital_usd": 10.0,
                     "max_capital_usd": 150.0,
+                    "max_polymarket_capital_usd": None,
+                    "max_predict_fun_capital_usd": None,
                     "min_profit_usd": None,
                     "max_days_to_close": 5,
                     "muted": False,
@@ -682,10 +687,13 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.tg_bot.handlers.get_user_preferences",
             new=AsyncMock(),
-        ) as preferences_mock:
+        ) as preferences_mock, patch(
+            "arbitrage_bot.tg_bot.handlers.get_user_language",
+            new=AsyncMock(return_value="en"),
+        ):
             await on_plain_text_setting(message)
 
-        message.answer.assert_awaited_once_with(_format_inactive_chat_text())
+        message.answer.assert_awaited_once_with(_format_inactive_chat_text(language="en"))
         preferences_mock.assert_not_awaited()
 
 
@@ -768,7 +776,7 @@ class TelegramBotRevalidationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         calculator = SimpleNamespace(
-            calculate_opportunities=lambda directions, max_capital=None: [
+            calculate_opportunities=lambda directions, max_capital=None, max_polymarket_capital=None, max_predict_fun_capital=None: [
                 {
                     "direction": "A_no_B_yes",
                     "avg_price_leg_1": 0.40,
@@ -825,7 +833,7 @@ class TelegramBotRevalidationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         calculator = SimpleNamespace(
-            calculate_opportunities=lambda directions, max_capital=None: [
+            calculate_opportunities=lambda directions, max_capital=None, max_polymarket_capital=None, max_predict_fun_capital=None: [
                 {
                     "direction": "A_yes_B_no",
                     "avg_price_leg_1": 0.41,
@@ -900,3 +908,55 @@ class TelegramBotRevalidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertAlmostEqual(opportunity.capital_required, 4.65)
         self.assertAlmostEqual(opportunity.shares, 5.0)
+
+
+    async def test_revalidate_alert_opportunity_applies_user_platform_capital_limits(self):
+        opportunity = SimpleNamespace(
+            direction="A_yes_B_no",
+            price_leg_1=0.0,
+            price_leg_2=0.0,
+            avg_price_leg_1=0.0,
+            avg_price_leg_2=0.0,
+            shares=0.0,
+            capital_required=0.0,
+            gross_profit=0.0,
+            net_profit=0.0,
+            gross_roi=0.0,
+            net_roi=0.0,
+            calculation_json=None,
+        )
+        pair = SimpleNamespace(id=7)
+        orderbook_service = SimpleNamespace(
+            fetch_orderbooks_for_pairs=AsyncMock(
+                return_value=[
+                    {
+                        "directions": {
+                            "A_yes_B_no": {
+                                "poly": [(0.40, 12)],
+                                "pf": [(0.50, 12)],
+                            }
+                        }
+                    }
+                ]
+            )
+        )
+        with patch("arbitrage_bot.core.config.settings.FEE_POLYMARKET_BPS", 0.0), \
+             patch("arbitrage_bot.core.config.settings.FEE_PREDICT_FUN_BPS", 0.0):
+            calculator = ArbitrageCalculator()
+
+            result = await _revalidate_alert_opportunity(
+                object(),
+                opportunity,
+                pair,
+                orderbook_service,
+                calculator,
+                preferences={
+                    "max_polymarket_capital_usd": 2.4,
+                    "max_predict_fun_capital_usd": 3.0,
+                },
+            )
+
+        self.assertTrue(result)
+        self.assertAlmostEqual(opportunity.avg_price_leg_1 * opportunity.shares, 2.4)
+        self.assertAlmostEqual(opportunity.avg_price_leg_2 * opportunity.shares, 3.0)
+        self.assertAlmostEqual(opportunity.shares, 6.0)

@@ -16,6 +16,8 @@ DEFAULT_PREFERENCES = {
     "min_roi_percent": 5,
     "min_capital_usd": 10,
     "max_capital_usd": 150,
+    "max_polymarket_capital_usd": None,
+    "max_predict_fun_capital_usd": None,
     "min_profit_usd": None,
     "max_days_to_close": 5,
 }
@@ -23,6 +25,8 @@ FIELD_LABELS = {
     "min_roi_percent": "Min ROI",
     "min_capital_usd": "Min volume",
     "max_capital_usd": "Max volume",
+    "max_polymarket_capital_usd": "Polymarket balance",
+    "max_predict_fun_capital_usd": "Predict.Fun balance",
     "min_profit_usd": "Min profit",
     "max_days_to_close": "Max market end",
 }
@@ -59,6 +63,8 @@ def _make_default_preference(user_id):
         min_roi_percent=DEFAULT_PREFERENCES["min_roi_percent"],
         min_capital_usd=DEFAULT_PREFERENCES["min_capital_usd"],
         max_capital_usd=DEFAULT_PREFERENCES["max_capital_usd"],
+        max_polymarket_capital_usd=DEFAULT_PREFERENCES["max_polymarket_capital_usd"],
+        max_predict_fun_capital_usd=DEFAULT_PREFERENCES["max_predict_fun_capital_usd"],
         min_profit_usd=DEFAULT_PREFERENCES["min_profit_usd"],
         max_days_to_close=DEFAULT_PREFERENCES["max_days_to_close"],
         muted=False,
@@ -73,9 +79,12 @@ def _serialize_user_preferences(preferences):
         "min_roi_percent": preferences.min_roi_percent,
         "min_capital_usd": preferences.min_capital_usd,
         "max_capital_usd": preferences.max_capital_usd,
+        "max_polymarket_capital_usd": preferences.max_polymarket_capital_usd,
+        "max_predict_fun_capital_usd": preferences.max_predict_fun_capital_usd,
         "min_profit_usd": preferences.min_profit_usd,
         "max_days_to_close": preferences.max_days_to_close,
         "muted": preferences.muted,
+        "language": preferences.language,
     }
 
 
@@ -202,6 +211,30 @@ async def set_user_preference(db_session, chat_id, field_name, field_value):
     return _serialize_user_preferences(preferences)
 
 
+async def get_user_language(db_session, chat_id):
+    telegram_chat = await ensure_telegram_user(db_session, chat_id)
+    stmt = select(UserPreference).where(UserPreference.user_id == telegram_chat.user_id)
+    result = await db_session.execute(stmt)
+    preferences = result.scalars().first()
+    if preferences is None:
+        return None
+    return preferences.language
+
+
+async def set_user_language(db_session, chat_id, language):
+    telegram_chat = await ensure_telegram_user(db_session, chat_id)
+    stmt = select(UserPreference).where(UserPreference.user_id == telegram_chat.user_id)
+    result = await db_session.execute(stmt)
+    preferences = result.scalars().first()
+    if preferences is None:
+        preferences = _make_default_preference(user_id=telegram_chat.user_id)
+        db_session.add(preferences)
+    preferences.language = language
+    preferences.updated_at = datetime.now(timezone.utc)
+    await db_session.commit()
+    return _serialize_user_preferences(preferences)
+
+
 async def reset_user_preferences(db_session, chat_id):
     telegram_chat = await ensure_telegram_user(db_session, chat_id)
     stmt = select(UserPreference).where(UserPreference.user_id == telegram_chat.user_id)
@@ -218,6 +251,8 @@ async def reset_user_preferences(db_session, chat_id):
     preferences.min_roi_percent = DEFAULT_PREFERENCES["min_roi_percent"]
     preferences.min_capital_usd = DEFAULT_PREFERENCES["min_capital_usd"]
     preferences.max_capital_usd = DEFAULT_PREFERENCES["max_capital_usd"]
+    preferences.max_polymarket_capital_usd = DEFAULT_PREFERENCES["max_polymarket_capital_usd"]
+    preferences.max_predict_fun_capital_usd = DEFAULT_PREFERENCES["max_predict_fun_capital_usd"]
     preferences.min_profit_usd = DEFAULT_PREFERENCES["min_profit_usd"]
     preferences.max_days_to_close = DEFAULT_PREFERENCES["max_days_to_close"]
     preferences.updated_at = datetime.now(timezone.utc)
@@ -317,89 +352,109 @@ async def _save_global_preferences(db_session, preferences):
     return preferences
 
 
-def format_preferences_text(preferences, chat_id=None):
-    min_roi_str = _format_roi_value(preferences, chat_id=chat_id)
+def format_preferences_text(preferences, language=None):
+    lang = language or preferences.get("language")
+    min_roi_str = _format_roi_value(preferences, language=lang)
     min_capital = preferences.get("min_capital_usd")
-    min_capital_str = translate(chat_id, "off", "выкл") if min_capital is None else _format_money(min_capital, fallback='')
+    min_capital_str = translate(lang, "off", "выкл") if min_capital is None else _format_money(min_capital, fallback='')
     max_capital = preferences.get("max_capital_usd")
-    max_capital_str = translate(chat_id, "off", "выкл") if max_capital is None else _format_money(max_capital, fallback='')
+    max_capital_str = translate(lang, "off", "выкл") if max_capital is None else _format_money(max_capital, fallback='')
+    max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
+    max_polymarket_capital_str = translate(lang, "off", "выкл") if max_polymarket_capital is None else _format_money(max_polymarket_capital, fallback='')
+    max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
+    max_predict_fun_capital_str = translate(lang, "off", "выкл") if max_predict_fun_capital is None else _format_money(max_predict_fun_capital, fallback='')
     min_profit = preferences.get("min_profit_usd")
-    min_profit_str = translate(chat_id, "off", "выкл") if min_profit is None else _format_money(min_profit, fallback='')
-    max_days = _format_days(preferences.get("max_days_to_close"), chat_id=chat_id)
+    min_profit_str = translate(lang, "off", "выкл") if min_profit is None else _format_money(min_profit, fallback='')
+    max_days = _format_days(preferences.get("max_days_to_close"), language=lang)
     return (
-        f"{translate(chat_id, '⚙️ Your alert settings', '⚙️ Ваши настройки алертов')}\n\n"
-        f"📈 {translate(chat_id, 'Min ROI', 'Мин. ROI')}\n"
-        f"{translate(chat_id, 'Current', 'Сейчас')}: {min_roi_str}\n\n"
-        f"📦 {translate(chat_id, 'Min volume', 'Мин. объём')}\n"
-        f"{translate(chat_id, 'Current', 'Сейчас')}: {min_capital_str}\n\n"
-        f"💵 {translate(chat_id, 'Volume', 'Макс. объём')}\n"
-        f"{translate(chat_id, 'Current', 'Сейчас')}: {max_capital_str}\n\n"
-        f"💰 {translate(chat_id, 'Min profit', 'Мин. прибыль')}\n"
-        f"{translate(chat_id, 'Current', 'Сейчас')}: {min_profit_str}\n\n"
-        f"⏳ {translate(chat_id, 'Max market end', 'Макс. срок рынка')}\n"
-        f"{translate(chat_id, 'Current', 'Сейчас')}: {max_days}"
+        f"{translate(lang, '⚙️ Your alert settings', '⚙️ Ваши настройки алертов')}\n\n"
+        f"📈 {translate(lang, 'Min ROI', 'Мин. ROI')}\n"
+        f"{translate(lang, 'Current', 'Сейчас')}: {min_roi_str}\n\n"
+        f"📦 {translate(lang, 'Min volume', 'Мин. объём')}\n"
+        f"{translate(lang, 'Current', 'Сейчас')}: {min_capital_str}\n\n"
+        f"💵 {translate(lang, 'Volume', 'Макс. объём')}\n"
+        f"{translate(lang, 'Current', 'Сейчас')}: {max_capital_str}\n\n"
+        f"🔵 {translate(lang, 'Polymarket balance', 'Баланс Polymarket')}\n"
+        f"{translate(lang, 'Current', 'Сейчас')}: {max_polymarket_capital_str}\n\n"
+        f"🟣 {translate(lang, 'Predict.Fun balance', 'Баланс Predict.Fun')}\n"
+        f"{translate(lang, 'Current', 'Сейчас')}: {max_predict_fun_capital_str}\n\n"
+        f"💰 {translate(lang, 'Min profit', 'Мин. прибыль')}\n"
+        f"{translate(lang, 'Current', 'Сейчас')}: {min_profit_str}\n\n"
+        f"⏳ {translate(lang, 'Max market end', 'Макс. срок рынка')}\n"
+        f"{translate(lang, 'Current', 'Сейчас')}: {max_days}"
     )
 
 
-def format_home_text(preferences, chat_id=None):
+def format_home_text(preferences, language=None):
+    lang = language or preferences.get("language")
     min_capital = preferences.get("min_capital_usd")
-    min_capital_str = translate(chat_id, "off", "выкл") if min_capital is None else _format_money(min_capital, fallback='')
+    min_capital_str = translate(lang, "off", "выкл") if min_capital is None else _format_money(min_capital, fallback='')
     max_capital = preferences.get("max_capital_usd")
-    max_capital_str = translate(chat_id, "off", "выкл") if max_capital is None else _format_money(max_capital, fallback='')
+    max_capital_str = translate(lang, "off", "выкл") if max_capital is None else _format_money(max_capital, fallback='')
+    max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
+    max_polymarket_capital_str = translate(lang, "off", "выкл") if max_polymarket_capital is None else _format_money(max_polymarket_capital, fallback='')
+    max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
+    max_predict_fun_capital_str = translate(lang, "off", "выкл") if max_predict_fun_capital is None else _format_money(max_predict_fun_capital, fallback='')
     min_profit = preferences.get("min_profit_usd")
-    min_profit_str = translate(chat_id, "off", "выкл") if min_profit is None else _format_money(min_profit, fallback='')
+    min_profit_str = translate(lang, "off", "выкл") if min_profit is None else _format_money(min_profit, fallback='')
     muted = preferences.get("muted", False)
     status_icon = "🔴" if muted else "🟢"
-    status_label = translate(chat_id, "Paused", "На паузе") if muted else translate(chat_id, "Active", "Активен")
+    status_label = translate(lang, "Paused", "На паузе") if muted else translate(lang, "Active", "Активен")
     return (
-        f"{translate(chat_id, '🔎 Arbitrage Scanner', '🔎 Сканер арбитража')}\n\n"
-        f"{translate(chat_id, 'Monitors Polymarket and Predict.Fun for spread inefficiencies.', 'Следит за Polymarket и Predict.Fun и ищет неэффективности спреда.')}\n\n"
-        f"{status_icon} {translate(chat_id, 'Status', 'Статус')}: {status_label}\n"
-        f"{translate(chat_id, 'Filters are applied to your personal alert stream.', 'Фильтры применяются только к вашему потоку алертов.')}\n\n"
-        f"{translate(chat_id, 'Your filters', 'Ваши фильтры')}:\n"
-        f"• 📈 {translate(chat_id, 'Min ROI', 'Мин. ROI')}: {_format_roi_value(preferences, chat_id=chat_id)}\n"
-        f"• 📦 {translate(chat_id, 'Min volume', 'Мин. объём')}: {min_capital_str}\n"
-        f"• 💵 {translate(chat_id, 'Max volume', 'Макс. объём')}: {max_capital_str}\n"
-        f"• 💰 {translate(chat_id, 'Min profit', 'Мин. прибыль')}: {min_profit_str}\n"
-        f"• ⏳ {translate(chat_id, 'Max market end', 'Макс. срок рынка')}: {_format_days(preferences.get('max_days_to_close'), chat_id=chat_id)}"
+        f"{translate(lang, '🔎 Arbitrage Scanner', '🔎 Сканер арбитража')}\n\n"
+        f"{translate(lang, 'Monitors Polymarket and Predict.Fun for spread inefficiencies.', 'Следит за Polymarket и Predict.Fun и ищет неэффективности спреда.')}\n\n"
+        f"{status_icon} {translate(lang, 'Status', 'Статус')}: {status_label}\n"
+        f"{translate(lang, 'Filters are applied to your personal alert stream.', 'Фильтры применяются только к вашему потоку алертов.')}\n\n"
+        f"{translate(lang, 'Your filters', 'Ваши фильтры')}:\n"
+        f"• 📈 {translate(lang, 'Min ROI', 'Мин. ROI')}: {_format_roi_value(preferences, language=lang)}\n"
+        f"• 📦 {translate(lang, 'Min volume', 'Мин. объём')}: {min_capital_str}\n"
+        f"• 💵 {translate(lang, 'Max volume', 'Макс. объём')}: {max_capital_str}\n"
+        f"• 🔵 {translate(lang, 'Polymarket balance', 'Баланс Polymarket')}: {max_polymarket_capital_str}\n"
+        f"• 🟣 {translate(lang, 'Predict.Fun balance', 'Баланс Predict.Fun')}: {max_predict_fun_capital_str}\n"
+        f"• 💰 {translate(lang, 'Min profit', 'Мин. прибыль')}: {min_profit_str}\n"
+        f"• ⏳ {translate(lang, 'Max market end', 'Макс. срок рынка')}: {_format_days(preferences.get('max_days_to_close'), language=lang)}"
     )
 
 
-def format_status_text(preferences, chat_id=None):
+def format_status_text(preferences, language=None):
+    lang = language or preferences.get("language")
     muted = preferences.get("muted", False)
     status_icon = "🔴" if muted else "🟢"
-    status_label = translate(chat_id, "Paused", "На паузе") if muted else translate(chat_id, "Active", "Активен")
+    status_label = translate(lang, "Paused", "На паузе") if muted else translate(lang, "Active", "Активен")
     alerts_line = (
-        translate(chat_id, "📭 Telegram alerts are paused.", "📭 Telegram-алерты поставлены на паузу.")
+        translate(lang, "📭 Telegram alerts are paused.", "📭 Telegram-алерты поставлены на паузу.")
         if muted
-        else translate(chat_id, "📬 Telegram alerts are enabled.", "📬 Telegram-алерты включены.")
+        else translate(lang, "📬 Telegram alerts are enabled.", "📬 Telegram-алерты включены.")
     )
     return (
-        f"{translate(chat_id, '📡 Arbitrage Scanner', '📡 Сканер арбитража')}\n\n"
-        f"{translate(chat_id, 'Current bot status.', 'Текущий статус бота.')}\n\n"
-        f"{status_icon} {translate(chat_id, 'Status', 'Статус')}: {status_label}\n"
-        f"{translate(chat_id, '🔄 Monitoring is running in the background.', '🔄 Мониторинг работает в фоне.')}\n"
+        f"{translate(lang, '📡 Arbitrage Scanner', '📡 Сканер арбитража')}\n\n"
+        f"{translate(lang, 'Current bot status.', 'Текущий статус бота.')}\n\n"
+        f"{status_icon} {translate(lang, 'Status', 'Статус')}: {status_label}\n"
+        f"{translate(lang, '🔄 Monitoring is running in the background.', '🔄 Мониторинг работает в фоне.')}\n"
         f"{alerts_line}"
     )
 
 
-def format_setting_prompt(field_name, preferences, chat_id=None):
-    label = _field_label(field_name, chat_id=chat_id)
-    current_value = _format_field_value(field_name, preferences, chat_id=chat_id)
+def format_setting_prompt(field_name, preferences, language=None):
+    lang = language or preferences.get("language")
+    label = _field_label(field_name, language=lang)
+    current_value = _format_field_value(field_name, preferences, language=lang)
     description = {
-        "min_roi_percent": translate(chat_id, "Enter the minimum ROI percentage required to receive a signal.", "Введите минимальный ROI в процентах для получения сигнала."),
-        "min_capital_usd": translate(chat_id, "Enter the minimum volume in USD required for an alert.", "Введите минимальный объём в USD для получения алерта."),
-        "max_capital_usd": translate(chat_id, "Enter the maximum volume in USD allowed for an alert.", "Введите максимальный объём в USD для получения алерта."),
-        "min_profit_usd": translate(chat_id, "Enter the minimum profit in USD required for an alert.", "Введите минимальную прибыль в USD для получения алерта."),
-        "max_days_to_close": translate(chat_id, "Enter the maximum number of days until market expiry.", "Введите максимальное количество дней до окончания рынка."),
+        "min_roi_percent": translate(lang, "Enter the minimum ROI percentage required to receive a signal.", "Введите минимальный ROI в процентах для получения сигнала."),
+        "min_capital_usd": translate(lang, "Enter the minimum volume in USD required for an alert.", "Введите минимальный объём в USD для получения алерта."),
+        "max_capital_usd": translate(lang, "Enter the maximum volume in USD allowed for an alert.", "Введите максимальный объём в USD для получения алерта."),
+        "max_polymarket_capital_usd": translate(lang, "Enter how much USD you have available on Polymarket.", "Введите, сколько USD у вас доступно на Polymarket."),
+        "max_predict_fun_capital_usd": translate(lang, "Enter how much USD you have available on Predict.Fun.", "Введите, сколько USD у вас доступно на Predict.Fun."),
+        "min_profit_usd": translate(lang, "Enter the minimum profit in USD required for an alert.", "Введите минимальную прибыль в USD для получения алерта."),
+        "max_days_to_close": translate(lang, "Enter the maximum number of days until market expiry.", "Введите максимальное количество дней до окончания рынка."),
     }[field_name]
 
     return (
-        f"{translate(chat_id, '⚙️ Arbitrage Scanner', '⚙️ Сканер арбитража')}\n\n"
-        f"✏️ {translate(chat_id, 'Change', 'Изменить')}: {label}\n"
-        f"→ {translate(chat_id, 'current value', 'текущее значение')}: {current_value}\n\n"
+        f"{translate(lang, '⚙️ Arbitrage Scanner', '⚙️ Сканер арбитража')}\n\n"
+        f"✏️ {translate(lang, 'Change', 'Изменить')}: {label}\n"
+        f"→ {translate(lang, 'current value', 'текущее значение')}: {current_value}\n\n"
         f"{description}\n\n"
-        f"{translate(chat_id, 'Send `off` to disable this filter.', 'Отправьте `выкл`, чтобы отключить этот фильтр.')}"
+        f"{translate(lang, 'Send `off` to disable this filter.', 'Отправьте `выкл`, чтобы отключить этот фильтр.')}"
     )
 
 
@@ -415,6 +470,15 @@ def filter_reason_for_preferences(opportunity, market_a, market_b, preferences, 
     max_capital = preferences.get("max_capital_usd")
     if not skip_max_capital and max_capital is not None and opportunity.capital_required > float(max_capital):
         return "max_capital"
+
+    platform_capitals = _extract_platform_capitals(opportunity, market_a, market_b)
+    max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
+    if not skip_max_capital and max_polymarket_capital is not None and platform_capitals["polymarket"] > float(max_polymarket_capital):
+        return "max_polymarket_capital"
+
+    max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
+    if not skip_max_capital and max_predict_fun_capital is not None and platform_capitals["predict_fun"] > float(max_predict_fun_capital):
+        return "max_predict_fun_capital"
 
     min_profit = preferences.get("min_profit_usd")
     if min_profit is not None and opportunity.net_profit < float(min_profit):
@@ -449,13 +513,13 @@ def effective_min_roi(preferences):
     return float(min_roi)
 
 
-def _format_field_value(field_name, preferences, chat_id=None):
+def _format_field_value(field_name, preferences, language=None):
     if field_name == "min_roi_percent":
-        return _format_roi_value(preferences, chat_id=chat_id)
-    if field_name in {"min_capital_usd", "max_capital_usd", "min_profit_usd"}:
+        return _format_roi_value(preferences, language=language)
+    if field_name in {"min_capital_usd", "max_capital_usd", "max_polymarket_capital_usd", "max_predict_fun_capital_usd", "min_profit_usd"}:
         val = preferences.get(field_name)
-        return translate(chat_id, "off", "выкл") if val is None else _format_money(val, fallback='')
-    return _format_days(preferences.get(field_name), chat_id=chat_id)
+        return translate(language, "off", "выкл") if val is None else _format_money(val, fallback='')
+    return _format_days(preferences.get(field_name), language=language)
 
 
 def extract_pair_close_datetime(market_a, market_b):
@@ -519,28 +583,72 @@ def _format_percent(value, fallback):
     return f"{float(value):.2f}%"
 
 
-def _format_days(value, chat_id=None):
+def _format_days(value, language=None):
     if value is None:
-        return translate(chat_id, "off", "выкл")
-    return translate(chat_id, f"{int(value)} days", f"{int(value)} дн.")
+        return translate(language, "off", "выкл")
+    return translate(language, f"{int(value)} days", f"{int(value)} дн.")
 
 
-def _format_roi_value(preferences, chat_id=None):
+def _format_roi_value(preferences, language=None):
     min_roi = effective_min_roi(preferences)
     if min_roi is None:
-        return translate(chat_id, "off", "выкл")
+        return translate(language, "off", "выкл")
     return f"{float(min_roi):.2f}%"
 
 
-def _field_label(field_name, chat_id=None):
+def _field_label(field_name, language=None):
     ru_labels = {
         "min_roi_percent": "Мин. ROI",
         "min_capital_usd": "Мин. объём",
         "max_capital_usd": "Макс. объём",
+        "max_polymarket_capital_usd": "Баланс Polymarket",
+        "max_predict_fun_capital_usd": "Баланс Predict.Fun",
         "min_profit_usd": "Мин. прибыль",
         "max_days_to_close": "Макс. срок рынка",
     }
-    return translate(chat_id, FIELD_LABELS[field_name], ru_labels[field_name])
+    return translate(language, FIELD_LABELS[field_name], ru_labels[field_name])
+
+
+def _extract_platform_capitals(opportunity, market_a, market_b):
+    shares = float(getattr(opportunity, "shares", 0.0) or 0.0)
+    leg_1_price = float(
+        getattr(
+            opportunity,
+            "avg_price_leg_1",
+            getattr(opportunity, "price_leg_1", 0.0),
+        ) or 0.0
+    )
+    leg_2_price = float(
+        getattr(
+            opportunity,
+            "avg_price_leg_2",
+            getattr(opportunity, "price_leg_2", 0.0),
+        ) or 0.0
+    )
+    leg_1_capital = shares * leg_1_price
+    leg_2_capital = shares * leg_2_price
+    platform_a = str(getattr(market_a, "platform", "") or "").lower()
+    platform_b = str(getattr(market_b, "platform", "") or "").lower()
+    capitals = {
+        "polymarket": 0.0,
+        "predict_fun": 0.0,
+    }
+
+    if platform_a == "polymarket":
+        capitals["polymarket"] = leg_1_capital
+    elif platform_a == "predict_fun":
+        capitals["predict_fun"] = leg_1_capital
+
+    if platform_b == "polymarket":
+        capitals["polymarket"] = leg_2_capital
+    elif platform_b == "predict_fun":
+        capitals["predict_fun"] = leg_2_capital
+
+    if not platform_a and not platform_b:
+        capitals["polymarket"] = leg_1_capital
+        capitals["predict_fun"] = leg_2_capital
+
+    return capitals
 
 
 def _ui_state_key(chat_id):

@@ -3,20 +3,19 @@ import json
 import os
 import sys
 from pathlib import Path
-from urllib import error, parse, request
+from urllib import error
+from urllib import request
 
 from arbitrage_bot.core.env_loader import load_env_file
 
 ENV_FILE_PATH = Path.home() / ".config" / "arbivision" / ".env"
+
 
 def _parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.environ.get("APP_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("APP_PORT", "8000")))
     parser.add_argument("--scheme", default="http")
-    parser.add_argument("--market-id", type=int, default=None)
-    parser.add_argument("--limit", type=int, default=5)
-    parser.add_argument("--status", default="auto_approved")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 
@@ -56,34 +55,6 @@ def _print_summary(name, payload):
             f" queued_fanout={opportunities.get('queued_fanout', 0)}"
             f" queued_alerts={alerts.get('queued', 0)}"
         )
-        return
-
-    if name == "admin pairs":
-        print(f"admin pairs: {len(payload.get('data', []))}")
-        return
-
-    if name == "matcher debug":
-        candidates = payload.get("data", [])
-        if not candidates:
-            print("matcher debug: 0 candidates")
-            return
-
-        top_candidate = candidates[0]
-        print(
-            "matcher debug:"
-            f" candidates={len(candidates)}"
-            f" top_market_id={top_candidate.get('market_id')}"
-            f" matched={top_candidate.get('matched')}"
-            f" reject_reason={top_candidate.get('reject_reason')}"
-        )
-
-
-def _admin_headers():
-    token = os.environ.get("ADMIN_API_TOKEN", "").strip()
-    if not token:
-        print("ADMIN_API_TOKEN is empty")
-        raise SystemExit(1)
-    return {"X-Admin-Token": token}
 
 
 def _run_check(name, url, headers=None, verbose=False):
@@ -110,35 +81,9 @@ def main():
     load_env_file(ENV_FILE_PATH)
     args = _parse_args()
     base_url = _base_url(args)
-    admin_headers = _admin_headers()
 
     _run_check("health", f"{base_url}/api/health", verbose=args.verbose)
     _run_check("status", f"{base_url}/api/status", verbose=args.verbose)
-
-    pairs_query = parse.urlencode({"status": args.status})
-    pairs_payload = _run_check(
-        "admin pairs",
-        f"{base_url}/api/admin/pairs?{pairs_query}",
-        headers=admin_headers,
-        verbose=args.verbose,
-    )
-
-    market_id = args.market_id
-    if market_id is None and pairs_payload.get("data"):
-        market_id = pairs_payload["data"][0]["market_id_a"]
-        print(f"\nusing first pair market_id_a for matcher debug: {market_id}")
-
-    if market_id is None:
-        print("\nmatcher debug skipped: no --market-id and no pairs found")
-        return
-
-    debug_query = parse.urlencode({"market_id": market_id, "limit": args.limit})
-    _run_check(
-        "matcher debug",
-        f"{base_url}/api/admin/matcher/debug?{debug_query}",
-        headers=admin_headers,
-        verbose=args.verbose,
-    )
 
 
 if __name__ == "__main__":

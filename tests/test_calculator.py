@@ -83,3 +83,21 @@ class ArbitrageCalculatorTests(unittest.TestCase):
         self.assertAlmostEqual(result["capital_required"], 4.5)
         self.assertAlmostEqual(result["shares"], 5.0)
         self.assertAlmostEqual(result["net_profit"], 0.5)
+
+
+    def test_calculates_opportunity_with_per_platform_capital_limits(self):
+        with patch("arbitrage_bot.core.config.settings.FEE_POLYMARKET_BPS", 0.0), \
+             patch("arbitrage_bot.core.config.settings.FEE_PREDICT_FUN_BPS", 0.0):
+            calculator = ArbitrageCalculator()
+
+        result = calculator.calculate_opportunity(
+            poly_asks=[(0.40, 10)],
+            pf_asks=[(0.50, 10)],
+            max_polymarket_capital=2.4,
+            max_predict_fun_capital=3.0,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result["shares"], 6.0)
+        self.assertAlmostEqual(result["avg_price_leg_1"] * result["shares"], 2.4)
+        self.assertAlmostEqual(result["avg_price_leg_2"] * result["shares"], 3.0)

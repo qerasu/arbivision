@@ -28,11 +28,11 @@ class FanoutManager:
     async def process_pending_opportunities(self, limit=50):
         delivery_targets = await self._get_delivery_targets()
         processed_count = 0
-        for _ in range(limit):
-            row = await self._claim_pending_opportunity()
-            if row is None:
-                break
+        rows = await self._claim_pending_opportunities(limit)
+        if not rows:
+            return 0
 
+        for row in rows:
             opportunity, pair, market_a, market_b = row
             try:
                 incr_counter("fanout.opportunity_claimed")
@@ -47,7 +47,6 @@ class FanoutManager:
                 opportunity.fanout_error_message = None
                 processed_count += created_alerts
                 incr_counter("fanout.opportunity_processed")
-                await self.db.commit()
             except Exception as exc:
                 if opportunity.fanout_status == "retry":
                     opportunity.fanout_status = "failed"
@@ -56,12 +55,13 @@ class FanoutManager:
                     opportunity.fanout_status = "retry"
                     incr_counter("fanout.opportunity_retry")
                 opportunity.fanout_error_message = str(exc)
-                await self.db.commit()
+
+        await self.db.commit()
 
         return processed_count
 
 
-    async def _claim_pending_opportunity(self):
+    async def _claim_pending_opportunities(self, limit):
         market_b_alias = aliased(Market)
         stmt = (
             select(ArbOpportunity, MarketPair, Market, market_b_alias)
@@ -70,18 +70,19 @@ class FanoutManager:
             .join(market_b_alias, MarketPair.market_id_b == market_b_alias.id)
             .where(ArbOpportunity.fanout_status.in_(["queued", "retry"]))
             .order_by(ArbOpportunity.id)
-            .limit(1)
+            .limit(limit)
             .with_for_update(skip_locked=True, of=ArbOpportunity)
         )
         result = await self.db.execute(stmt)
-        row = result.first()
-        if row is None:
-            return None
+        rows = result.all()
+        if not rows:
+            return []
 
-        opportunity, _, _, _ = row
-        opportunity.fanout_status = "processing"
-        opportunity.fanout_error_message = None
-        return row
+        for opportunity, _, _, _ in rows:
+            opportunity.fanout_status = "processing"
+            opportunity.fanout_error_message = None
+
+        return rows
 
 
     async def _fanout_opportunity(self, opportunity, market_a, market_b, delivery_targets=None):

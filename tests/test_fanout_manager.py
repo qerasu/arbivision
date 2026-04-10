@@ -29,12 +29,16 @@ class FakeScalarResult:
 
 
 class FakeTupleResult:
-    def __init__(self, row=None):
-        self.row = row
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
 
 
     def first(self):
-        return self.row
+        return self.rows[0] if self.rows else None
+
+
+    def all(self):
+        return list(self.rows)
 
 
 class FakeNestedTransaction:
@@ -51,7 +55,7 @@ class FakeDbSession:
         self.added = []
         self.flush_calls = 0
         self.commit_calls = 0
-        self.claim_row = None
+        self.claim_rows = None
         self.fail_on_chat_ids = set()
 
 
@@ -80,7 +84,7 @@ class FakeDbSession:
         if "SELECT alerts.telegram_chat_id" in compiled:
             return FakeScalarResult([])
         if "FROM arb_opportunities" in compiled:
-            return FakeTupleResult(self.claim_row)
+            return FakeTupleResult(self.claim_rows)
         raise AssertionError(f"unexpected stmt: {compiled}")
 
 
@@ -357,24 +361,22 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created_count, 1)
 
 
-    async def test_claim_pending_opportunity_marks_row_as_processing(self):
+    async def test_claim_pending_opportunities_marks_rows_as_processing(self):
         db = FakeDbSession()
-        opportunity = SimpleNamespace(
-            id=7,
-            fanout_status="queued",
-            fanout_error_message="boom",
-        )
-        db.claim_row = (
-            opportunity,
-            SimpleNamespace(id=5),
-            SimpleNamespace(id=101),
-            SimpleNamespace(id=202),
-        )
+        opportunity = SimpleNamespace(id=7, fanout_status="queued", fanout_error_message="boom")
+        db.claim_rows = [
+            (
+                opportunity,
+                SimpleNamespace(id=5),
+                SimpleNamespace(id=101),
+                SimpleNamespace(id=202),
+            )
+        ]
         manager = FanoutManager(db)
 
-        row = await manager._claim_pending_opportunity()
+        rows = await manager._claim_pending_opportunities(limit=10)
 
-        self.assertIsNotNone(row)
+        self.assertEqual(len(rows), 1)
         self.assertEqual(opportunity.fanout_status, "processing")
         self.assertIsNone(opportunity.fanout_error_message)
 
@@ -420,10 +422,10 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
                 SimpleNamespace(id=204),
             ),
         ]
-        claim_mock = AsyncMock(side_effect=[opportunities[0], opportunities[1], None])
+        claim_mock = AsyncMock(return_value=opportunities)
         fanout_mock = AsyncMock(return_value=1)
 
-        with patch.object(manager, "_claim_pending_opportunity", new=claim_mock), patch.object(
+        with patch.object(manager, "_claim_pending_opportunities", new=claim_mock), patch.object(
             manager,
             "_fanout_opportunity",
             new=fanout_mock,
@@ -436,6 +438,7 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(processed_count, 2)
         self.assertEqual(targets_mock.await_count, 1)
+        self.assertEqual(db.commit_calls, 1)
 
 
     async def test_create_alert_deliveries_skips_existing_lookup_for_fresh_opportunity(self):

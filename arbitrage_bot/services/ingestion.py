@@ -2,6 +2,8 @@ import asyncio
 import json
 import time
 from datetime import datetime, timezone
+from sqlalchemy import Text, cast, func, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.future import select
 from sqlalchemy.exc import IntegrityError
 
@@ -27,6 +29,7 @@ class IngestionService:
         self.polymarket = PolymarketAdapter()
         self.predict_fun = PredictFunAdapter()
         self.normalizer = NormalizerService()
+        self._changed_market_ids_by_platform = self._empty_changed_market_ids()
 
 
     async def close(self):
@@ -210,6 +213,7 @@ class IngestionService:
 
 
     async def sync_markets(self):
+        self._changed_market_ids_by_platform = self._empty_changed_market_ids()
         source_jobs = []
         now = time.monotonic()
 
@@ -232,7 +236,7 @@ class IngestionService:
             )
 
         if not source_jobs:
-            return False
+            return self._build_sync_result(False)
 
         results = await asyncio.gather(
             *(job[1] for job in source_jobs),
@@ -248,7 +252,28 @@ class IngestionService:
             if synced:
                 _source_last_sync_completed_at[source_name] = time.monotonic()
 
-        return True
+        return self._build_sync_result(True)
+
+
+    def _empty_changed_market_ids(self):
+        return {
+            "polymarket": set(),
+            "predict_fun": set(),
+        }
+
+
+    def _build_sync_result(self, synced):
+        return {
+            "synced": bool(synced),
+            "changed_market_ids_by_platform": {
+                platform: set(market_ids)
+                for platform, market_ids in self._changed_market_ids_by_platform.items()
+            },
+        }
+
+
+    def _source_platform_name(self, source_name):
+        return str(source_name or "").replace(".", "_")
 
 
     def _format_source_error(self, source, operation, error):
@@ -278,14 +303,27 @@ class IngestionService:
 
             raw_items = payload_or_exc.get("data", payload_or_exc) if isinstance(payload_or_exc, dict) else payload_or_exc
             mapped_items = [mapper(item) for item in raw_items if isinstance(item, dict)]
+            platform = mapped_items[0]["platform"] if mapped_items else self._source_platform_name(source_name)
+            mapped_items, duplicate_count = self._dedupe_market_items(mapped_items)
+            if duplicate_count:
+                log.warning(
+                    "duplicate markets removed before upsert",
+                    source=source_name,
+                    duplicate_rows=duplicate_count,
+                )
+            if not mapped_items:
+                self._changed_market_ids_by_platform.setdefault(platform, set())
+                return True
+            changed_market_ids = set()
             for chunk in self._chunked(mapped_items, 1000):
-                await self._upsert_markets(chunk)
+                changed_market_ids.update(await self._upsert_markets(chunk))
                 await self.db.commit()
-            await self._mark_missing_markets_closed(
-                mapped_items[0]["platform"] if mapped_items else None,
+            changed_market_ids.update(await self._mark_missing_markets_closed(
+                platform,
                 {item["platform_market_id"] for item in mapped_items},
-            )
+            ))
             await self.db.commit()
+            self._changed_market_ids_by_platform.setdefault(platform, set()).update(changed_market_ids)
             return True
         except asyncio.CancelledError:
             raise
@@ -298,9 +336,27 @@ class IngestionService:
             return False
 
 
+    def _dedupe_market_items(self, items):
+        deduped = {}
+        duplicate_count = 0
+
+        for item in items:
+            key = (item["platform"], item["platform_market_id"])
+            if key in deduped:
+                duplicate_count += 1
+            deduped[key] = item
+
+        return list(deduped.values()), duplicate_count
+
+
     async def _upsert_markets(self, items):
         if not items:
-            return
+            return set()
+
+        items, _ = self._dedupe_market_items(items)
+
+        if self._supports_postgresql_upsert():
+            return await self._upsert_markets_postgresql(items)
 
         platform = items[0]["platform"]
         market_ids = [
@@ -308,6 +364,8 @@ class IngestionService:
             for item in items
         ]
         existing_by_key = {}
+        created_markets = []
+        changed_market_ids = set()
 
         for market_ids_chunk in self._chunked(
             market_ids,
@@ -326,16 +384,97 @@ class IngestionService:
             key = (item["platform"], item["platform_market_id"])
             market = existing_by_key.get(key)
             if market is not None:
-                self._apply_market_updates(market, item)
+                if self._apply_market_updates(market, item):
+                    changed_market_ids.add(market.id)
             else:
-                self.db.add(Market(**item))
+                market = Market(**item)
+                self.db.add(market)
+                created_markets.append(market)
 
         try:
             await self.db.flush()
         except IntegrityError:
             await self.db.rollback()
             for item in items:
-                await self._upsert_market(item)
+                market_id = await self._upsert_market(item)
+                if market_id is not None:
+                    changed_market_ids.add(market_id)
+            return changed_market_ids
+
+        for market in created_markets:
+            if getattr(market, "id", None) is not None:
+                changed_market_ids.add(market.id)
+
+        return changed_market_ids
+
+
+    def _supports_postgresql_upsert(self):
+        bind = None
+        try:
+            bind = self.db.get_bind()
+        except Exception:
+            bind = getattr(self.db, "bind", None)
+        dialect = getattr(bind, "dialect", None)
+        if dialect is None:
+            dialect = getattr(getattr(bind, "sync_engine", None), "dialect", None)
+        return getattr(dialect, "name", None) == "postgresql"
+
+
+    async def _upsert_markets_postgresql(self, items):
+        now = datetime.now(timezone.utc)
+        rows = [self._market_row_for_upsert(item, now) for item in items]
+        insert_stmt = pg_insert(Market).values(rows)
+        excluded = insert_stmt.excluded
+        update_fields = {
+            "status": excluded.status,
+            "tradable": excluded.tradable,
+            "title": excluded.title,
+            "normalized_title": excluded.normalized_title,
+            "description": excluded.description,
+            "outcomes_json": excluded.outcomes_json,
+            "raw_payload_json": excluded.raw_payload_json,
+            "category": excluded.category,
+            "slug": excluded.slug,
+            "updated_at": excluded.updated_at,
+        }
+        diff_condition = or_(
+            Market.status.is_distinct_from(excluded.status),
+            Market.tradable.is_distinct_from(excluded.tradable),
+            Market.title.is_distinct_from(excluded.title),
+            Market.normalized_title.is_distinct_from(excluded.normalized_title),
+            Market.description.is_distinct_from(excluded.description),
+            cast(Market.outcomes_json, Text).is_distinct_from(cast(excluded.outcomes_json, Text)),
+            func.md5(cast(Market.raw_payload_json, Text)).is_distinct_from(
+                func.md5(cast(excluded.raw_payload_json, Text))
+            ),
+            Market.category.is_distinct_from(excluded.category),
+            Market.slug.is_distinct_from(excluded.slug),
+        )
+        stmt = insert_stmt.on_conflict_do_update(
+            index_elements=[Market.platform, Market.platform_market_id],
+            set_=update_fields,
+            where=diff_condition,
+        ).returning(Market.id)
+        result = await self.db.execute(stmt)
+        return {market_id for market_id, in result.all()}
+
+
+    def _market_row_for_upsert(self, item, now):
+        return {
+            "platform": item["platform"],
+            "platform_market_id": item["platform_market_id"],
+            "status": item["status"],
+            "tradable": item["tradable"],
+            "title": item["title"],
+            "normalized_title": item["normalized_title"],
+            "description": item["description"],
+            "outcomes_json": item["outcomes_json"],
+            "raw_payload_json": item["raw_payload_json"],
+            "category": item["category"],
+            "slug": item["slug"],
+            "created_at": now,
+            "updated_at": now,
+        }
 
 
     async def _upsert_market(self, data):
@@ -347,21 +486,28 @@ class IngestionService:
         market = result.scalars().first()
 
         if market:
-            self._apply_market_updates(market, data)
-            return
+            if self._apply_market_updates(market, data):
+                return market.id
+            return None
 
         try:
             async with self.db.begin_nested():
-                self.db.add(Market(**data))
+                market = Market(**data)
+                self.db.add(market)
                 await self.db.flush()
+                return market.id
         except IntegrityError:
             existing = await self.db.execute(stmt)
             existing_market = existing.scalars().first()
             if existing_market is not None:
-                self._apply_market_updates(existing_market, data)
+                if self._apply_market_updates(existing_market, data):
+                    return existing_market.id
+        return None
 
 
     def _apply_market_updates(self, market, data):
+        if not self._market_fields_changed(market, data):
+            return False
         market.status = data["status"]
         market.tradable = data["tradable"]
         market.title = data["title"]
@@ -372,11 +518,28 @@ class IngestionService:
         market.category = data["category"]
         market.slug = data["slug"]
         market.updated_at = datetime.now(timezone.utc)
+        return True
+
+
+    def _market_fields_changed(self, market, data):
+        return any(
+            (
+                market.status != data["status"],
+                market.tradable != data["tradable"],
+                market.title != data["title"],
+                market.normalized_title != data["normalized_title"],
+                market.description != data["description"],
+                market.outcomes_json != data["outcomes_json"],
+                market.raw_payload_json != data["raw_payload_json"],
+                market.category != data["category"],
+                market.slug != data["slug"],
+            )
+        )
 
 
     async def _mark_missing_markets_closed(self, platform, seen_market_ids):
         if not platform:
-            return
+            return set()
 
         stmt = select(Market).where(
             Market.platform == platform,
@@ -384,11 +547,17 @@ class IngestionService:
         )
         active_markets = (await self.db.execute(stmt)).scalars().all()
         if not active_markets:
-            return
+            return set()
 
+        closed_market_ids = set()
         for market in active_markets:
             if market.platform_market_id in seen_market_ids:
                 continue
             market.status = "closed"
             market.tradable = False
             market.updated_at = datetime.now(timezone.utc)
+            market_id = getattr(market, "id", None)
+            if market_id is not None:
+                closed_market_ids.add(market_id)
+
+        return closed_market_ids

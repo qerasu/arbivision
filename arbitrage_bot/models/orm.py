@@ -27,15 +27,6 @@ class Market(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
-class MarketEntity(Base):
-    __tablename__ = "market_entities"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    market_id = Column(Integer, ForeignKey("markets.id"), nullable=False)
-    entity_type = Column(String, nullable=False)
-    entity_value = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-
-
 class MarketPair(Base):
     __tablename__ = "market_pairs"
     __table_args__ = (
@@ -59,6 +50,7 @@ class ArbOpportunity(Base):
     __table_args__ = (
         Index("ix_arb_opportunities_fanout_status_created_at", "fanout_status", "created_at"),
         Index("ix_arb_opportunities_market_pair_id", "market_pair_id"),
+        Index("ix_arb_opportunities_pair_direction_status", "market_pair_id", "direction", "fanout_status"),
     )
     id = Column(Integer, primary_key=True, autoincrement=True)
     market_pair_id = Column(Integer, ForeignKey("market_pairs.id"), nullable=False)
@@ -114,9 +106,12 @@ class UserPreference(Base):
     min_roi_percent = Column(Float, nullable=True)
     min_capital_usd = Column(Float, nullable=True)
     max_capital_usd = Column(Float, nullable=True)
+    max_polymarket_capital_usd = Column(Float, nullable=True)
+    max_predict_fun_capital_usd = Column(Float, nullable=True)
     min_profit_usd = Column(Float, nullable=True)
     max_days_to_close = Column(Integer, nullable=True)
     muted = Column(Boolean, nullable=False, default=False)
+    language = Column(String, nullable=True, default=None)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 

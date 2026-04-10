@@ -23,18 +23,6 @@ def _get_float_setting(name, default):
         return default
 
 
-def _get_bool_setting(name, default):
-    value = os.getenv(name, str(default)).strip().lower()
-
-    if value in {"1", "true", "yes", "on", "y", "t"}:
-        return True
-
-    if value in {"0", "false", "no", "off", "n", "f"}:
-        return False
-
-    return default
-
-
 # for telegram chat ids
 def _get_list_setting(name, default):
     raw = os.getenv(name, "")
@@ -56,8 +44,6 @@ class Settings:
     REDIS_PORT = _get_int_setting("REDIS_PORT", 6379)
     REDIS_DB = _get_int_setting("REDIS_DB", 0)
 
-    POLYMARKET_ENABLED = _get_bool_setting("POLYMARKET_ENABLED", True)
-    PREDICT_FUN_ENABLED = _get_bool_setting("PREDICT_FUN_ENABLED", True)
     PREDICT_FUN_API_KEY = os.getenv("PREDICT_FUN_API_KEY", "")
 
     FEE_POLYMARKET_BPS = _get_float_setting("FEE_POLYMARKET_BPS", 180.0) # 180.0 max
@@ -84,8 +70,6 @@ class Settings:
     TELEGRAM_DELIVERY_RETRY_SECONDS = _get_float_setting("TELEGRAM_DELIVERY_RETRY_SECONDS", 15.0)
     TELEGRAM_DELIVERY_MAX_ATTEMPTS = _get_int_setting("TELEGRAM_DELIVERY_MAX_ATTEMPTS", 3)
     TELEGRAM_SYSTEM_ERROR_COOLDOWN_SECONDS = _get_float_setting("TELEGRAM_SYSTEM_ERROR_COOLDOWN_SECONDS", 300.0)
-    WARMUP_PROMOTION_LIMIT_PER_CYCLE = _get_int_setting("WARMUP_PROMOTION_LIMIT_PER_CYCLE", 5)
-    ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
     APP_RUNTIME_MODE = os.getenv("APP_RUNTIME_MODE", "all").strip().lower()
 
     @property

@@ -2,8 +2,6 @@ import json
 import os
 import unittest
 from pathlib import Path
-from urllib import error
-from urllib import parse
 from urllib import request
 
 from arbitrage_bot.core.env_loader import load_env_file
@@ -34,7 +32,6 @@ class LiveApiSmokeTests(unittest.TestCase):
     def setUpClass(cls):
         load_env_file(ENV_FILE_PATH)
         cls.base_url = _base_url()
-        cls.admin_token = os.environ.get("ADMIN_API_TOKEN", "").strip()
 
 
     def test_root_returns_expected_navigation_links(self):
@@ -67,28 +64,3 @@ class LiveApiSmokeTests(unittest.TestCase):
         self.assertIsInstance(payload["pair_counts"]["total"], int)
         self.assertIsInstance(payload["opportunity_counts"]["total"], int)
         self.assertIsInstance(payload["alert_counts"]["queued"], int)
-
-
-    def test_admin_pairs_requires_token(self):
-        query = parse.urlencode({"status": "auto_approved"})
-
-        with self.assertRaises(error.HTTPError) as ctx:
-            _request_json(f"{self.base_url}/api/admin/pairs?{query}")
-
-        self.assertEqual(ctx.exception.code, 401)
-        ctx.exception.close()
-
-
-    def test_admin_pairs_returns_json_for_valid_token(self):
-        self.assertTrue(self.admin_token, "ADMIN_API_TOKEN must be set for live admin smoke tests")
-        query = parse.urlencode({"status": "auto_approved"})
-        headers = {"X-Admin-Token": self.admin_token}
-
-        status_code, payload = _request_json(
-            f"{self.base_url}/api/admin/pairs?{query}",
-            headers=headers,
-        )
-
-        self.assertEqual(status_code, 200)
-        self.assertIn("data", payload)
-        self.assertIsInstance(payload["data"], list)

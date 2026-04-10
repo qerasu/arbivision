@@ -131,12 +131,11 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-    async def test_creates_opportunity_and_queues_fanout_then_updates_dedupe_cache(self):
+    async def test_creates_opportunity_and_updates_dedupe_cache_on_finalize(self):
         db = FakeDbSession()
         redis = FakeRedis()
         manager = AlertManager(db)
         pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        market_a, market_b = self._build_markets()
         calc_result = {
             "direction": "A_yes_B_no",
             "avg_price_leg_1": 0.40,
@@ -151,10 +150,11 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
             opportunity = await manager.process_opportunity(pair, calc_result)
+            await manager.finalize_opportunity(opportunity)
 
         self.assertEqual(opportunity.fanout_status, "queued")
         self.assertEqual(db.flush_calls, 1)
-        self.assertEqual(db.commit_calls, 1)
+        self.assertEqual(db.commit_calls, 0)
         self.assertEqual(len(redis.setex_calls), 1)
 
 
@@ -190,11 +190,27 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(redis.setex_calls, [])
 
 
-    async def test_suppress_alert_persists_suppressed_opportunity_without_touching_dedupe(self):
+    async def test_ignores_legacy_suppressed_opportunity_and_creates_new_queued_row(self):
         db = FakeDbSession()
         redis = FakeRedis()
         manager = AlertManager(db)
         pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
+        legacy_suppressed = ArbOpportunity(
+            id=11,
+            market_pair_id=pair.id,
+            direction="A_yes_B_no",
+            avg_price_leg_1=0.40,
+            avg_price_leg_2=0.50,
+            shares=10.0,
+            capital_required=9.0,
+            gross_profit=1.0,
+            net_profit=7.5,
+            gross_roi=0.11,
+            net_roi=0.12,
+            calculation_json={"direction": "A_yes_B_no"},
+            fanout_status="suppressed",
+        )
+        db.opportunities.append(legacy_suppressed)
         calc_result = {
             "direction": "A_yes_B_no",
             "avg_price_leg_1": 0.40,
@@ -202,60 +218,25 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
             "shares": 10.0,
             "capital_required": 9.0,
             "gross_profit": 1.0,
-            "net_profit": 7.5,
+            "net_profit": 12.0,
             "gross_roi": 0.11,
-            "net_roi": 0.12,
+            "net_roi": 0.18,
         }
 
         with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-            result = await manager.process_opportunity(
-                pair,
-                calc_result,
-                suppress_alert=True,
-            )
+            created = await manager.process_opportunity(pair, calc_result)
+            await manager.finalize_opportunity(created)
 
-        self.assertEqual(result.fanout_status, "suppressed")
-        self.assertEqual(result.market_pair_id, pair.id)
-        self.assertEqual(db.flush_calls, 1)
-        self.assertEqual(db.commit_calls, 1)
-        self.assertEqual(redis.setex_calls, [])
-
-
-    async def test_regular_cycle_promotes_existing_suppressed_opportunity_instead_of_creating_duplicate(self):
-        db = FakeDbSession()
-        redis = FakeRedis()
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        calc_result = {
-            "direction": "A_yes_B_no",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 7.5,
-            "gross_roi": 0.11,
-            "net_roi": 0.12,
-        }
-
-        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-            suppressed = await manager.process_opportunity(
-                pair,
-                calc_result,
-                suppress_alert=True,
-            )
-            queued = await manager.process_opportunity(pair, calc_result)
-
-        self.assertIs(queued, suppressed)
-        self.assertEqual(queued.fanout_status, "queued")
-        self.assertEqual(len(db.opportunities), 1)
-        self.assertEqual(db.commit_calls, 2)
+        self.assertIsNot(created, legacy_suppressed)
+        self.assertEqual(created.fanout_status, "queued")
+        self.assertEqual(len(db.opportunities), 2)
+        self.assertEqual(db.commit_calls, 0)
         self.assertEqual(len(redis.setex_calls), 1)
 
 
-    async def test_regular_cycle_can_defer_existing_suppressed_opportunity_without_sending(self):
+    async def test_creates_new_opportunity_when_dedupe_state_is_invalid(self):
         db = FakeDbSession()
-        redis = FakeRedis()
+        redis = FakeRedis({"alert-dedupe:pair-123:A_yes_B_no": "not-json"})
         manager = AlertManager(db)
         pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
         calc_result = {
@@ -271,23 +252,12 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-            suppressed = await manager.process_opportunity(
-                pair,
-                calc_result,
-                suppress_alert=True,
-            )
-            deferred = await manager.process_opportunity(
-                pair,
-                calc_result,
-                allow_suppressed_promotion=False,
-            )
+            created = await manager.process_opportunity(pair, calc_result)
+            await manager.finalize_opportunity(created)
 
-        self.assertIs(deferred, suppressed)
-        self.assertEqual(deferred.fanout_status, "suppressed")
-        self.assertEqual(getattr(deferred, "_delivery_action", None), "deferred")
-        self.assertEqual(len(db.opportunities), 1)
-        self.assertEqual(db.commit_calls, 2)
-        self.assertEqual(redis.setex_calls, [])
+        self.assertEqual(created.fanout_status, "queued")
+        self.assertEqual(db.commit_calls, 0)
+        self.assertEqual(len(redis.setex_calls), 1)
 
 
     async def test_persists_opportunity_even_when_global_filters_would_later_block_fanout(self):
@@ -325,16 +295,13 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
             settings.TELEGRAM_DEFAULT_CHAT_IDS = original_chat_ids
 
         self.assertEqual(result.fanout_status, "queued")
-        self.assertEqual(db.commit_calls, 1)
+        self.assertEqual(db.commit_calls, 0)
 
 
-    async def test_rolls_back_and_clears_dedupe_if_commit_fails(self):
+    async def test_finalize_opportunity_continues_when_redis_is_unavailable(self):
         db = FakeDbSession()
-        db.fail_commit = True
-        redis = FakeRedis()
         manager = AlertManager(db)
         pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        market_a, market_b = self._build_markets()
         calc_result = {
             "direction": "A_no_B_yes",
             "avg_price_leg_1": 0.40,
@@ -347,19 +314,20 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
             "net_roi": 0.12,
         }
 
-        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-            with self.assertRaisesRegex(RuntimeError, "commit failed"):
-                await manager.process_opportunity(pair, calc_result)
+        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=None):
+            opportunity = await manager.process_opportunity(pair, calc_result)
 
-        self.assertEqual(db.rollback_calls, 1)
-        self.assertEqual(redis.data, {})
+        with patch("arbitrage_bot.services.alert_manager.get_redis", side_effect=RuntimeError("redis down")):
+            await manager.finalize_opportunity(opportunity)
+
+        self.assertFalse(hasattr(opportunity, "_dedupe_key"))
+        self.assertFalse(hasattr(opportunity, "_dedupe_state"))
 
 
     async def test_process_opportunity_continues_when_redis_is_unavailable(self):
         db = FakeDbSession()
         manager = AlertManager(db)
         pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        market_a, market_b = self._build_markets()
         calc_result = {
             "direction": "A_no_B_yes",
             "avg_price_leg_1": 0.40,
@@ -376,7 +344,7 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
             opportunity = await manager.process_opportunity(pair, calc_result)
 
         self.assertEqual(opportunity.fanout_status, "queued")
-        self.assertEqual(db.commit_calls, 1)
+        self.assertEqual(db.commit_calls, 0)
 
 
     async def test_persists_opportunity_even_when_global_max_capital_would_block_fanout(self):
@@ -414,7 +382,7 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
             settings.TELEGRAM_DEFAULT_CHAT_IDS = original_chat_ids
 
         self.assertEqual(result.fanout_status, "queued")
-        self.assertEqual(db.commit_calls, 1)
+        self.assertEqual(db.commit_calls, 0)
 
 
     async def test_ignores_provided_preferences_and_only_queues_opportunity(self):

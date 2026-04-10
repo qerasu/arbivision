@@ -179,7 +179,126 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             first = await service.sync_markets()
             second = await service.sync_markets()
 
-        self.assertTrue(first)
-        self.assertFalse(second)
+        self.assertTrue(first["synced"])
+        self.assertFalse(second["synced"])
         self.assertEqual(service.polymarket.fetch_markets.await_count, 1)
         self.assertEqual(service.predict_fun.fetch_markets.await_count, 1)
+
+
+    async def test_sync_source_dedupes_duplicate_market_rows_before_upsert(self):
+        class FakeDbSession:
+            def __init__(self):
+                self.commit_calls = 0
+                self.rollback_calls = 0
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+            async def rollback(self):
+                self.rollback_calls += 1
+
+
+        service = IngestionService(db_session=FakeDbSession())
+        service._upsert_markets = AsyncMock(return_value=set())
+        service._mark_missing_markets_closed = AsyncMock(return_value=set())
+
+        payload = [
+            {"id": "100", "title": "first copy"},
+            {"id": "100", "title": "second copy"},
+            {"id": "101", "title": "unique"},
+        ]
+
+        def mapper(item):
+            return {
+                "platform": "polymarket",
+                "platform_market_id": str(item["id"]),
+                "status": "active",
+                "tradable": True,
+                "title": item["title"],
+                "normalized_title": item["title"].lower(),
+                "description": "",
+                "outcomes_json": [],
+                "raw_payload_json": dict(item),
+                "category": "",
+                "slug": "",
+            }
+
+        synced = await service._sync_source("polymarket", payload, mapper)
+
+        self.assertTrue(synced)
+        upserted_items = service._upsert_markets.await_args_list[0].args[0]
+        self.assertEqual(len(upserted_items), 2)
+        self.assertEqual(
+            [item["platform_market_id"] for item in upserted_items],
+            ["100", "101"],
+        )
+        self.assertEqual(upserted_items[0]["title"], "second copy")
+        service._mark_missing_markets_closed.assert_awaited_once_with(
+            "polymarket",
+            {"100", "101"},
+        )
+
+
+    async def test_sync_source_with_empty_payload_skips_mass_closing_markets(self):
+        class FakeDbSession:
+            def __init__(self):
+                self.commit_calls = 0
+                self.rollback_calls = 0
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+            async def rollback(self):
+                self.rollback_calls += 1
+
+
+        service = IngestionService(db_session=FakeDbSession())
+        service._upsert_markets = AsyncMock(return_value=set())
+        service._mark_missing_markets_closed = AsyncMock(return_value=set())
+
+        synced = await service._sync_source("predict.fun", [], service._map_predict_fun_market)
+
+        self.assertTrue(synced)
+        service._upsert_markets.assert_not_awaited()
+        service._mark_missing_markets_closed.assert_not_awaited()
+        self.assertEqual(
+            service._changed_market_ids_by_platform["predict_fun"],
+            set(),
+        )
+
+
+    def test_apply_market_updates_skips_unchanged_market_payload(self):
+        service = IngestionService(db_session=None)
+        updated_at = datetime(2026, 4, 8, tzinfo=timezone.utc)
+        market = SimpleNamespace(
+            status="active",
+            tradable=True,
+            title="Market",
+            normalized_title="market",
+            description="desc",
+            outcomes_json=[{"id": "1", "label": "Yes"}],
+            raw_payload_json={"id": "1", "title": "Market"},
+            category="sports",
+            slug="market",
+            updated_at=updated_at,
+        )
+        data = {
+            "status": "active",
+            "tradable": True,
+            "title": "Market",
+            "normalized_title": "market",
+            "description": "desc",
+            "outcomes_json": [{"id": "1", "label": "Yes"}],
+            "raw_payload_json": {"id": "1", "title": "Market"},
+            "category": "sports",
+            "slug": "market",
+        }
+
+        changed = service._apply_market_updates(market, data)
+
+        self.assertFalse(changed)
+        self.assertEqual(market.updated_at, updated_at)

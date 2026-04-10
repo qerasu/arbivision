@@ -39,6 +39,8 @@ class TelegramPreferencesTests(unittest.TestCase):
         self.assertEqual(preferences["min_roi_percent"], 5)
         self.assertEqual(preferences["min_capital_usd"], 10)
         self.assertEqual(preferences["max_capital_usd"], 150)
+        self.assertIsNone(preferences["max_polymarket_capital_usd"])
+        self.assertIsNone(preferences["max_predict_fun_capital_usd"])
         self.assertIsNone(preferences["min_profit_usd"])
         self.assertEqual(preferences["max_days_to_close"], 5)
 
@@ -103,6 +105,66 @@ class TelegramPreferencesTests(unittest.TestCase):
         self.assertEqual(reason, "min_profit")
 
 
+    def test_filter_reason_blocks_by_polymarket_balance(self):
+        opportunity = SimpleNamespace(
+            net_roi=0.20,
+            capital_required=90.0,
+            net_profit=10.0,
+            shares=100.0,
+            avg_price_leg_1=0.40,
+            avg_price_leg_2=0.50,
+        )
+        market_a = SimpleNamespace(platform="polymarket", raw_payload_json={})
+        market_b = SimpleNamespace(platform="predict_fun", raw_payload_json={})
+
+        reason = filter_reason_for_preferences(
+            opportunity,
+            market_a,
+            market_b,
+            {
+                "min_roi_percent": None,
+                "max_capital_usd": None,
+                "max_polymarket_capital_usd": 35.0,
+                "max_predict_fun_capital_usd": None,
+                "min_profit_usd": None,
+                "max_days_to_close": None,
+            },
+            now=datetime(2026, 3, 21, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(reason, "max_polymarket_capital")
+
+
+    def test_filter_reason_blocks_by_predict_fun_balance(self):
+        opportunity = SimpleNamespace(
+            net_roi=0.20,
+            capital_required=90.0,
+            net_profit=10.0,
+            shares=100.0,
+            avg_price_leg_1=0.40,
+            avg_price_leg_2=0.50,
+        )
+        market_a = SimpleNamespace(platform="polymarket", raw_payload_json={})
+        market_b = SimpleNamespace(platform="predict_fun", raw_payload_json={})
+
+        reason = filter_reason_for_preferences(
+            opportunity,
+            market_a,
+            market_b,
+            {
+                "min_roi_percent": None,
+                "max_capital_usd": None,
+                "max_polymarket_capital_usd": None,
+                "max_predict_fun_capital_usd": 45.0,
+                "min_profit_usd": None,
+                "max_days_to_close": None,
+            },
+            now=datetime(2026, 3, 21, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(reason, "max_predict_fun_capital")
+
+
     def test_filter_reason_blocks_by_max_days_to_close(self):
         now = datetime(2026, 3, 21, tzinfo=timezone.utc)
         opportunity = SimpleNamespace(net_roi=0.20, capital_required=200.0)
@@ -136,6 +198,8 @@ class TelegramPreferencesTests(unittest.TestCase):
                 "min_roi_percent": 2.5,
                 "min_capital_usd": 50.0,
                 "max_capital_usd": 500.0,
+                "max_polymarket_capital_usd": 220.0,
+                "max_predict_fun_capital_usd": 280.0,
                 "min_profit_usd": 10.0,
                 "max_days_to_close": 7,
             }
@@ -145,6 +209,8 @@ class TelegramPreferencesTests(unittest.TestCase):
         self.assertIn("Min ROI\nCurrent: 2.50%", text)
         self.assertIn("Min volume\nCurrent: $50", text)
         self.assertIn("Volume\nCurrent: $500", text)
+        self.assertIn("Polymarket balance\nCurrent: $220", text)
+        self.assertIn("Predict.Fun balance\nCurrent: $280", text)
         self.assertIn("Min profit\nCurrent: $10", text)
         self.assertIn("Max market end\nCurrent: 7 days", text)
         self.assertNotIn("Use text commands:", text)
@@ -156,6 +222,8 @@ class TelegramPreferencesTests(unittest.TestCase):
                 "min_roi_percent": 2.5,
                 "min_capital_usd": 40.25,
                 "max_capital_usd": 140.5,
+                "max_polymarket_capital_usd": 60.75,
+                "max_predict_fun_capital_usd": 79.75,
                 "min_profit_usd": 7.5,
                 "max_days_to_close": 7,
             }
@@ -163,25 +231,24 @@ class TelegramPreferencesTests(unittest.TestCase):
 
         self.assertIn("Volume\nCurrent: $140.50", text)
         self.assertIn("Min volume\nCurrent: $40.25", text)
+        self.assertIn("Polymarket balance\nCurrent: $60.75", text)
+        self.assertIn("Predict.Fun balance\nCurrent: $79.75", text)
         self.assertIn("Min profit\nCurrent: $7.50", text)
 
 
-    def test_format_preferences_text_uses_russian_for_andrei_chat(self):
-        original_chat_id = settings.ANDREI_KURILOV_ID
-        settings.ANDREI_KURILOV_ID = "777"
-        try:
-            text = format_preferences_text(
-                {
-                    "min_roi_percent": 2.5,
-                    "min_capital_usd": 50.0,
-                    "max_capital_usd": 500.0,
-                    "min_profit_usd": None,
-                    "max_days_to_close": 7,
-                },
-                chat_id=777,
-            )
-        finally:
-            settings.ANDREI_KURILOV_ID = original_chat_id
+    def test_format_preferences_text_uses_russian_when_language_is_ru(self):
+        text = format_preferences_text(
+            {
+                "min_roi_percent": 2.5,
+                "min_capital_usd": 50.0,
+                "max_capital_usd": 500.0,
+                "max_polymarket_capital_usd": None,
+                "max_predict_fun_capital_usd": None,
+                "min_profit_usd": None,
+                "max_days_to_close": 7,
+                "language": "ru",
+            },
+        )
 
         self.assertIn("Ваши настройки алертов", text)
         self.assertIn("Мин. объём", text)

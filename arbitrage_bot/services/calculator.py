@@ -7,7 +7,7 @@ class ArbitrageCalculator:
         self.fee_pf = settings.FEE_PREDICT_FUN_BPS / 10000.0
 
 
-    def calculate_opportunity(self, poly_asks, pf_asks, max_capital=None):
+    def calculate_opportunity(self, poly_asks, pf_asks, max_capital=None, max_polymarket_capital=None, max_predict_fun_capital=None):
         if not poly_asks or not pf_asks:
             return None
 
@@ -46,8 +46,25 @@ class ArbitrageCalculator:
                 if per_share_capital <= 0:
                     return None
                 take_size = min(take_size, remaining_capital / per_share_capital)
-                if take_size <= 0:
+
+            if max_polymarket_capital is not None:
+                remaining_poly_capital = float(max_polymarket_capital) - cost_poly
+                if remaining_poly_capital <= 0:
                     break
+                if net_p_price <= 0:
+                    return None
+                take_size = min(take_size, remaining_poly_capital / net_p_price)
+
+            if max_predict_fun_capital is not None:
+                remaining_pf_capital = float(max_predict_fun_capital) - cost_pf
+                if remaining_pf_capital <= 0:
+                    break
+                if net_f_price <= 0:
+                    return None
+                take_size = min(take_size, remaining_pf_capital / net_f_price)
+
+            if take_size <= 0:
+                break
 
             shares += take_size
             cost_poly += take_size * net_p_price
@@ -89,7 +106,7 @@ class ArbitrageCalculator:
         }
 
 
-    def calculate_opportunities(self, direction_books, max_capital=None):
+    def calculate_opportunities(self, direction_books, max_capital=None, max_polymarket_capital=None, max_predict_fun_capital=None):
         opportunities = []
 
         for direction, books in (direction_books or {}).items():
@@ -97,6 +114,8 @@ class ArbitrageCalculator:
                 poly_asks=books.get("poly") or [],
                 pf_asks=books.get("pf") or [],
                 max_capital=max_capital,
+                max_polymarket_capital=max_polymarket_capital,
+                max_predict_fun_capital=max_predict_fun_capital,
             )
             if not result:
                 continue

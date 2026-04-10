@@ -21,8 +21,10 @@ from arbitrage_bot.tg_bot.preferences import format_home_text
 from arbitrage_bot.tg_bot.preferences import format_preferences_text
 from arbitrage_bot.tg_bot.preferences import format_setting_prompt
 from arbitrage_bot.tg_bot.preferences import get_ui_state
+from arbitrage_bot.tg_bot.preferences import get_user_language
 from arbitrage_bot.tg_bot.preferences import get_user_preferences
 from arbitrage_bot.tg_bot.preferences import reset_user_preferences
+from arbitrage_bot.tg_bot.preferences import set_user_language
 from arbitrage_bot.tg_bot.preferences import set_user_preference
 from arbitrage_bot.tg_bot.preferences import set_ui_state
 from arbitrage_bot.tg_bot.preferences import toggle_mute
@@ -37,14 +39,43 @@ async def cmd_start(message):
             message.chat.id,
             chat_type=getattr(message.chat, "type", "private"),
         )
+        language = await get_user_language(session, message.chat.id)
+
+    if language is None:
+        await message.answer(
+            "🌐 Please choose your language:",
+            reply_markup=_build_language_keyboard(),
+        )
+        return
+
+    async with AsyncSessionLocal() as session:
         preferences = await get_user_preferences(session, message.chat.id)
         await clear_ui_state(session, message.chat.id)
 
     await message.answer(
-        format_home_text(preferences, chat_id=message.chat.id),
+        format_home_text(preferences),
         reply_markup=_build_home_keyboard(preferences, chat_id=message.chat.id),
     )
 
+
+
+@router.callback_query(F.data.startswith("tg_lang:"))
+async def on_language_callback(callback):
+    language = callback.data.split(":", 1)[1]
+    if language not in {"en", "ru"}:
+        await _safe_answer_callback(callback)
+        return
+
+    async with AsyncSessionLocal() as session:
+        preferences = await set_user_language(session, callback.message.chat.id, language)
+        await clear_ui_state(session, callback.message.chat.id)
+
+    await _safe_edit_text(
+        callback,
+        format_home_text(preferences),
+        reply_markup=_build_home_keyboard(preferences, chat_id=callback.message.chat.id),
+    )
+    await _safe_answer_callback(callback)
 
 
 @router.callback_query(F.data.startswith("tg_nav:"))
@@ -57,7 +88,7 @@ async def on_nav_callback(callback):
             await clear_ui_state(session, callback.message.chat.id)
             await _safe_edit_text(
                 callback,
-                format_home_text(preferences, chat_id=callback.message.chat.id),
+                format_home_text(preferences),
                 reply_markup=_build_home_keyboard(preferences, chat_id=callback.message.chat.id),
             )
         elif action == "settings":
@@ -65,21 +96,22 @@ async def on_nav_callback(callback):
             await clear_ui_state(session, callback.message.chat.id)
             await _safe_edit_text(
                 callback,
-                format_preferences_text(preferences, chat_id=callback.message.chat.id),
-                reply_markup=_build_settings_keyboard(chat_id=callback.message.chat.id),
+                format_preferences_text(preferences),
+                reply_markup=_build_settings_keyboard(preferences),
             )
         elif action == "toggle_mute":
             preferences = await toggle_mute(session, callback.message.chat.id)
             await clear_ui_state(session, callback.message.chat.id)
+            lang = preferences.get("language")
             muted = preferences.get("muted", False)
             toast = (
-                translate(callback.message.chat.id, "⏸ Alerts paused", "⏸ Алерты поставлены на паузу")
+                translate(lang, "⏸ Alerts paused", "⏸ Алерты поставлены на паузу")
                 if muted
-                else translate(callback.message.chat.id, "▶️ Alerts resumed", "▶️ Алерты снова включены")
+                else translate(lang, "▶️ Alerts resumed", "▶️ Алерты снова включены")
             )
             await _safe_edit_text(
                 callback,
-                format_home_text(preferences, chat_id=callback.message.chat.id),
+                format_home_text(preferences),
                 reply_markup=_build_home_keyboard(preferences, chat_id=callback.message.chat.id),
             )
             try:
@@ -101,17 +133,18 @@ async def on_nav_callback(callback):
         elif action == "reset":
             preferences = await reset_user_preferences(session, callback.message.chat.id)
             await clear_ui_state(session, callback.message.chat.id)
+            lang = preferences.get("language")
             await _safe_edit_text(
                 callback,
                 translate(
-                    callback.message.chat.id,
+                    lang,
                     "Your settings were reset.\n\n"
                     "All Telegram filters are disabled for your chat, so you will receive every alert that passes system checks.\n\n",
                     "Ваши настройки сброшены.\n\n"
                     "Все Telegram-фильтры для этого чата отключены, поэтому вы будете получать все алерты, которые проходят системные проверки.\n\n",
                 ) +
-                f"{format_preferences_text(preferences, chat_id=callback.message.chat.id)}",
-                reply_markup=_build_settings_keyboard(chat_id=callback.message.chat.id),
+                f"{format_preferences_text(preferences)}",
+                reply_markup=_build_settings_keyboard(preferences),
             )
 
     await _safe_answer_callback(callback)
@@ -135,8 +168,8 @@ async def on_edit_callback(callback):
 
     await _safe_edit_text(
         callback,
-        format_setting_prompt(field_name, preferences, chat_id=callback.message.chat.id),
-        reply_markup=_build_prompt_keyboard(chat_id=callback.message.chat.id),
+        format_setting_prompt(field_name, preferences),
+        reply_markup=_build_prompt_keyboard(preferences),
     )
     await _safe_answer_callback(callback)
 
@@ -152,12 +185,15 @@ async def on_plain_text_setting(message):
 
         if ui_state and ui_state.get("mode") == "awaiting_value":
             if not text:
-                await message.answer(translate(message.chat.id, "Enter a number or `off`.", "Введите число или `выкл`."))
+                language = await get_user_language(session, message.chat.id)
+                await message.answer(translate(language, "Enter a number or `off`.", "Введите число или `выкл`."))
                 return
 
             field_name = ui_state.get("field_name")
+            preferences = await get_user_preferences(session, message.chat.id)
+            lang = preferences.get("language")
             try:
-                value = _parse_setting_value(field_name, text, chat_id=message.chat.id)
+                value = _parse_setting_value(field_name, text, language=lang)
             except ValueError as exc:
                 await message.answer(str(exc))
                 return
@@ -166,14 +202,15 @@ async def on_plain_text_setting(message):
             return
 
         if not await _has_started_bot(session, message.chat.id):
-            await message.answer(_format_inactive_chat_text(chat_id=message.chat.id))
+            language = await get_user_language(session, message.chat.id)
+            await message.answer(_format_inactive_chat_text(language=language))
             return
 
         preferences = await get_user_preferences(session, message.chat.id)
         await clear_ui_state(session, message.chat.id)
 
     await message.answer(
-        _format_unhandled_message_text(preferences, chat_id=message.chat.id),
+        _format_unhandled_message_text(preferences),
         reply_markup=_build_home_keyboard(preferences, chat_id=message.chat.id),
     )
 
@@ -184,15 +221,16 @@ async def _apply_setting_update(message, field_name, value):
         preferences = await set_user_preference(session, message.chat.id, field_name, value)
         await clear_ui_state(session, message.chat.id)
 
+    lang = preferences.get("language")
     prompt_message_id = None
     if ui_state and ui_state.get("mode") == "awaiting_value":
         prompt_message_id = ui_state.get("prompt_message_id")
 
     text = (
-        f"{_settings_success_label(field_name, chat_id=message.chat.id)} "
-        f"{translate(message.chat.id, 'updated to', 'обновлён до')} "
-        f"{_format_success_value(field_name, value, chat_id=message.chat.id)}.\n\n"
-        f"{format_preferences_text(preferences, chat_id=message.chat.id)}"
+        f"{_settings_success_label(field_name, language=lang)} "
+        f"{translate(lang, 'updated to', 'обновлён до')} "
+        f"{_format_success_value(field_name, value, language=lang)}.\n\n"
+        f"{format_preferences_text(preferences)}"
     )
 
     if prompt_message_id is not None:
@@ -201,7 +239,7 @@ async def _apply_setting_update(message, field_name, value):
                 chat_id=message.chat.id,
                 message_id=prompt_message_id,
                 text=text,
-                reply_markup=_build_settings_keyboard(chat_id=message.chat.id),
+                reply_markup=_build_settings_keyboard(preferences),
             )
             await _safe_delete_message(message)
             return
@@ -211,17 +249,35 @@ async def _apply_setting_update(message, field_name, value):
 
     await message.answer(
         text,
-        reply_markup=_build_settings_keyboard(chat_id=message.chat.id),
+        reply_markup=_build_settings_keyboard(preferences),
     )
     await _safe_delete_message(message)
 
 
+def _build_language_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🇬🇧 English",
+                    callback_data="tg_lang:en",
+                ),
+                InlineKeyboardButton(
+                    text="🇷🇺 Русский",
+                    callback_data="tg_lang:ru",
+                ),
+            ],
+        ]
+    )
+
+
 def _build_home_keyboard(preferences=None, chat_id=None):
+    lang = (preferences or {}).get("language")
     muted = (preferences or {}).get("muted", False)
     toggle_text = (
-        translate(chat_id, "▶️ Resume", "▶️ Возобновить")
+        translate(lang, "▶️ Resume", "▶️ Возобновить")
         if muted
-        else translate(chat_id, "⏸ Pause", "⏸ Пауза")
+        else translate(lang, "⏸ Pause", "⏸ Пауза")
     )
     rows = [
         [
@@ -232,7 +288,7 @@ def _build_home_keyboard(preferences=None, chat_id=None):
         ],
         [
             InlineKeyboardButton(
-                text=translate(chat_id, "Settings", "Настройки"),
+                text=translate(lang, "Settings", "Настройки"),
                 callback_data="tg_nav:settings",
             ),
         ],
@@ -251,42 +307,53 @@ def _build_home_keyboard(preferences=None, chat_id=None):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _build_settings_keyboard(chat_id=None):
+def _build_settings_keyboard(preferences=None):
+    lang = (preferences or {}).get("language")
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"→ {translate(chat_id, 'Min ROI', 'Мин. ROI')}",
+                    text=f"→ {translate(lang, 'Min ROI', 'Мин. ROI')}",
                     callback_data="tg_edit:min_roi_percent",
                 ),
                 InlineKeyboardButton(
-                    text=f"→ {translate(chat_id, 'Min volume', 'Мин. объём')}",
+                    text=f"→ {translate(lang, 'Min volume', 'Мин. объём')}",
                     callback_data="tg_edit:min_capital_usd",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text=f"→ {translate(chat_id, 'Max volume', 'Макс. объём')}",
+                    text=f"→ {translate(lang, 'Max volume', 'Макс. объём')}",
                     callback_data="tg_edit:max_capital_usd",
                 ),
                 InlineKeyboardButton(
-                    text=f"→ {translate(chat_id, 'Min profit', 'Мин. прибыль')}",
+                    text=f"→ {translate(lang, 'Min profit', 'Мин. прибыль')}",
                     callback_data="tg_edit:min_profit_usd",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text=f"→ {translate(chat_id, 'Max market end', 'Макс. срок рынка')}",
+                    text=f"→ {translate(lang, 'Polymarket balance', 'Баланс Polymarket')}",
+                    callback_data="tg_edit:max_polymarket_capital_usd",
+                ),
+                InlineKeyboardButton(
+                    text=f"→ {translate(lang, 'Predict.Fun balance', 'Баланс Predict.Fun')}",
+                    callback_data="tg_edit:max_predict_fun_capital_usd",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"→ {translate(lang, 'Max market end', 'Макс. срок рынка')}",
                     callback_data="tg_edit:max_days_to_close",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text=translate(chat_id, "Reset all", "Сбросить всё"),
+                    text=translate(lang, "Reset all", "Сбросить всё"),
                     callback_data="tg_nav:reset",
                 ),
                 InlineKeyboardButton(
-                    text=translate(chat_id, "← Back", "← Назад"),
+                    text=translate(lang, "← Back", "← Назад"),
                     callback_data="tg_nav:home",
                 ),
             ],
@@ -294,12 +361,13 @@ def _build_settings_keyboard(chat_id=None):
     )
 
 
-def _build_prompt_keyboard(chat_id=None):
+def _build_prompt_keyboard(preferences=None):
+    lang = (preferences or {}).get("language")
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=translate(chat_id, "← Back", "← Назад"),
+                    text=translate(lang, "← Back", "← Назад"),
                     callback_data="tg_nav:settings",
                 ),
             ]
@@ -324,7 +392,7 @@ def _build_stats_keyboard():
     )
 
 
-def _parse_setting_value(field_name, raw_value, chat_id=None):
+def _parse_setting_value(field_name, raw_value, language=None):
     value = raw_value.strip().lower()
     if value in {"off", "выкл"}:
         return None
@@ -333,30 +401,30 @@ def _parse_setting_value(field_name, raw_value, chat_id=None):
         try:
             parsed = float(value)
         except (ValueError, TypeError):
-            raise ValueError(translate(chat_id, "Enter a number, e.g. 1.5", "Введите число, например 1.5"))
+            raise ValueError(translate(language, "Enter a number, e.g. 1.5", "Введите число, например 1.5"))
         if parsed < 0:
-            raise ValueError(translate(chat_id, "ROI must be zero or greater.", "ROI должен быть не меньше нуля."))
+            raise ValueError(translate(language, "ROI must be zero or greater.", "ROI должен быть не меньше нуля."))
         return parsed
 
-    if field_name in {"min_capital_usd", "max_capital_usd", "min_profit_usd"}:
+    if field_name in {"min_capital_usd", "max_capital_usd", "max_polymarket_capital_usd", "max_predict_fun_capital_usd", "min_profit_usd"}:
         try:
             parsed = float(value)
         except (ValueError, TypeError):
-            raise ValueError(translate(chat_id, "Enter a number, e.g. 50", "Введите число, например 50"))
+            raise ValueError(translate(language, "Enter a number, e.g. 50", "Введите число, например 50"))
         if parsed <= 0:
-            raise ValueError(translate(chat_id, "Value must be greater than zero.", "Значение должно быть больше нуля."))
+            raise ValueError(translate(language, "Value must be greater than zero.", "Значение должно быть больше нуля."))
         return parsed
 
     if field_name == "max_days_to_close":
         try:
             parsed = int(value)
         except (ValueError, TypeError):
-            raise ValueError(translate(chat_id, "Enter a whole number, e.g. 30", "Введите целое число, например 30"))
+            raise ValueError(translate(language, "Enter a whole number, e.g. 30", "Введите целое число, например 30"))
         if parsed <= 0:
-            raise ValueError(translate(chat_id, "Max market end must be greater than zero days.", "Макс. срок рынка должен быть больше нуля дней."))
+            raise ValueError(translate(language, "Max market end must be greater than zero days.", "Макс. срок рынка должен быть больше нуля дней."))
         return parsed
 
-    raise ValueError(translate(chat_id, "Unsupported setting.", "Неподдерживаемая настройка."))
+    raise ValueError(translate(language, "Unsupported setting.", "Неподдерживаемая настройка."))
 
 
 async def _safe_edit_text(callback, text, reply_markup):
@@ -386,34 +454,38 @@ async def _safe_answer_callback(callback):
             raise
 
 
-def _format_success_value(field_name, value, chat_id=None):
+def _format_success_value(field_name, value, language=None):
     if value is None:
-        return translate(chat_id, "off", "выкл")
+        return translate(language, "off", "выкл")
 
     if field_name == "min_roi_percent":
         return f"{float(value):.2f}%"
 
-    if field_name in {"min_capital_usd", "max_capital_usd", "min_profit_usd"}:
+    if field_name in {"min_capital_usd", "max_capital_usd", "max_polymarket_capital_usd", "max_predict_fun_capital_usd", "min_profit_usd"}:
         return f"${float(value):.0f}"
 
     if field_name == "max_days_to_close":
-        return translate(chat_id, f"{int(value)} days", f"{int(value)} дн.")
+        return translate(language, f"{int(value)} days", f"{int(value)} дн.")
 
     return str(value)
 
 
-def _settings_success_label(field_name, chat_id=None):
+def _settings_success_label(field_name, language=None):
     ru_labels = {
         "min_roi_percent": "Мин. ROI",
         "min_capital_usd": "Мин. объём",
         "max_capital_usd": "Макс. объём",
+        "max_polymarket_capital_usd": "Баланс Polymarket",
+        "max_predict_fun_capital_usd": "Баланс Predict.Fun",
         "min_profit_usd": "Мин. прибыль",
         "max_days_to_close": "Макс. срок рынка",
     }
-    return translate(chat_id, {
+    return translate(language, {
         "min_roi_percent": "Min ROI",
         "min_capital_usd": "Min volume",
         "max_capital_usd": "Max volume",
+        "max_polymarket_capital_usd": "Polymarket balance",
+        "max_predict_fun_capital_usd": "Predict.Fun balance",
         "min_profit_usd": "Min profit",
         "max_days_to_close": "Max market end",
     }[field_name], ru_labels[field_name])
@@ -431,15 +503,16 @@ async def _has_started_bot(db_session, chat_id):
     return result.first() is not None
 
 
-def _format_inactive_chat_text(chat_id=None):
-    return translate(chat_id, "Press /start to activate the bot and open the menu.", "Нажмите /start, чтобы активировать бота и открыть меню.")
+def _format_inactive_chat_text(language=None):
+    return translate(language, "Press /start to activate the bot and open the menu.", "Нажмите /start, чтобы активировать бота и открыть меню.")
 
 
-def _format_unhandled_message_text(preferences, chat_id=None):
+def _format_unhandled_message_text(preferences):
+    lang = preferences.get("language")
     return (
-        f"{translate(chat_id, 'Use the buttons below to control the bot.', 'Управляйте ботом через кнопки ниже.')}\n"
-        f"{translate(chat_id, 'To change filters, open Settings and enter a number only after selecting a field.', 'Чтобы изменить фильтры, откройте Настройки и вводите число только после выбора нужного поля.')}\n\n"
-        f"{format_home_text(preferences, chat_id=chat_id)}"
+        f"{translate(lang, 'Use the buttons below to control the bot.', 'Управляйте ботом через кнопки ниже.')}\n"
+        f"{translate(lang, 'To change filters, open Settings and enter a number only after selecting a field.', 'Чтобы изменить фильтры, откройте Настройки и вводите число только после выбора нужного поля.')}\n\n"
+        f"{format_home_text(preferences)}"
     )
 
 
