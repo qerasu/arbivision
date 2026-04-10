@@ -186,7 +186,6 @@ python3 -m arbitrage_bot.run_telegram
 - `TELEGRAM_DELIVERY_MAX_ATTEMPTS`
 - `FANOUT_TARGET_CACHE_TTL_SECONDS`
 - `TELEGRAM_SYSTEM_ERROR_COOLDOWN_SECONDS`
-- `ANDREI_KURILOV_ID`
 
 ### API и рантайм
 
@@ -234,6 +233,12 @@ python3 -m arbitrage_bot.run_telegram
 
 ```bash
 python3 run_tests.py
+```
+
+Для полного запуска тестов нужны переменные окружения (работает только при запущенном проекте)
+
+```bash
+RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python3 run_tests.py
 ```
 
 Или через unittest:
