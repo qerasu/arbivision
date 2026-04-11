@@ -71,6 +71,29 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("details: boom", kwargs["text"])
 
 
+    async def test_sends_system_notification_message_to_telegram(self):
+        fake_bot = AsyncMock()
+
+        with patch.object(system_notifier, "_get_shared_bot", return_value=fake_bot), patch(
+            "arbitrage_bot.services.system_notifier.get_redis",
+            new=AsyncMock(return_value=None),
+        ):
+            sent = await system_notifier.send_system_notification(
+                "monitor",
+                "orderbook coverage",
+                "orderbook coverage dropped to 80.0% (80/100)",
+                level="warning",
+            )
+
+        self.assertTrue(sent)
+        fake_bot.send_message.assert_awaited_once()
+        _, kwargs = fake_bot.send_message.await_args
+        self.assertEqual(kwargs["chat_id"], "1001")
+        self.assertIn("system warning", kwargs["text"])
+        self.assertIn("source: monitor", kwargs["text"])
+        self.assertIn("operation: orderbook coverage", kwargs["text"])
+
+
     async def test_skips_duplicate_error_during_cooldown(self):
         fake_bot = AsyncMock()
 

@@ -87,6 +87,21 @@ class MatcherService:
                 "market_variant_mismatch",
             )
 
+        if (
+            poly_signature["scope"] != pf_signature["scope"]
+            and (
+                poly_signature["scope"] != "default"
+                or pf_signature["scope"] != "default"
+            )
+        ):
+            return self._build_rejection(
+                poly_market,
+                pf_market,
+                poly_signature,
+                pf_signature,
+                "market_scope_mismatch",
+            )
+
         if poly_signature["comparison_type"] != pf_signature["comparison_type"]:
             comparison_types = {
                 poly_signature["comparison_type"],
@@ -128,6 +143,15 @@ class MatcherService:
                 poly_signature,
                 pf_signature,
                 "market_shape_mismatch",
+            )
+
+        if not self._has_compatible_matchup_participants(poly_signature, pf_signature):
+            return self._build_rejection(
+                poly_market,
+                pf_market,
+                poly_signature,
+                pf_signature,
+                "participant_mismatch",
             )
 
         # strict date heuristic
@@ -512,16 +536,7 @@ class MatcherService:
 
 
     def _detect_market_variant(self, market):
-        raw_payload = getattr(market, "raw_payload_json", None) or {}
-        parts = [
-            getattr(market, "title", "") or "",
-            getattr(market, "slug", "") or "",
-            raw_payload.get("groupItemTitle") or "",
-            raw_payload.get("question") or "",
-            raw_payload.get("category") or "",
-            raw_payload.get("subcategory") or "",
-        ]
-        haystack = self.normalizer.normalize_text(" ".join(str(part) for part in parts if part))
+        haystack = self._market_context_haystack(market)
 
         if any(token in haystack for token in ("spread", "handicap", "run line", "puck line")):
             return "spread"
@@ -530,6 +545,47 @@ class MatcherService:
             return "total"
 
         return "moneyline"
+
+
+    def _market_context_haystack(self, market):
+        raw_payload = getattr(market, "raw_payload_json", None) or {}
+        parts = [
+            getattr(market, "title", "") or "",
+            getattr(market, "slug", "") or "",
+            raw_payload.get("title") or "",
+            raw_payload.get("name") or "",
+            raw_payload.get("groupItemTitle") or "",
+            raw_payload.get("question") or "",
+            raw_payload.get("category") or "",
+            raw_payload.get("subcategory") or "",
+        ]
+        return self.normalizer.normalize_text(" ".join(str(part) for part in parts if part))
+
+
+    def _detect_market_scope(self, market):
+        haystack = self._market_context_haystack(market)
+
+        if any(
+            phrase in haystack
+            for phrase in (
+                "halftime",
+                "half time",
+                "first half",
+                "1st half",
+            )
+        ):
+            return "halftime"
+
+        if any(
+            phrase in haystack
+            for phrase in (
+                "second half",
+                "2nd half",
+            )
+        ):
+            return "second_half"
+
+        return "default"
 
 
     def _detect_comparison_type(self, market):
@@ -664,6 +720,40 @@ class MatcherService:
             for poly_participant in poly_participants
             for pf_participant in pf_participants
         )
+
+
+    def _best_matchup_participant_alignment(self, poly_participants, pf_participants):
+        if len(poly_participants) != 2 or len(pf_participants) != 2:
+            return None
+
+        direct_scores = (
+            self._participant_similarity(poly_participants[0], pf_participants[0]),
+            self._participant_similarity(poly_participants[1], pf_participants[1]),
+        )
+        inverse_scores = (
+            self._participant_similarity(poly_participants[0], pf_participants[1]),
+            self._participant_similarity(poly_participants[1], pf_participants[0]),
+        )
+
+        direct_min = min(direct_scores)
+        inverse_min = min(inverse_scores)
+        if direct_min >= inverse_min:
+            return direct_scores
+        return inverse_scores
+
+
+    def _has_compatible_matchup_participants(self, poly_signature, pf_signature):
+        if poly_signature["kind"] != "matchup" or pf_signature["kind"] != "matchup":
+            return True
+
+        alignment_scores = self._best_matchup_participant_alignment(
+            poly_signature["participants"],
+            pf_signature["participants"],
+        )
+        if alignment_scores is None:
+            return True
+
+        return min(alignment_scores) >= 0.5
 
 
     def _are_market_shapes_compatible(self, poly_signature, pf_signature):
@@ -914,6 +1004,7 @@ class MatcherService:
         normalized_title = self.normalizer.normalize_text(market.title)
         participants = self._extract_participants(market)
         title_tokens = self._tokenize(normalized_title)
+        context_haystack = self._market_context_haystack(market)
         return {
             "market": market,
             "title_tokens": title_tokens,
@@ -926,10 +1017,11 @@ class MatcherService:
             ),
             "category_tokens": self._category_tokens(market),
             "condition_ids": self._extract_condition_ids(market),
-            "entities": self.normalizer.extract_entities(market.title),
+            "entities": self.normalizer.extract_entities(context_haystack),
             "participants": participants,
             "kind": self._detect_market_kind(market, participants),
             "variant": self._detect_market_variant(market),
+            "scope": self._detect_market_scope(market),
             "comparison_type": self._detect_comparison_type(market),
         }
 

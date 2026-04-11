@@ -173,8 +173,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("💵 Volume: $43", text)
         self.assertIn("⏳ Ends on: 2026-03-28 (in 7 days)", text)
         self.assertIn("🧾 Buy 50 shares each:", text)
-        self.assertIn("• NO on Polymarket: avg fill $0.360 = $18", text)
-        self.assertIn("• YES on Predict.Fun: avg fill $0.500 = $25", text)
+        self.assertIn("• NO on Polymarket: effective price $0.360 = $18", text)
+        self.assertIn("• YES on Predict.Fun: effective price $0.500 = $25", text)
         self.assertIn("📊 Volumes ratio: 1.39x", text)
         self.assertIn("🔗 Open markets:", text)
         self.assertIn('<a href="https://polymarket.com/market/manchester-united-win?r=qerasuu">Polymarket</a>', text)
@@ -219,8 +219,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
             datetime_mock.now.return_value = datetime(2026, 3, 21, tzinfo=timezone.utc)
             text = _format_alert_message(opportunity, pair, market_a, market_b)
 
-        self.assertIn("• Grizzlies on Polymarket: avg fill $0.360 = $18", text)
-        self.assertIn("• Hornets on Predict.Fun: avg fill $0.500 = $25", text)
+        self.assertIn("• Grizzlies on Polymarket: effective price $0.360 = $18", text)
+        self.assertIn("• Hornets on Predict.Fun: effective price $0.500 = $25", text)
 
 
     def test_format_alert_message_shows_best_ask_when_it_differs_from_avg_fill(self):
@@ -261,8 +261,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
             datetime_mock.now.return_value = datetime(2026, 4, 6, tzinfo=timezone.utc)
             text = _format_alert_message(opportunity, pair, market_a, market_b)
 
-        self.assertIn("avg fill $0.631 (best ask $0.620)", text)
-        self.assertIn("avg fill $0.308 (best ask $0.300)", text)
+        self.assertIn("effective price $0.631 (best ask $0.620)", text)
+        self.assertIn("effective price $0.308 (best ask $0.300)", text)
 
 
     def test_build_market_url_expands_relative_raw_path(self):

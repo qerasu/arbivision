@@ -247,16 +247,16 @@ def _format_leg_price_details(opportunity, leg_index, language=None):
     best_price = calc_payload.get(f"best_price_leg_{leg_index}")
 
     if best_price is None:
-        return translate(language, f"avg fill {_format_price(avg_price)}", f"ср. цена {_format_price(avg_price)}")
+        return translate(language, f"effective price {_format_price(avg_price)}", f"эфф. цена {_format_price(avg_price)}")
 
     best_price_value = float(best_price)
     if abs(best_price_value - avg_price) < 0.0005:
-        return translate(language, f"avg fill {_format_price(avg_price)}", f"ср. цена {_format_price(avg_price)}")
+        return translate(language, f"effective price {_format_price(avg_price)}", f"эфф. цена {_format_price(avg_price)}")
 
     return translate(
         language,
-        f"avg fill {_format_price(avg_price)} (best ask {_format_price(best_price_value)})",
-        f"ср. цена {_format_price(avg_price)} (лучший ask {_format_price(best_price_value)})",
+        f"effective price {_format_price(avg_price)} (best ask {_format_price(best_price_value)})",
+        f"эфф. цена {_format_price(avg_price)} (лучший ask {_format_price(best_price_value)})",
     )
 
 
@@ -408,7 +408,7 @@ def _recalculate_opportunity_from_directions(opportunity, directions, calculator
     return snapshot
 
 
-async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, preferences, directions, calculator):
+async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, preferences, directions, calculator, prepared_opportunity=None):
     bot = _get_delivery_bot()
     if bot is None:
         return False
@@ -421,12 +421,13 @@ async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, p
         incr_counter("telegram.alert_cancelled_preferences")
         return False
 
-    prepared_opportunity = _recalculate_opportunity_from_directions(
-        opportunity,
-        directions,
-        calculator,
-        preferences=current_preferences,
-    )
+    if prepared_opportunity is None:
+        prepared_opportunity = _recalculate_opportunity_from_directions(
+            opportunity,
+            directions,
+            calculator,
+            preferences=current_preferences,
+        )
     if prepared_opportunity is None:
         alert.status = "cancelled"
         alert.next_retry_at = None
@@ -434,18 +435,19 @@ async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, p
         incr_counter("telegram.alert_cancelled_revalidation")
         return False
 
-    filter_reason = filter_reason_for_preferences(
-        prepared_opportunity,
-        market_a,
-        market_b,
-        current_preferences,
-    )
-    if filter_reason:
-        alert.status = "cancelled"
-        alert.next_retry_at = None
-        alert.error_message = f"filtered by updated preferences: {filter_reason}"
-        incr_counter("telegram.alert_cancelled_preferences")
-        return False
+    if prepared_opportunity is opportunity:
+        filter_reason = filter_reason_for_preferences(
+            prepared_opportunity,
+            market_a,
+            market_b,
+            current_preferences,
+        )
+        if filter_reason:
+            alert.status = "cancelled"
+            alert.next_retry_at = None
+            alert.error_message = f"filtered by updated preferences: {filter_reason}"
+            incr_counter("telegram.alert_cancelled_preferences")
+            return False
 
     now = datetime.now(timezone.utc)
     try:

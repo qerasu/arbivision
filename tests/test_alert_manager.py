@@ -37,6 +37,7 @@ class FakeDbSession:
         self.fail_commit = False
         self.global_preferences = None
         self.opportunities = []
+        self.sent_alert_rows = []
 
 
     def add(self, item):
@@ -65,6 +66,8 @@ class FakeDbSession:
 
     async def execute(self, stmt):
         compiled = str(stmt)
+        if "FROM alerts JOIN arb_opportunities" in compiled:
+            return FakeRowResult(self.sent_alert_rows[:1])
         if "FROM settings" in compiled:
             return FakeScalarResult(
                 [self.global_preferences] if self.global_preferences is not None else []
@@ -95,6 +98,15 @@ class FakeScalarResult:
 
     def all(self):
         return list(self.items)
+
+
+class FakeRowResult:
+    def __init__(self, items):
+        self.items = items
+
+
+    def first(self):
+        return self.items[0] if self.items else None
 
 
 class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -415,3 +427,29 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
             settings.TELEGRAM_DEFAULT_CHAT_IDS = original_chat_ids
 
         self.assertEqual(opportunity.fanout_status, "queued")
+
+
+    async def test_skips_opportunity_when_same_pair_direction_was_already_sent(self):
+        db = FakeDbSession()
+        db.sent_alert_rows = [(1,)]
+        redis = FakeRedis()
+        manager = AlertManager(db)
+        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
+        calc_result = {
+            "direction": "A_yes_B_no",
+            "avg_price_leg_1": 0.40,
+            "avg_price_leg_2": 0.50,
+            "shares": 10.0,
+            "capital_required": 9.0,
+            "gross_profit": 1.0,
+            "net_profit": 30.0,
+            "gross_roi": 0.11,
+            "net_roi": 0.45,
+        }
+
+        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
+            result = await manager.process_opportunity(pair, calc_result)
+
+        self.assertFalse(result)
+        self.assertEqual(db.added, [])
+        self.assertEqual(redis.setex_calls, [])

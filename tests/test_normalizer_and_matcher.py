@@ -19,8 +19,19 @@ class NormalizerServiceTests(unittest.TestCase):
 
         entities = service.extract_entities("Will ETH reach 5000 by March 15, 2026?")
 
-        self.assertEqual(entities["dates"], ["march 15, 2026"])
+        self.assertEqual(entities["dates"], ["march 15 2026"])
         self.assertEqual(entities["numbers"], ["5000"])
+
+
+    def test_extract_entities_distinguishes_month_from_specific_day(self):
+        service = NormalizerService()
+
+        monthly_entities = service.extract_entities("What price will Bitcoin hit in April?")
+        daily_entities = service.extract_entities("Will Bitcoin reach 75000 on Apr. 11?")
+
+        self.assertEqual(monthly_entities["dates"], ["april"])
+        self.assertEqual(daily_entities["dates"], ["april 11"])
+        self.assertEqual(daily_entities["numbers"], ["75000"])
 
 
 class MatcherServiceTests(unittest.TestCase):
@@ -162,6 +173,36 @@ class MatcherServiceTests(unittest.TestCase):
         )
 
 
+    def test_rejects_matchups_sharing_only_one_team_name(self):
+        poly_market = SimpleNamespace(
+            id=10,
+            title="CR Brasil vs Athletic Club",
+            outcomes_json=[
+                {"id": "poly-a", "label": "CR Brasil"},
+                {"id": "poly-b", "label": "Athletic Club"},
+                {"id": "poly-c", "label": "Draw"},
+            ],
+            raw_payload_json={},
+            category="brazil serie b",
+        )
+        pf_market = SimpleNamespace(
+            id=20,
+            title="Athletic Club vs. Villarreal",
+            outcomes_json=[
+                {"id": "pf-a", "label": "Athletic Club"},
+                {"id": "pf-b", "label": "Villarreal"},
+                {"id": "pf-c", "label": "Draw"},
+            ],
+            raw_payload_json={},
+            category="laliga",
+        )
+
+        decision = self.matcher.explain_match(poly_market, pf_market)
+
+        self.assertFalse(decision["matched"])
+        self.assertEqual(decision["reason"]["reject_reason"], "participant_mismatch")
+
+
     def test_matches_binary_head_to_head_market_against_named_matchup(self):
         poly_market = SimpleNamespace(
             id=10,
@@ -289,6 +330,26 @@ class MatcherServiceTests(unittest.TestCase):
         pair = self.matcher.match_candidates(poly_market, pf_market)
 
         self.assertIsNone(pair)
+
+
+    def test_rejects_monthly_bitcoin_market_against_specific_day_market(self):
+        poly_market = SimpleNamespace(
+            id=10,
+            title="Will Bitcoin reach 75000 on April 11?",
+            outcomes_json=[{"id": "poly-y", "label": "Yes"}, {"id": "poly-n", "label": "No"}],
+            raw_payload_json={},
+        )
+        pf_market = SimpleNamespace(
+            id=20,
+            title="Will Bitcoin reach 75000 in April?",
+            outcomes_json=[{"id": "pf-y", "label": "Yes"}, {"id": "pf-n", "label": "No"}],
+            raw_payload_json={},
+        )
+
+        decision = self.matcher.explain_match(poly_market, pf_market)
+
+        self.assertFalse(decision["matched"])
+        self.assertEqual(decision["reason"]["reject_reason"], "date_mismatch")
 
 
     def test_rejects_partial_match_without_auto_approval(self):
@@ -468,3 +529,29 @@ class MatcherServiceTests(unittest.TestCase):
         pair = self.matcher.match_candidates(poly_market, pf_market)
 
         self.assertIsNone(pair)
+
+
+    def test_rejects_halftime_market_against_full_match_draw_market(self):
+        poly_market = SimpleNamespace(
+            id=10,
+            title="Manchester United FC vs. Leeds United FC: Draw at halftime?",
+            outcomes_json=[{"id": "poly-y", "label": "Yes"}, {"id": "poly-n", "label": "No"}],
+            raw_payload_json={"groupItemTitle": "Halftime Result"},
+            category="sports",
+        )
+        pf_market = SimpleNamespace(
+            id=20,
+            title="Manchester United FC vs. Leeds United FC",
+            outcomes_json=[
+                {"id": "pf-home", "label": "Manchester United FC"},
+                {"id": "pf-draw", "label": "Draw"},
+                {"id": "pf-away", "label": "Leeds United FC"},
+            ],
+            raw_payload_json={"question": "Manchester United FC vs. Leeds United FC"},
+            category="sports",
+        )
+
+        decision = self.matcher.explain_match(poly_market, pf_market)
+
+        self.assertFalse(decision["matched"])
+        self.assertEqual(decision["reason"]["reject_reason"], "market_scope_mismatch")

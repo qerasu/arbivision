@@ -15,6 +15,13 @@ _LEVEL_NAMES = {
 class _SuppressTelegramPollingTimeoutFilter(logging.Filter):
     def filter(self, record):
         message = record.getMessage()
+        if message.startswith("Failed to fetch updates -"):
+            try:
+                from arbitrage_bot.services.operations_monitor import record_telegram_polling_failure
+
+                record_telegram_polling_failure(message)
+            except Exception:
+                pass
         if "Failed to fetch updates - TelegramNetworkError: HTTP Client says - Request timeout error" in message:
             return False
         if "Failed to fetch updates - TelegramNetworkError: HTTP Client says - ClientOSError:" in message:

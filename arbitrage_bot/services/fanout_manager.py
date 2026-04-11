@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import time
+from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -95,13 +96,15 @@ class FanoutManager:
         return len(deliveries)
 
 
-    async def create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, skip_existing_lookup=False):
+    async def create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, skip_existing_lookup=False, directions=None, calculator=None):
         return await self._create_alert_deliveries(
             opportunity,
             market_a,
             market_b,
             delivery_targets=delivery_targets,
             skip_existing_lookup=skip_existing_lookup,
+            directions=directions,
+            calculator=calculator,
         )
 
 
@@ -109,9 +112,16 @@ class FanoutManager:
         return await self._get_delivery_targets()
 
 
-    async def _create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, skip_existing_lookup=False):
+    async def _create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, skip_existing_lookup=False, directions=None, calculator=None):
         targets = delivery_targets if delivery_targets is not None else await self._get_delivery_targets()
-        eligible_targets, drop_reasons = self._filter_targets(opportunity, targets, market_a, market_b)
+        eligible_targets, drop_reasons = self._filter_targets(
+            opportunity,
+            targets,
+            market_a,
+            market_b,
+            directions=directions,
+            calculator=calculator,
+        )
         if not eligible_targets:
             incr_counter("fanout.opportunity_filtered_all_targets")
             for drop_reason in sorted(drop_reasons):
@@ -147,6 +157,7 @@ class FanoutManager:
                         {
                             "alert": alert,
                             "preferences": target.get("preferences") or {},
+                            "opportunity": target.get("prepared_opportunity") or opportunity,
                         }
                     )
                 existing_chat_ids.add(chat_id)
@@ -190,7 +201,7 @@ class FanoutManager:
         FanoutManager._cache_expires_at = time.monotonic() + settings.FANOUT_TARGET_CACHE_TTL_SECONDS
 
 
-    def _filter_targets(self, opportunity, targets, market_a, market_b):
+    def _filter_targets(self, opportunity, targets, market_a, market_b, directions=None, calculator=None):
         eligible_targets = []
         drop_reasons = set()
 
@@ -201,16 +212,72 @@ class FanoutManager:
             if preferences.get("muted"):
                 drop_reasons.add("muted")
                 continue
+            prepared_opportunity = opportunity
+            if directions is not None and calculator is not None:
+                prepared_opportunity = self._prepare_opportunity_for_target(
+                    opportunity,
+                    directions,
+                    calculator,
+                    preferences,
+                )
+                if prepared_opportunity is None:
+                    drop_reasons.add("opportunity_unavailable")
+                    continue
             filter_reason = filter_reason_for_preferences(
-                opportunity,
+                prepared_opportunity,
                 market_a,
                 market_b,
                 preferences,
-                skip_max_capital=True,
             )
             if filter_reason:
                 drop_reasons.add(filter_reason)
                 continue
-            eligible_targets.append(target)
+            target_payload = dict(target)
+            target_payload["prepared_opportunity"] = prepared_opportunity
+            eligible_targets.append(target_payload)
 
         return eligible_targets, drop_reasons
+
+
+    def _prepare_opportunity_for_target(self, opportunity, directions, calculator, preferences=None):
+        max_capital = None
+        max_polymarket_capital = None
+        max_predict_fun_capital = None
+        if preferences is not None:
+            max_capital = preferences.get("max_capital_usd")
+            max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
+            max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
+
+        calc_results = calculator.calculate_opportunities(
+            directions,
+            max_capital=max_capital,
+            max_polymarket_capital=max_polymarket_capital,
+            max_predict_fun_capital=max_predict_fun_capital,
+        )
+        if not calc_results:
+            return None
+
+        current_result = next(
+            (
+                result
+                for result in calc_results
+                if result.get("direction") == opportunity.direction
+            ),
+            None,
+        )
+        if current_result is None:
+            return None
+
+        payload = {
+            "direction": getattr(opportunity, "direction", None),
+            "avg_price_leg_1": current_result["avg_price_leg_1"],
+            "avg_price_leg_2": current_result["avg_price_leg_2"],
+            "shares": current_result["shares"],
+            "capital_required": current_result["capital_required"],
+            "gross_profit": current_result["gross_profit"],
+            "net_profit": current_result["net_profit"],
+            "gross_roi": current_result["gross_roi"],
+            "net_roi": current_result["net_roi"],
+            "calculation_json": current_result,
+        }
+        return SimpleNamespace(**payload)

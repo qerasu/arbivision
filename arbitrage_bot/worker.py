@@ -16,6 +16,7 @@ from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.core.observability import incr_counter
 from arbitrage_bot.services.system_notifier import format_error_details, send_system_error_notification
+from arbitrage_bot.services.operations_monitor import record_worker_cycle
 from arbitrage_bot.tg_bot.bot import send_alert_immediately
 from sqlalchemy.future import select
 from sqlalchemy import and_, or_
@@ -32,6 +33,7 @@ _candidate_context_cache = {
     "pairs": [],
     "market_map": {},
 }
+_last_full_pair_rematch_completed_at = None
 _EMPTY_COUNT_TTL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 20, 3600)
 
 
@@ -64,9 +66,14 @@ async def _run_cycle(db):
 
     try:
         sync_result = await ingestion.sync_markets()
-        if sync_result is True:
+        if _should_run_full_pair_rematch(time.monotonic()):
             _invalidate_candidate_context_cache()
             await _upsert_market_pairs(db, matcher, None)
+            _mark_full_pair_rematch_completed()
+        elif sync_result is True:
+            _invalidate_candidate_context_cache()
+            await _upsert_market_pairs(db, matcher, None)
+            _mark_full_pair_rematch_completed()
         else:
             changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
             if _has_changed_market_ids(changed_market_ids_by_platform):
@@ -92,6 +99,12 @@ async def _run_cycle(db):
             opportunities=cycle_stats["opportunities"],
             deliverable_opportunities=cycle_stats["deliverable_opportunities"],
         )
+        await record_worker_cycle(
+            active_pairs=cycle_stats["active_pairs"],
+            pairs_with_books=cycle_stats["pairs_with_books"],
+            opportunities=cycle_stats["opportunities"],
+            deliverable_opportunities=cycle_stats["deliverable_opportunities"],
+        )
     finally:
         await ingestion.close()
         await orderbook_service.close()
@@ -114,6 +127,25 @@ def _extract_changed_market_ids_by_platform(sync_result):
 
 def _has_changed_market_ids(changed_market_ids_by_platform):
     return any(changed_market_ids_by_platform.values())
+
+
+def _should_run_full_pair_rematch(now):
+    interval = max(
+        float(settings.MATCHER_FULL_REMATCH_INTERVAL_SECONDS),
+        float(settings.MARKET_REFRESH_SECONDS),
+    )
+    if interval <= 0:
+        return True
+
+    if _last_full_pair_rematch_completed_at is None:
+        return True
+
+    return (now - _last_full_pair_rematch_completed_at) >= interval
+
+
+def _mark_full_pair_rematch_completed():
+    global _last_full_pair_rematch_completed_at
+    _last_full_pair_rematch_completed_at = time.monotonic()
 
 
 def _invalidate_candidate_context_cache():
@@ -243,13 +275,24 @@ async def _load_pairs_for_market_ids(db, market_ids):
     if not market_ids:
         return []
 
-    stmt = select(MarketPair).where(
-        or_(
-            MarketPair.market_id_a.in_(market_ids),
-            MarketPair.market_id_b.in_(market_ids),
+    # postgresql ограничивает количество параметров запроса до 32767,
+    # два IN-клауза удваивают число, поэтому батчим по 10000
+    batch_size = 10000
+    market_id_list = list(market_ids)
+    all_pairs = []
+
+    for offset in range(0, len(market_id_list), batch_size):
+        chunk = market_id_list[offset:offset + batch_size]
+        stmt = select(MarketPair).where(
+            or_(
+                MarketPair.market_id_a.in_(chunk),
+                MarketPair.market_id_b.in_(chunk),
+            )
         )
-    )
-    return (await db.execute(stmt)).scalars().all()
+        pairs = (await db.execute(stmt)).scalars().all()
+        all_pairs.extend(pairs)
+
+    return all_pairs
 
 
 def _match_changed_polymarket_markets(changed_markets, changed_signatures, candidate_index, matcher, matched_pairs, pair_limit):
@@ -428,6 +471,8 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
                     market_b,
                     delivery_targets=delivery_targets,
                     skip_existing_lookup=True,
+                    directions=directions,
+                    calculator=calculator,
                 )
                 for delivery in deliveries:
                     sent = await send_alert_immediately(
@@ -439,6 +484,7 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
                         delivery["preferences"],
                         directions,
                         calculator,
+                        prepared_opportunity=delivery.get("opportunity"),
                     )
                     if sent:
                         incr_counter("worker.immediate_send_success")

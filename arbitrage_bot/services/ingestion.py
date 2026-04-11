@@ -15,9 +15,11 @@ from arbitrage_bot.models.orm import Market
 from arbitrage_bot.services.normalizer import NormalizerService
 from arbitrage_bot.services.system_notifier import format_compact_error, send_system_error_notification
 from arbitrage_bot.services.system_notifier import is_transient_network_error
+from arbitrage_bot.services.operations_monitor import record_duplicate_markets
 
 log = get_logger("ingestion")
 _source_last_sync_completed_at = {}
+_source_last_full_sync_completed_at = {}
 
 
 class IngestionService:
@@ -218,12 +220,18 @@ class IngestionService:
         now = time.monotonic()
 
         if self._should_sync_source("polymarket", now):
+            polymarket_full_sync = self._should_run_polymarket_full_sync(now)
             source_jobs.append(
                 (
                     "polymarket",
-                    self.polymarket.fetch_markets(),
+                    self.polymarket.fetch_markets(
+                        max_pages=None if polymarket_full_sync else settings.POLYMARKET_INCREMENTAL_MAX_PAGES
+                    ),
                     self._map_polymarket_market,
                     self.polymarket,
+                    {
+                        "full_sync": polymarket_full_sync,
+                    },
                 )
             )
 
@@ -234,6 +242,9 @@ class IngestionService:
                     self.predict_fun.fetch_markets(),
                     self._map_predict_fun_market,
                     self.predict_fun,
+                    {
+                        "full_sync": True,
+                    },
                 )
             )
 
@@ -245,7 +256,7 @@ class IngestionService:
             return_exceptions=True,
         )
 
-        for (source_name, _, mapper, adapter), result in zip(source_jobs, results):
+        for (source_name, _, mapper, adapter, sync_meta), result in zip(source_jobs, results):
             synced = await self._sync_source(
                 source_name,
                 result,
@@ -254,6 +265,8 @@ class IngestionService:
             )
             if synced:
                 _source_last_sync_completed_at[source_name] = time.monotonic()
+                if sync_meta.get("full_sync") and getattr(adapter, "last_fetch_complete", True):
+                    _source_last_full_sync_completed_at[source_name] = time.monotonic()
 
         return self._build_sync_result(True)
 
@@ -299,6 +312,18 @@ class IngestionService:
         return (now - last_completed_at) >= min_interval
 
 
+    def _should_run_polymarket_full_sync(self, now):
+        full_interval = max(
+            float(settings.POLYMARKET_FULL_SYNC_INTERVAL_SECONDS),
+            float(settings.MARKET_SYNC_INTERVAL_SECONDS),
+            float(settings.MARKET_REFRESH_SECONDS),
+        )
+        last_completed_at = _source_last_full_sync_completed_at.get("polymarket")
+        if last_completed_at is None:
+            return True
+        return (now - last_completed_at) >= full_interval
+
+
     async def _sync_source(self, source_name, payload_or_exc, mapper, adapter=None):
         try:
             if isinstance(payload_or_exc, BaseException):
@@ -307,6 +332,8 @@ class IngestionService:
             raw_items = payload_or_exc.get("data", payload_or_exc) if isinstance(payload_or_exc, dict) else payload_or_exc
             mapped_items = [mapper(item) for item in raw_items if isinstance(item, dict)]
             platform = mapped_items[0]["platform"] if mapped_items else self._source_platform_name(source_name)
+            is_partial = getattr(adapter, "last_fetch_partial", False)
+            is_complete = getattr(adapter, "last_fetch_complete", True)
             mapped_items, duplicate_count = self._dedupe_market_items(mapped_items)
             if duplicate_count:
                 log.warning(
@@ -314,17 +341,38 @@ class IngestionService:
                     source=source_name,
                     duplicate_rows=duplicate_count,
                 )
+                await record_duplicate_markets(source_name, duplicate_count)
+            else:
+                await record_duplicate_markets(source_name, 0)
             if not mapped_items:
                 self._changed_market_ids_by_platform.setdefault(platform, set())
+                if is_partial:
+                    log.warning(
+                        "partial sync completed with no market rows, skipping stale market detection",
+                        source=source_name,
+                        fetched_markets=0,
+                    )
+                    return False
+                if not is_complete:
+                    log.info(
+                        "incremental sync completed with no market rows, skipping stale market detection",
+                        source=source_name,
+                        fetched_markets=0,
+                    )
                 return True
             changed_market_ids = set()
             for chunk in self._chunked(mapped_items, 1000):
                 changed_market_ids.update(await self._upsert_markets(chunk))
                 await self.db.commit()
-            is_partial = getattr(adapter, "last_fetch_partial", False)
             if is_partial:
                 log.warning(
                     "partial sync completed, skipping stale market detection",
+                    source=source_name,
+                    fetched_markets=len(mapped_items),
+                )
+            elif not is_complete:
+                log.info(
+                    "incremental sync completed, skipping stale market detection",
                     source=source_name,
                     fetched_markets=len(mapped_items),
                 )
@@ -335,7 +383,7 @@ class IngestionService:
                 ))
             await self.db.commit()
             self._changed_market_ids_by_platform.setdefault(platform, set()).update(changed_market_ids)
-            return True
+            return not is_partial
         except asyncio.CancelledError:
             raise
         except Exception as e:

@@ -43,6 +43,46 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter._get_json.await_count, 2)
 
 
+    async def test_fetch_markets_stops_after_failed_page_and_marks_partial(self):
+        adapter = PolymarketAdapter()
+        adapter._get_json = AsyncMock(
+            side_effect=[
+                [{"id": "1"}, {"id": "2"}],
+                RuntimeError("timeout"),
+            ]
+        )
+        adapter.page_limit = 2
+        adapter.max_pages = 5
+        adapter.close = AsyncMock()
+
+        with self.assertLogs("arbitrage_bot.adapters.polymarket", level="WARNING") as log_context:
+            result = await adapter.fetch_markets()
+
+        self.assertEqual(result, [{"id": "1"}, {"id": "2"}])
+        self.assertTrue(adapter.last_fetch_partial)
+        self.assertEqual(adapter._get_json.await_count, 2)
+        self.assertEqual(len(log_context.output), 1)
+        self.assertIn("polymarket page fetch failed (offset=2), stopping pagination: timeout", log_context.output[0])
+
+
+    async def test_fetch_markets_marks_incomplete_when_page_budget_is_hit(self):
+        adapter = PolymarketAdapter()
+        adapter._get_json = AsyncMock(
+            side_effect=[
+                [{"id": "1"}, {"id": "2"}],
+                [{"id": "3"}, {"id": "4"}],
+            ]
+        )
+        adapter.page_limit = 2
+
+        result = await adapter.fetch_markets(max_pages=1)
+
+        self.assertEqual(result, [{"id": "1"}, {"id": "2"}])
+        self.assertFalse(adapter.last_fetch_partial)
+        self.assertFalse(adapter.last_fetch_complete)
+        self.assertEqual(adapter._get_json.await_count, 1)
+
+
     async def test_get_json_uses_curl_fallback_for_remote_protocol_error(self):
         adapter = PolymarketAdapter()
         adapter.client.get = AsyncMock(side_effect=httpx.RemoteProtocolError("boom"))

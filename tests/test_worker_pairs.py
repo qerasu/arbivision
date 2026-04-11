@@ -18,6 +18,7 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         worker_module._candidate_context_cache["loaded"] = False
         worker_module._candidate_context_cache["pairs"] = []
         worker_module._candidate_context_cache["market_map"] = {}
+        worker_module._last_full_pair_rematch_completed_at = None
 
 
     def test_reconcile_updates_existing_pair_and_keeps_manual_approval(self):
@@ -374,6 +375,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         worker_module._candidate_context_cache["loaded"] = False
         worker_module._candidate_context_cache["pairs"] = []
         worker_module._candidate_context_cache["market_map"] = {}
+        worker_module._last_full_pair_rematch_completed_at = None
         self.system_error_patcher = patch(
             "arbitrage_bot.worker.send_system_error_notification",
             new=AsyncMock(return_value=False),
@@ -423,11 +425,64 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
                     "deliverable_opportunities": 0,
                 }
             ),
-        ) as process_mock:
+        ) as process_mock, patch(
+            "arbitrage_bot.worker._should_run_full_pair_rematch",
+            return_value=False,
+        ):
             await _run_cycle(fake_db)
 
         upsert_mock.assert_not_awaited()
         process_mock.assert_awaited_once()
+        ingestion.close.assert_awaited_once()
+        orderbook_service.close.assert_awaited_once()
+
+
+    async def test_run_cycle_performs_full_pair_rematch_even_without_market_changes(self):
+        fake_db = SimpleNamespace()
+        ingestion = SimpleNamespace(
+            sync_markets=AsyncMock(return_value=False),
+            close=AsyncMock(),
+        )
+        orderbook_service = SimpleNamespace(close=AsyncMock())
+
+        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
+            "arbitrage_bot.worker.MatcherService",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.OrderbookService",
+            return_value=orderbook_service,
+        ), patch(
+            "arbitrage_bot.worker.ArbitrageCalculator",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker._upsert_market_pairs",
+            new=AsyncMock(),
+        ) as upsert_mock, patch(
+            "arbitrage_bot.worker._process_candidates",
+            new=AsyncMock(
+                return_value={
+                    "approved_pairs": 0,
+                    "active_pairs": 0,
+                    "pairs_with_books": 0,
+                    "skipped_pairs": 0,
+                    "opportunities": 0,
+                    "deliverable_opportunities": 0,
+                }
+            ),
+        ), patch(
+            "arbitrage_bot.worker._should_run_full_pair_rematch",
+            return_value=True,
+        ):
+            await _run_cycle(fake_db)
+
+        upsert_mock.assert_awaited_once()
+        self.assertIsNone(upsert_mock.await_args.args[2])
         ingestion.close.assert_awaited_once()
         orderbook_service.close.assert_awaited_once()
 
@@ -928,6 +983,106 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(alert_manager.finalize_opportunity.await_count, 2)
         self.assertEqual(fanout_manager.create_alert_deliveries.await_count, 2)
         send_mock.assert_not_awaited()
+
+
+    async def test_process_candidates_passes_prepared_delivery_opportunity_to_immediate_send(self):
+        class FakeScalarResult:
+            def __init__(self, items):
+                self.items = items
+
+
+            def scalars(self):
+                return self
+
+
+            def all(self):
+                return list(self.items)
+
+
+        class FakeDb:
+            commit = AsyncMock()
+            rollback = AsyncMock()
+
+
+            async def execute(self, stmt):
+                return FakeScalarResult([SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20)])
+
+
+        fake_db = FakeDb()
+        pair = SimpleNamespace(id=1, pair_hash="pair-1", market_id_a=10, market_id_b=20)
+        prepared_delivery_opportunity = SimpleNamespace(direction="A_yes_B_no", capital_required=4.65, shares=5.0)
+        orderbook_service = SimpleNamespace(
+            fetch_orderbooks_for_pairs=AsyncMock(
+                return_value=[
+                    {
+                        "pair": pair,
+                        "directions": {"A_yes_B_no": {"poly": [(0.4, 2)], "pf": [(0.5, 2)]}},
+                    }
+                ]
+            ),
+        )
+        calculator = SimpleNamespace(
+            calculate_opportunities=Mock(
+                return_value=[
+                    {
+                        "direction": "A_yes_B_no",
+                        "avg_price_leg_1": 0.40,
+                        "avg_price_leg_2": 0.50,
+                        "shares": 10.0,
+                        "capital_required": 9.0,
+                        "gross_profit": 1.0,
+                        "net_profit": 2.0,
+                        "gross_roi": 0.11,
+                        "net_roi": 0.22,
+                    }
+                ]
+            )
+        )
+
+        async def process_opportunity(_pair, _calc_result):
+            return SimpleNamespace(id=101, direction="A_yes_B_no", fanout_status="queued")
+
+
+        alert_manager = SimpleNamespace(
+            process_opportunity=AsyncMock(side_effect=process_opportunity),
+            finalize_opportunity=AsyncMock(),
+        )
+        fanout_manager = SimpleNamespace(
+            create_alert_deliveries=AsyncMock(
+                return_value=[
+                    {
+                        "alert": SimpleNamespace(id=501),
+                        "preferences": {},
+                        "opportunity": prepared_delivery_opportunity,
+                    }
+                ]
+            ),
+            get_delivery_targets=AsyncMock(return_value=[]),
+        )
+
+        with patch("arbitrage_bot.worker._filter_skippable_pairs", new=AsyncMock(return_value=[pair])), patch(
+            "arbitrage_bot.worker._load_market_map_for_pairs",
+            new=AsyncMock(return_value={
+                10: SimpleNamespace(id=10, platform="polymarket", platform_market_id="poly-10"),
+                20: SimpleNamespace(id=20, platform="predict_fun", platform_market_id="pf-20"),
+            }),
+        ), patch(
+            "arbitrage_bot.worker._update_empty_counts",
+            new=AsyncMock(),
+        ), patch(
+            "arbitrage_bot.worker.send_alert_immediately",
+            new=AsyncMock(return_value=True),
+        ) as send_mock:
+            await _process_candidates(
+                fake_db,
+                orderbook_service,
+                calculator,
+                alert_manager,
+                fanout_manager,
+            )
+
+        self.assertEqual(send_mock.await_count, 1)
+        self.assertIs(send_mock.await_args.kwargs["prepared_opportunity"], prepared_delivery_opportunity)
 
 
     async def test_process_candidates_uses_batched_orderbook_fetch(self):

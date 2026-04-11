@@ -1,7 +1,10 @@
 import json
 
+from sqlalchemy import select
+
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.redis import get_redis
+from arbitrage_bot.models.orm import Alert
 from arbitrage_bot.models.orm import ArbOpportunity
 
 
@@ -15,6 +18,9 @@ class AlertManager:
 
     async def process_opportunity(self, pair, calc_result):
         direction = calc_result["direction"]
+        if await self._has_sent_alert_for_pair_direction(pair.id, direction):
+            return False
+
         redis = await get_redis()
         dedupe_key = f"alert-dedupe:{pair.pair_hash}:{direction}"
         state_to_save = self._build_dedupe_state(calc_result)
@@ -132,3 +138,16 @@ class AlertManager:
             await redis.setex(dedupe_key, self.dedupe_ttl, json.dumps(state_to_save))
         except Exception:
             pass
+
+
+    async def _has_sent_alert_for_pair_direction(self, pair_id, direction):
+        stmt = (
+            select(Alert.id)
+            .join(ArbOpportunity, Alert.opportunity_id == ArbOpportunity.id)
+            .where(ArbOpportunity.market_pair_id == pair_id)
+            .where(ArbOpportunity.direction == direction)
+            .where(Alert.status == "sent")
+            .limit(1)
+        )
+        result = await self.db.execute(stmt)
+        return result.first() is not None

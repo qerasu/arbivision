@@ -14,11 +14,9 @@ class PolymarketAdapter(BaseAdapter):
     clob_base_url = "https://clob.polymarket.com"
     page_limit = 500
     max_pages = 200
-    curl_max_attempts = 3
-    curl_max_time_seconds = 20
-    curl_connect_timeout_seconds = 5
-    # consecutive page failures before we stop paginating
-    max_consecutive_page_failures = 2
+    curl_max_attempts = 2
+    curl_max_time_seconds = 8
+    curl_connect_timeout_seconds = 3
     fallback_errors = (
         httpx.ConnectError,
         httpx.ConnectTimeout,
@@ -27,9 +25,11 @@ class PolymarketAdapter(BaseAdapter):
     )
 
     def __init__(self):
-        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=10.0)
+        timeout = httpx.Timeout(8.0, connect=3.0)
+        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
         self.clob_client = httpx.AsyncClient(base_url=self.clob_base_url, timeout=10.0)
         self.last_fetch_partial = False
+        self.last_fetch_complete = True
 
 
     async def close(self):
@@ -37,14 +37,15 @@ class PolymarketAdapter(BaseAdapter):
         await self.clob_client.aclose()
 
 
-    async def fetch_markets(self):
+    async def fetch_markets(self, max_pages=None):
         all_items = []
         offset = 0
         previous_batch_ids = None
-        consecutive_failures = 0
         had_failures = False
+        reached_page_limit = False
+        page_budget = self.max_pages if max_pages is None else max(0, int(max_pages))
 
-        for _ in range(self.max_pages):
+        for page_index in range(page_budget):
             params = {
                 "limit": self.page_limit,
                 "offset": offset,
@@ -56,20 +57,13 @@ class PolymarketAdapter(BaseAdapter):
                 payload = await self._get_json("/markets", params=params)
             except Exception as exc:
                 had_failures = True
-                consecutive_failures += 1
                 _log.warning(
-                    "polymarket page fetch failed (offset=%d, attempt %d/%d): %s",
+                    "polymarket page fetch failed (offset=%d), stopping pagination: %s",
                     offset,
-                    consecutive_failures,
-                    self.max_consecutive_page_failures,
                     exc,
                 )
-                if consecutive_failures >= self.max_consecutive_page_failures:
-                    break
-                offset += self.page_limit
-                continue
+                break
 
-            consecutive_failures = 0
             items = self._extract_items(payload)
 
             if items is None:
@@ -77,6 +71,7 @@ class PolymarketAdapter(BaseAdapter):
                     had_failures = True
                     break
                 self.last_fetch_partial = False
+                self.last_fetch_complete = True
                 return payload
             if not items:
                 break
@@ -89,11 +84,15 @@ class PolymarketAdapter(BaseAdapter):
             all_items.extend(items)
             if len(items) < self.page_limit:
                 break
+            if page_index + 1 >= page_budget:
+                reached_page_limit = True
+                break
 
             previous_batch_ids = batch_ids
             offset += self.page_limit
 
         self.last_fetch_partial = had_failures
+        self.last_fetch_complete = not had_failures and not reached_page_limit
         return all_items
 
 

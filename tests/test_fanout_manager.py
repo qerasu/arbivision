@@ -297,6 +297,70 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot_counters()["fanout.drop.min_roi"], 1)
 
 
+    async def test_fanout_filters_out_target_by_max_capital_before_creating_alert(self):
+        db = FakeDbSession()
+        manager = FanoutManager(db)
+        opportunity = SimpleNamespace(
+            id=7,
+            net_roi=0.12,
+            capital_required=200.0,
+            net_profit=5.0,
+            shares=10.0,
+            avg_price_leg_1=0.4,
+            avg_price_leg_2=0.5,
+            price_leg_1=0.4,
+            price_leg_2=0.5,
+        )
+        market_a = Market(
+            id=101,
+            platform="polymarket",
+            platform_market_id="poly-101",
+            status="active",
+            tradable=True,
+            title="market a",
+            normalized_title="market a",
+            description="",
+            outcomes_json=[],
+            raw_payload_json={},
+            category="",
+            slug="",
+        )
+        market_b = Market(
+            id=202,
+            platform="predict_fun",
+            platform_market_id="pf-202",
+            status="active",
+            tradable=True,
+            title="market b",
+            normalized_title="market b",
+            description="",
+            outcomes_json=[],
+            raw_payload_json={},
+            category="",
+            slug="",
+        )
+
+        with patch.object(
+            manager,
+            "_get_delivery_targets",
+            new=AsyncMock(
+                return_value=[
+                    {
+                        "user_id": 11,
+                        "subscription_id": 21,
+                        "telegram_chat_id": "1001",
+                        "preferences": {"max_capital_usd": 150.0},
+                    }
+                ]
+            ),
+        ):
+            created_count = await manager._fanout_opportunity(opportunity, market_a, market_b)
+
+        self.assertEqual(created_count, 0)
+        self.assertEqual(db.flush_calls, 0)
+        self.assertEqual(snapshot_counters()["fanout.drop.max_capital"], 1)
+
+
     async def test_fanout_skips_duplicate_alert_insert_without_failing_batch(self):
         db = FakeDbSession()
         db.fail_on_chat_ids.add("1002")
@@ -497,6 +561,88 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(deliveries), 1)
         self.assertEqual(db.flush_calls, 1)
+
+
+    async def test_create_alert_deliveries_uses_target_specific_recalculation_before_insert(self):
+        db = FakeDbSession()
+        manager = FanoutManager(db)
+        opportunity = SimpleNamespace(
+            id=7,
+            direction="A_yes_B_no",
+            net_roi=0.12,
+            capital_required=10.0,
+            net_profit=5.0,
+            avg_price_leg_1=0.4,
+            avg_price_leg_2=0.5,
+            shares=10.0,
+            gross_profit=5.0,
+            gross_roi=0.1,
+            calculation_json=None,
+        )
+        market_a = Market(
+            id=101,
+            platform="polymarket",
+            platform_market_id="poly-101",
+            status="active",
+            tradable=True,
+            title="market a",
+            normalized_title="market a",
+            description="",
+            outcomes_json=[],
+            raw_payload_json={},
+            category="",
+            slug="",
+        )
+        market_b = Market(
+            id=202,
+            platform="predict_fun",
+            platform_market_id="pf-202",
+            status="active",
+            tradable=True,
+            title="market b",
+            normalized_title="market b",
+            description="",
+            outcomes_json=[],
+            raw_payload_json={},
+            category="",
+            slug="",
+        )
+        calculator = SimpleNamespace(
+            calculate_opportunities=lambda directions, max_capital=None, max_polymarket_capital=None, max_predict_fun_capital=None: [
+                {
+                    "direction": "A_yes_B_no",
+                    "avg_price_leg_1": 0.41,
+                    "avg_price_leg_2": 0.52,
+                    "shares": 5.0,
+                    "capital_required": 4.65,
+                    "gross_profit": 0.35,
+                    "net_profit": 0.35,
+                    "gross_roi": 0.075,
+                    "net_roi": 0.075,
+                }
+            ]
+        )
+
+        deliveries = await manager.create_alert_deliveries(
+            opportunity,
+            market_a,
+            market_b,
+            delivery_targets=[
+                {
+                    "user_id": 11,
+                    "subscription_id": 21,
+                    "telegram_chat_id": "1001",
+                    "preferences": {"max_capital_usd": 4.65},
+                }
+            ],
+            skip_existing_lookup=True,
+            directions={"A_yes_B_no": {"poly": [(0.41, 12)], "pf": [(0.52, 12)]}},
+            calculator=calculator,
+        )
+
+        self.assertEqual(len(deliveries), 1)
+        self.assertAlmostEqual(deliveries[0]["opportunity"].capital_required, 4.65)
+        self.assertAlmostEqual(deliveries[0]["opportunity"].shares, 5.0)
 
 
 class TelegramDeliveryRetryTests(unittest.TestCase):
