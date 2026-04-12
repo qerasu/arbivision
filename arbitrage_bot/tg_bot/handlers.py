@@ -556,16 +556,17 @@ async def _load_admin_stats(db_session):
     paused_users = int(users_row.paused or 0)
     active_users = max(0, total_users - paused_users)
 
-    runtime_drop_reasons = {}
+    runtime_alert_drop_reasons = {}
+    runtime_opportunity_filter_reasons = {}
     for key, value in sorted(runtime_metrics.items()):
         if key.startswith("fanout.drop."):
-            runtime_drop_reasons[key.removeprefix("fanout.drop.")] = int(value)
+            runtime_opportunity_filter_reasons[key.removeprefix("fanout.drop.")] = int(value)
         elif key == "telegram.alert_cancelled_preferences":
-            runtime_drop_reasons["cancelled_preferences"] = int(value)
+            runtime_alert_drop_reasons["cancelled_preferences"] = int(value)
         elif key == "telegram.alert_cancelled_revalidation":
-            runtime_drop_reasons["stale_after_revalidation"] = int(value)
+            runtime_alert_drop_reasons["stale_after_revalidation"] = int(value)
         elif key == "telegram.alert_send_failed":
-            runtime_drop_reasons["send_failed"] = int(value)
+            runtime_alert_drop_reasons["send_failed"] = int(value)
 
     return {
         "users": {
@@ -584,7 +585,8 @@ async def _load_admin_stats(db_session):
             }
             for error_message, count in reason_rows
         ],
-        "runtime_drop_reasons": runtime_drop_reasons,
+        "runtime_alert_drop_reasons": runtime_alert_drop_reasons,
+        "runtime_opportunity_filter_reasons": runtime_opportunity_filter_reasons,
     }
 
 
@@ -615,15 +617,26 @@ def _format_admin_stats_text(stats):
         for item in alert_drop_reasons:
             lines.append(f"• {item['reason']}: {item['count']}")
 
-    runtime_drop_reasons = stats.get("runtime_drop_reasons") or {}
-    if runtime_drop_reasons:
+    runtime_alert_drop_reasons = stats.get("runtime_alert_drop_reasons") or {}
+    if runtime_alert_drop_reasons:
         lines.extend(
             [
                 "",
-                "⚙️ Drop reasons (since restart):",
+                "⚙️ Alert drop reasons (since restart):",
             ]
         )
-        for reason, count in runtime_drop_reasons.items():
+        for reason, count in runtime_alert_drop_reasons.items():
+            lines.append(f"• {reason}: {count}")
+
+    runtime_opportunity_filter_reasons = stats.get("runtime_opportunity_filter_reasons") or {}
+    if runtime_opportunity_filter_reasons:
+        lines.extend(
+            [
+                "",
+                "🧹 Opportunity filter reasons (since restart):",
+            ]
+        )
+        for reason, count in runtime_opportunity_filter_reasons.items():
             lines.append(f"• {reason}: {count}")
 
     return "\n".join(lines)

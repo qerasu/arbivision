@@ -85,9 +85,12 @@ class TelegramBotCommandsTests(unittest.TestCase):
                 "alert_drop_reasons": [
                     {"reason": "opportunity is no longer available", "count": 3},
                 ],
-                "runtime_drop_reasons": {
-                    "min_roi": 5,
+                "runtime_alert_drop_reasons": {
+                    "cancelled_preferences": 2,
                     "send_failed": 1,
+                },
+                "runtime_opportunity_filter_reasons": {
+                    "min_roi": 5,
                 },
             }
         )
@@ -101,6 +104,10 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("• 📤 Sent: 10", text)
         self.assertIn("• 🗑 Dropped: 4", text)
         self.assertIn("• opportunity is no longer available: 3", text)
+        self.assertIn("⚙️ Alert drop reasons (since restart):", text)
+        self.assertIn("• cancelled_preferences: 2", text)
+        self.assertIn("• send_failed: 1", text)
+        self.assertIn("🧹 Opportunity filter reasons (since restart):", text)
         self.assertIn("• min_roi: 5", text)
 
 
@@ -543,6 +550,34 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["users"]["total"], 1)
         self.assertIn("FROM telegram_chats", session.compiled_statements[0])
         self.assertNotIn("FROM subscriptions", session.compiled_statements[0])
+
+
+    async def test_load_admin_stats_separates_alert_and_filter_runtime_reasons(self):
+        session = FakeAdminStatsSession()
+
+        with patch(
+            "arbitrage_bot.tg_bot.handlers.snapshot_counters",
+            return_value={
+                "fanout.drop.max_capital": 2,
+                "telegram.alert_cancelled_preferences": 1,
+                "telegram.alert_send_failed": 3,
+            },
+        ):
+            stats = await _load_admin_stats(session)
+
+        self.assertEqual(
+            stats["runtime_alert_drop_reasons"],
+            {
+                "cancelled_preferences": 1,
+                "send_failed": 3,
+            },
+        )
+        self.assertEqual(
+            stats["runtime_opportunity_filter_reasons"],
+            {
+                "max_capital": 2,
+            },
+        )
 
 
     async def test_apply_setting_update_reuses_prompt_message_when_available(self):
