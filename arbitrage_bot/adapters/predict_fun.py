@@ -14,6 +14,11 @@ class PredictFunAdapter(BaseAdapter):
     curl_max_attempts = 3
     curl_max_time_seconds = 20
     curl_connect_timeout_seconds = 5
+    orderbook_timeout_seconds = 4
+    orderbook_connect_timeout_seconds = 2
+    orderbook_curl_max_attempts = 2
+    orderbook_curl_max_time_seconds = 4
+    orderbook_curl_connect_timeout_seconds = 2
     fallback_errors = (
         httpx.ConnectError,
         httpx.ConnectTimeout,
@@ -75,32 +80,59 @@ class PredictFunAdapter(BaseAdapter):
 
 
     async def fetch_orderbook(self, market_id):
-        return await self._get_json(f"/markets/{market_id}/orderbook")
+        return await self._get_json(
+            f"/markets/{market_id}/orderbook",
+            timeout=httpx.Timeout(
+                self.orderbook_timeout_seconds,
+                connect=self.orderbook_connect_timeout_seconds,
+            ),
+            curl_max_attempts=self.orderbook_curl_max_attempts,
+            curl_max_time_seconds=self.orderbook_curl_max_time_seconds,
+            curl_connect_timeout_seconds=self.orderbook_curl_connect_timeout_seconds,
+        )
 
 
-    async def _get_json(self, path, params=None):
+    async def _get_json(self, path, params=None, timeout=None, curl_max_attempts=None, curl_max_time_seconds=None, curl_connect_timeout_seconds=None):
         try:
-            response = await self.client.get(path, params=params)
+            request_kwargs = {"params": params}
+            if timeout is not None:
+                request_kwargs["timeout"] = timeout
+            response = await self.client.get(path, **request_kwargs)
             response.raise_for_status()
             return response.json()
         except self.fallback_errors as exc:
-            return await self._curl_get_json(path, params=params, original_exc=exc)
+            return await self._curl_get_json(
+                path,
+                params=params,
+                original_exc=exc,
+                curl_max_attempts=curl_max_attempts,
+                curl_max_time_seconds=curl_max_time_seconds,
+                curl_connect_timeout_seconds=curl_connect_timeout_seconds,
+            )
 
 
-    async def _curl_get_json(self, path, params=None, original_exc=None):
+    async def _curl_get_json(self, path, params=None, original_exc=None, curl_max_attempts=None, curl_max_time_seconds=None, curl_connect_timeout_seconds=None):
         url = f"{self.base_url}{path}"
         if params:
             from urllib.parse import urlencode
 
             url = f"{url}?{urlencode(params, doseq=True)}"
 
+        max_attempts = self.curl_max_attempts if curl_max_attempts is None else max(1, int(curl_max_attempts))
+        max_time_seconds = self.curl_max_time_seconds if curl_max_time_seconds is None else float(curl_max_time_seconds)
+        connect_timeout_seconds = (
+            self.curl_connect_timeout_seconds
+            if curl_connect_timeout_seconds is None
+            else float(curl_connect_timeout_seconds)
+        )
+
         config_lines = [
             "silent",
             "show-error",
             "fail",
             "location",
-            f"connect-timeout = {self.curl_connect_timeout_seconds}",
-            f"max-time = {self.curl_max_time_seconds}",
+            f"connect-timeout = {connect_timeout_seconds}",
+            f"max-time = {max_time_seconds}",
         ]
         for key, value in self.headers.items():
             escaped_value = str(value).replace("\\", "\\\\").replace('"', '\\"')
@@ -109,7 +141,7 @@ class PredictFunAdapter(BaseAdapter):
         config_payload = "\n".join(config_lines).encode("utf-8")
 
         last_detail = None
-        for attempt in range(1, self.curl_max_attempts + 1):
+        for attempt in range(1, max_attempts + 1):
             proc = await asyncio.create_subprocess_exec(
                 "curl",
                 "--config",
@@ -124,7 +156,7 @@ class PredictFunAdapter(BaseAdapter):
                 return json.loads(stdout)
 
             last_detail = stderr.decode().strip() or repr(original_exc)
-            if attempt < self.curl_max_attempts:
+            if attempt < max_attempts:
                 await asyncio.sleep(0.75 * attempt)
 
         raise RuntimeError(f"curl fallback failed for {url}: {last_detail}") from original_exc

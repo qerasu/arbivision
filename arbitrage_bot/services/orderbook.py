@@ -244,7 +244,7 @@ class OrderbookService:
                 incr_counter("orderbook.fetch.predict_fun_market_not_found")
                 self._set_cache_value(_predict_fun_orderbook_cache, market_id, _CACHE_MISS)
                 return None, "predict_fun_market_not_found"
-            log.warning(
+            log.debug(
                 "orderbook fetch failed",
                 source="predict.fun",
                 market_id=market_id,
@@ -278,6 +278,20 @@ class OrderbookService:
                 orderbooks[market_id] = payload
             elif drop_reason:
                 drop_reasons[market_id] = drop_reason
+
+        fetch_failed_market_ids = sorted(
+            market_id
+            for market_id, drop_reason in drop_reasons.items()
+            if drop_reason == "predict_fun_fetch_failed"
+        )
+        if fetch_failed_market_ids:
+            sample_market_ids = fetch_failed_market_ids[:5]
+            log.warning(
+                "predict.fun orderbook fetch failures in batch",
+                source="predict.fun",
+                failed_market_count=len(fetch_failed_market_ids),
+                sample_market_ids=sample_market_ids,
+            )
 
         return orderbooks, drop_reasons
 

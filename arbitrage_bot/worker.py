@@ -1,8 +1,11 @@
 import asyncio
 import time
 from collections import defaultdict
+from dataclasses import dataclass
+from dataclasses import field
 import json
 from datetime import datetime, timezone
+from datetime import timedelta
 from arbitrage_bot.core.database import AsyncSessionLocal
 from arbitrage_bot.core.redis import get_redis
 from arbitrage_bot.models.orm import Market, MarketPair
@@ -18,6 +21,7 @@ from arbitrage_bot.core.observability import incr_counter
 from arbitrage_bot.services.system_notifier import format_error_details, send_system_error_notification
 from arbitrage_bot.services.operations_monitor import record_worker_cycle
 from arbitrage_bot.tg_bot.bot import send_alert_immediately
+from arbitrage_bot.tg_bot.preferences import extract_pair_close_datetime
 from sqlalchemy.future import select
 from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
@@ -25,25 +29,28 @@ from sqlalchemy.exc import IntegrityError
 log = get_logger("worker")
 _EMPTY_COUNTS_MAX_SIZE = 1000
 _SIGNATURE_CACHE_MAX_SIZE = 20000
-# pair_hash -> (count, monotonic_timestamp)
-_pair_empty_counts = {}
-_market_signature_cache = {}
-_candidate_context_cache = {
-    "loaded": False,
-    "pairs": [],
-    "market_map": {},
-}
-_last_full_pair_rematch_completed_at = None
 _EMPTY_COUNT_TTL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 20, 3600)
 
 
-async def run_sync_loop():
+@dataclass
+class WorkerState:
+    pair_empty_counts: dict = field(default_factory=dict)
+    market_signature_cache: dict = field(default_factory=dict)
+    candidate_context_loaded: bool = False
+    candidate_pairs: list = field(default_factory=list)
+    candidate_market_map: dict = field(default_factory=dict)
+    last_full_pair_rematch_completed_at: float | None = None
+    pair_cycle_offsets: dict = field(default_factory=dict)
+
+
+async def run_sync_loop(state=None):
     # infinite market update loop
+    runtime_state = state or WorkerState()
     while True:
         try:
             incr_counter("worker.cycle_started")
             async with AsyncSessionLocal() as session:
-                await _run_cycle(session)
+                await _run_cycle(session, runtime_state)
             incr_counter("worker.cycle_completed")
         except asyncio.CancelledError:
             raise
@@ -56,7 +63,7 @@ async def run_sync_loop():
         await asyncio.sleep(settings.MARKET_REFRESH_SECONDS)
 
 
-async def _run_cycle(db):
+async def _run_cycle(db, state):
     ingestion = IngestionService(db)
     matcher = MatcherService()
     orderbook_service = OrderbookService()
@@ -66,22 +73,19 @@ async def _run_cycle(db):
 
     try:
         sync_result = await ingestion.sync_markets()
-        if _should_run_full_pair_rematch(time.monotonic()):
-            _invalidate_candidate_context_cache()
-            await _upsert_market_pairs(db, matcher, None)
-            _mark_full_pair_rematch_completed()
-        elif sync_result is True:
-            _invalidate_candidate_context_cache()
-            await _upsert_market_pairs(db, matcher, None)
-            _mark_full_pair_rematch_completed()
+        if _should_run_full_pair_rematch(time.monotonic(), state):
+            _invalidate_candidate_context_cache(state)
+            await _upsert_market_pairs(db, matcher, None, state)
+            _mark_full_pair_rematch_completed(state)
         else:
             changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
             if _has_changed_market_ids(changed_market_ids_by_platform):
-                _invalidate_candidate_context_cache()
+                _invalidate_candidate_context_cache(state)
                 await _upsert_market_pairs(
                     db,
                     matcher,
                     changed_market_ids_by_platform,
+                    state,
                 )
         cycle_stats = await _process_candidates(
             db,
@@ -89,6 +93,7 @@ async def _run_cycle(db):
             calculator,
             alert_manager,
             fanout_manager,
+            state,
         )
         log.info(
             "worker cycle summary",
@@ -124,12 +129,11 @@ def _extract_changed_market_ids_by_platform(sync_result):
         "predict_fun": set(changed_market_ids_by_platform.get("predict_fun") or []),
     }
 
-
 def _has_changed_market_ids(changed_market_ids_by_platform):
     return any(changed_market_ids_by_platform.values())
 
 
-def _should_run_full_pair_rematch(now):
+def _should_run_full_pair_rematch(now, state):
     interval = max(
         float(settings.MATCHER_FULL_REMATCH_INTERVAL_SECONDS),
         float(settings.MARKET_REFRESH_SECONDS),
@@ -137,28 +141,27 @@ def _should_run_full_pair_rematch(now):
     if interval <= 0:
         return True
 
-    if _last_full_pair_rematch_completed_at is None:
+    if state.last_full_pair_rematch_completed_at is None:
         return True
 
-    return (now - _last_full_pair_rematch_completed_at) >= interval
+    return (now - state.last_full_pair_rematch_completed_at) >= interval
 
 
-def _mark_full_pair_rematch_completed():
-    global _last_full_pair_rematch_completed_at
-    _last_full_pair_rematch_completed_at = time.monotonic()
+def _mark_full_pair_rematch_completed(state):
+    state.last_full_pair_rematch_completed_at = time.monotonic()
 
 
-def _invalidate_candidate_context_cache():
-    _candidate_context_cache["loaded"] = False
-    _candidate_context_cache["pairs"] = []
-    _candidate_context_cache["market_map"] = {}
+def _invalidate_candidate_context_cache(state):
+    state.candidate_context_loaded = False
+    state.candidate_pairs = []
+    state.candidate_market_map = {}
 
 
-async def _load_candidate_context(db, force_refresh=False):
-    if _candidate_context_cache["loaded"] and not force_refresh:
+async def _load_candidate_context(db, state, force_refresh=False):
+    if state.candidate_context_loaded and not force_refresh:
         return (
-            list(_candidate_context_cache["pairs"]),
-            dict(_candidate_context_cache["market_map"]),
+            list(state.candidate_pairs),
+            dict(state.candidate_market_map),
         )
 
     pair_stmt = select(MarketPair).where(
@@ -166,13 +169,13 @@ async def _load_candidate_context(db, force_refresh=False):
     )
     pairs = (await db.execute(pair_stmt)).scalars().all()
     market_map = await _load_market_map_for_pairs(db, pairs)
-    _candidate_context_cache["loaded"] = True
-    _candidate_context_cache["pairs"] = list(pairs)
-    _candidate_context_cache["market_map"] = dict(market_map)
+    state.candidate_context_loaded = True
+    state.candidate_pairs = list(pairs)
+    state.candidate_market_map = dict(market_map)
     return pairs, market_map
 
 
-async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform):
+async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, state):
     full_rematch = changed_market_ids_by_platform is None
     changed_poly_ids = set()
     changed_pf_ids = set()
@@ -203,8 +206,8 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform):
     reached_limit = False
 
     if poly_changed and pf_markets:
-        poly_signatures = _build_cached_market_signatures(poly_changed, matcher)
-        pf_signatures = _build_cached_market_signatures(pf_markets, matcher)
+        poly_signatures = _build_cached_market_signatures(poly_changed, matcher, state)
+        pf_signatures = _build_cached_market_signatures(pf_markets, matcher, state)
         pf_index = _build_candidate_index_from_signatures(pf_signatures)
         reached_limit = _match_changed_polymarket_markets(
             poly_changed,
@@ -216,8 +219,8 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform):
         )
 
     if pf_changed and poly_markets and not reached_limit:
-        pf_signatures = _build_cached_market_signatures(pf_changed, matcher)
-        poly_signatures = _build_cached_market_signatures(poly_markets, matcher)
+        pf_signatures = _build_cached_market_signatures(pf_changed, matcher, state)
+        poly_signatures = _build_cached_market_signatures(poly_markets, matcher, state)
         poly_index = _build_candidate_index_from_signatures(poly_signatures)
         _match_changed_predict_fun_markets(
             pf_changed,
@@ -235,9 +238,9 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform):
     new_pairs, has_updates = _reconcile_market_pairs(existing_pairs, matched_pairs)
     if has_updates:
         stale_pairs = [pair for pair in existing_pairs if pair.status == "stale"]
-        await _clear_empty_counts_for_pairs(stale_pairs)
+        await _clear_empty_counts_for_pairs(stale_pairs, state)
     if not new_pairs and not has_updates:
-        _prune_market_signature_cache(poly_markets, pf_markets)
+        _prune_market_signature_cache(state, poly_markets, pf_markets)
         return
 
     if new_pairs:
@@ -248,7 +251,7 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform):
     except IntegrityError:
         await db.rollback()
 
-    _prune_market_signature_cache(poly_markets, pf_markets)
+    _prune_market_signature_cache(state, poly_markets, pf_markets)
 
 
 async def _load_active_markets_by_platform(db):
@@ -407,8 +410,8 @@ def _mark_stale_pairs(pairs):
     return changed
 
 
-async def _process_candidates(db, orderbook_service, calculator, alert_manager, fanout_manager):
-    pairs, market_map = await _load_candidate_context(db)
+async def _process_candidates(db, orderbook_service, calculator, alert_manager, fanout_manager, state):
+    pairs, market_map = await _load_candidate_context(db, state)
     if not pairs:
         return {
             "approved_pairs": 0,
@@ -419,7 +422,8 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
             "deliverable_opportunities": 0,
         }
 
-    active_pairs = await _filter_skippable_pairs(pairs)
+    active_pairs = await _filter_skippable_pairs(pairs, state)
+    active_pairs = _limit_active_pairs_for_cycle(active_pairs, market_map, state)
     incr_counter("worker.active_pairs_loaded", len(active_pairs))
     if not active_pairs:
         return {
@@ -437,7 +441,7 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         market_map=market_map,
     )
     pairs_with_data = {item["pair"].pair_hash for item in orderbooks_data}
-    await _update_empty_counts(active_pairs, pairs_with_data)
+    await _update_empty_counts(active_pairs, pairs_with_data, state)
     pairs_with_books_count = 0
     opportunity_count = 0
     deliverable_opportunity_count = 0
@@ -474,22 +478,6 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
                     directions=directions,
                     calculator=calculator,
                 )
-                for delivery in deliveries:
-                    sent = await send_alert_immediately(
-                        delivery["alert"],
-                        opportunity,
-                        pair,
-                        market_a,
-                        market_b,
-                        delivery["preferences"],
-                        directions,
-                        calculator,
-                        prepared_opportunity=delivery.get("opportunity"),
-                    )
-                    if sent:
-                        incr_counter("worker.immediate_send_success")
-                    else:
-                        incr_counter("worker.immediate_send_failed")
                 if deliveries:
                     deliverable_opportunity_count += 1
                 opportunity.fanout_status = "processed"
@@ -497,6 +485,23 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
                 opportunity.fanout_error_message = None
                 await db.commit()
                 await alert_manager.finalize_opportunity(opportunity)
+                if _should_send_immediately():
+                    for delivery in deliveries:
+                        sent = await send_alert_immediately(
+                            delivery["alert"],
+                            opportunity,
+                            pair,
+                            market_a,
+                            market_b,
+                            delivery["preferences"],
+                            directions,
+                            calculator,
+                            prepared_opportunity=delivery.get("opportunity"),
+                        )
+                        if sent:
+                            incr_counter("worker.immediate_send_success")
+                        else:
+                            incr_counter("worker.immediate_send_failed")
                 incr_counter("worker.opportunity_processed")
                 opportunity_count += 1
             except Exception as e:
@@ -537,12 +542,12 @@ def _market_signature_fingerprint(market):
     )
 
 
-def _build_cached_market_signatures(markets, matcher):
+def _build_cached_market_signatures(markets, matcher, state):
     signatures = {}
 
     for market in markets:
         fingerprint = _market_signature_fingerprint(market)
-        cached_entry = _market_signature_cache.get(market.id)
+        cached_entry = state.market_signature_cache.get(market.id)
         if cached_entry is not None and cached_entry["fingerprint"] == fingerprint:
             cached_entry["last_seen_at"] = time.monotonic()
             cached_entry["signature"]["market"] = market
@@ -550,7 +555,7 @@ def _build_cached_market_signatures(markets, matcher):
             continue
 
         signature = matcher.build_market_signature(market)
-        _market_signature_cache[market.id] = {
+        state.market_signature_cache[market.id] = {
             "fingerprint": fingerprint,
             "signature": signature,
             "last_seen_at": time.monotonic(),
@@ -576,7 +581,7 @@ def _build_candidate_index_from_signatures(signatures):
     return index
 
 
-def _prune_market_signature_cache(*market_groups):
+def _prune_market_signature_cache(state, *market_groups):
     active_market_ids = {
         market.id
         for group in market_groups
@@ -584,24 +589,24 @@ def _prune_market_signature_cache(*market_groups):
     }
     stale_market_ids = [
         market_id
-        for market_id in _market_signature_cache
+        for market_id in state.market_signature_cache
         if market_id not in active_market_ids
     ]
     for market_id in stale_market_ids:
-        _market_signature_cache.pop(market_id, None)
+        state.market_signature_cache.pop(market_id, None)
 
-    if len(_market_signature_cache) <= _SIGNATURE_CACHE_MAX_SIZE:
+    if len(state.market_signature_cache) <= _SIGNATURE_CACHE_MAX_SIZE:
         return
 
     oldest_market_ids = sorted(
-        _market_signature_cache,
-        key=lambda market_id: _market_signature_cache[market_id]["last_seen_at"],
+        state.market_signature_cache,
+        key=lambda market_id: state.market_signature_cache[market_id]["last_seen_at"],
     )
     for market_id in oldest_market_ids[: max(1, len(oldest_market_ids) // 4)]:
-        _market_signature_cache.pop(market_id, None)
+        state.market_signature_cache.pop(market_id, None)
 
 
-async def _get_empty_counts(pair_hashes):
+async def _get_empty_counts(pair_hashes, state):
     if not pair_hashes:
         return {}
 
@@ -619,7 +624,7 @@ async def _get_empty_counts(pair_hashes):
 
     counts = {}
     for pair_hash in pair_hashes:
-        entry = _pair_empty_counts.get(pair_hash)
+        entry = state.pair_empty_counts.get(pair_hash)
         counts[pair_hash] = int(entry[0]) if entry else 0
 
     return counts
@@ -636,7 +641,7 @@ async def _get_empty_count_client():
     return None
 
 
-async def _clear_empty_count(pair_hash):
+async def _clear_empty_count(pair_hash, state):
     try:
         redis = await get_redis()
         if redis is not None:
@@ -644,10 +649,10 @@ async def _clear_empty_count(pair_hash):
     except Exception:
         pass
 
-    _pair_empty_counts.pop(pair_hash, None)
+    state.pair_empty_counts.pop(pair_hash, None)
 
 
-async def _increment_empty_count(pair_hash):
+async def _increment_empty_count(pair_hash, state):
     now = time.monotonic()
     try:
         redis = await get_redis()
@@ -660,20 +665,20 @@ async def _increment_empty_count(pair_hash):
             return int(results[0])
     except Exception:
         pass
-    entry = _pair_empty_counts.get(pair_hash)
+    entry = state.pair_empty_counts.get(pair_hash)
     count = (int(entry[0]) if entry else 0) + 1
-    _pair_empty_counts[pair_hash] = (count, now)
+    state.pair_empty_counts[pair_hash] = (count, now)
     return count
 
 
-async def _clear_empty_counts_for_pairs(pairs):
+async def _clear_empty_counts_for_pairs(pairs, state):
     for pair in pairs:
         if getattr(pair, "status", None) == "stale":
-            await _clear_empty_count(pair.pair_hash)
+            await _clear_empty_count(pair.pair_hash, state)
 
 
-async def _filter_skippable_pairs(pairs):
-    empty_counts = await _get_empty_counts([pair.pair_hash for pair in pairs])
+async def _filter_skippable_pairs(pairs, state):
+    empty_counts = await _get_empty_counts([pair.pair_hash for pair in pairs], state)
     active = []
     for pair in pairs:
         empty_count = empty_counts.get(pair.pair_hash, 0)
@@ -683,7 +688,74 @@ async def _filter_skippable_pairs(pairs):
     return active
 
 
-async def _update_empty_counts(checked_pairs, pairs_with_data):
+def _should_send_immediately():
+    return settings.APP_RUNTIME_MODE == "worker"
+
+
+def _limit_active_pairs_for_cycle(pairs, market_map, state):
+    pair_limit = int(settings.MAX_ACTIVE_PAIRS_PER_CYCLE or 0)
+    if pair_limit <= 0 or len(pairs) <= pair_limit:
+        return list(pairs)
+
+    prioritized_pairs = sorted(
+        ((_pair_cycle_priority(pair, market_map), pair) for pair in pairs),
+        key=lambda item: item[0],
+    )
+    live_pairs = [
+        pair for priority, pair in prioritized_pairs
+        if priority[0] == 0
+    ]
+    backlog_pairs = [
+        pair for priority, pair in prioritized_pairs
+        if priority[0] != 0
+    ]
+
+    selected_pairs = []
+    if live_pairs:
+        live_limit = min(pair_limit, len(live_pairs))
+        selected_pairs.extend(
+            _take_rotating_window(live_pairs, live_limit, state, "live")
+        )
+
+    remaining_limit = pair_limit - len(selected_pairs)
+    if remaining_limit > 0 and backlog_pairs:
+        selected_pairs.extend(
+            _take_rotating_window(backlog_pairs, remaining_limit, state, "backlog")
+        )
+
+    return selected_pairs
+
+
+def _take_rotating_window(pairs, limit, state, bucket_name):
+    if limit <= 0 or not pairs:
+        return []
+
+    offset = int(state.pair_cycle_offsets.get(bucket_name, 0) or 0) % len(pairs)
+    rotated_pairs = pairs[offset:] + pairs[:offset]
+    selected_pairs = rotated_pairs[:limit]
+    state.pair_cycle_offsets[bucket_name] = (offset + limit) % len(pairs)
+    return selected_pairs
+
+
+def _pair_cycle_priority(pair, market_map):
+    market_a = market_map.get(pair.market_id_a)
+    market_b = market_map.get(pair.market_id_b)
+    close_at = extract_pair_close_datetime(market_a, market_b)
+    if close_at is not None and close_at.tzinfo is None:
+        close_at = close_at.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    is_live_window = False
+    if close_at is not None:
+        is_live_window = close_at <= now + timedelta(hours=24)
+
+    if close_at is None:
+        return (1, datetime.max.replace(tzinfo=timezone.utc), pair.id)
+
+    return (0 if is_live_window else 1, close_at, pair.id)
+
+
+async def _update_empty_counts(checked_pairs, pairs_with_data, state):
     redis = await _get_empty_count_client()
     if redis is not None:
         try:
@@ -702,18 +774,18 @@ async def _update_empty_counts(checked_pairs, pairs_with_data):
 
     for pair in checked_pairs:
         if pair.pair_hash in pairs_with_data:
-            await _clear_empty_count(pair.pair_hash)
+            await _clear_empty_count(pair.pair_hash, state)
         else:
-            await _increment_empty_count(pair.pair_hash)
+            await _increment_empty_count(pair.pair_hash, state)
 
     # evict oldest entries when dict grows too large
-    if len(_pair_empty_counts) > _EMPTY_COUNTS_MAX_SIZE:
+    if len(state.pair_empty_counts) > _EMPTY_COUNTS_MAX_SIZE:
         sorted_keys = sorted(
-            _pair_empty_counts,
-            key=lambda k: _pair_empty_counts[k][1],
+            state.pair_empty_counts,
+            key=lambda k: state.pair_empty_counts[k][1],
         )
         for key in sorted_keys[:len(sorted_keys) // 2]:
-            _pair_empty_counts.pop(key, None)
+            state.pair_empty_counts.pop(key, None)
 
 
 def _candidate_markets_for_poly(poly_signature, matcher, pf_index):

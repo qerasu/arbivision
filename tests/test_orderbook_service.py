@@ -209,6 +209,41 @@ class OrderbookServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(counters["orderbook.drop.predict_fun_fetch_failed"], 1)
 
 
+    async def test_predict_fun_fetch_failures_are_aggregated_into_single_warning(self):
+        service = OrderbookService()
+        service.predict_fun.fetch_orderbook = AsyncMock(side_effect=RuntimeError("timeout"))
+
+        pairs = [
+            SimpleNamespace(
+                id=9,
+                market_id_a=200 + index,
+                market_id_b=100 + index,
+                outcome_mapping_json={
+                    "market_a": {"yes": f"poly-yes-{index}", "no": f"poly-no-{index}"},
+                    "market_b": {"yes": f"pf-yes-{index}", "no": f"pf-no-{index}"},
+                },
+            )
+            for index in range(2)
+        ]
+        db = FakeDbSession(
+            [
+                (100, "polymarket", "poly-100"),
+                (200, "predict_fun", "9212"),
+                (101, "polymarket", "poly-101"),
+                (201, "predict_fun", "9213"),
+            ]
+        )
+
+        with patch("arbitrage_bot.services.orderbook.log.warning") as warning_mock:
+            result = await service.fetch_orderbooks_for_pairs(pairs, db)
+
+        self.assertEqual(result, [])
+        warning_mock.assert_called_once()
+        _, kwargs = warning_mock.call_args
+        self.assertEqual(kwargs["failed_market_count"], 2)
+        self.assertEqual(kwargs["sample_market_ids"], ["9212", "9213"])
+
+
     async def test_batches_polymarket_books_across_pairs(self):
         service = OrderbookService()
         service.predict_fun.fetch_orderbook = AsyncMock(

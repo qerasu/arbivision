@@ -181,7 +181,11 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             second = await service.sync_markets()
 
         self.assertTrue(first["synced"])
+        self.assertTrue(first["attempted"])
+        self.assertEqual(set(first["successful_sources"]), {"polymarket", "predict.fun"})
         self.assertFalse(second["synced"])
+        self.assertFalse(second["attempted"])
+        self.assertEqual(second["successful_sources"], [])
         self.assertEqual(service.polymarket.fetch_markets.await_count, 1)
         self.assertEqual(service.predict_fun.fetch_markets.await_count, 1)
 
@@ -215,9 +219,43 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             second = await service.sync_markets()
 
         self.assertTrue(first["synced"])
-        self.assertTrue(second["synced"])
+        self.assertFalse(second["synced"])
+        self.assertEqual(set(first["successful_sources"]), {"predict.fun"})
+        self.assertEqual(second["successful_sources"], [])
         self.assertEqual(service.polymarket.fetch_markets.await_count, 2)
         self.assertEqual(service.predict_fun.fetch_markets.await_count, 1)
+
+
+    async def test_sync_markets_reports_failed_attempt_when_all_sources_fail(self):
+        class FakeDbSession:
+            def __init__(self):
+                self.commit_calls = 0
+                self.rollback_calls = 0
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+            async def rollback(self):
+                self.rollback_calls += 1
+
+
+        service = IngestionService(db_session=FakeDbSession())
+        service.polymarket.fetch_markets = AsyncMock(return_value=[])
+        service.predict_fun.fetch_markets = AsyncMock(return_value=[])
+        service._sync_source = AsyncMock(return_value=False)
+
+        with patch.object(ingestion_module.settings, "MARKET_SYNC_INTERVAL_SECONDS", 0.0), patch.object(
+            ingestion_module.settings,
+            "MARKET_REFRESH_SECONDS",
+            0,
+        ):
+            result = await service.sync_markets()
+
+        self.assertFalse(result["synced"])
+        self.assertTrue(result["attempted"])
+        self.assertEqual(result["successful_sources"], [])
 
 
     async def test_sync_markets_uses_incremental_polymarket_fetch_between_full_syncs(self):

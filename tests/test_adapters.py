@@ -163,3 +163,16 @@ class PredictFunAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"data": []})
         adapter._curl_get_json.assert_awaited_once()
+
+
+    async def test_fetch_orderbook_uses_fast_timeout_profile(self):
+        adapter = PredictFunAdapter()
+        adapter._get_json = AsyncMock(return_value={"data": {}})
+
+        await adapter.fetch_orderbook("123")
+
+        _, kwargs = adapter._get_json.await_args
+        self.assertEqual(kwargs["curl_max_attempts"], adapter.orderbook_curl_max_attempts)
+        self.assertEqual(kwargs["curl_max_time_seconds"], adapter.orderbook_curl_max_time_seconds)
+        self.assertEqual(kwargs["curl_connect_timeout_seconds"], adapter.orderbook_curl_connect_timeout_seconds)
+        self.assertEqual(kwargs["timeout"].connect, adapter.orderbook_connect_timeout_seconds)

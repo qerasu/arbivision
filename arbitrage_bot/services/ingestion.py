@@ -217,6 +217,7 @@ class IngestionService:
     async def sync_markets(self):
         self._changed_market_ids_by_platform = self._empty_changed_market_ids()
         source_jobs = []
+        successful_sources = []
         now = time.monotonic()
 
         if self._should_sync_source("polymarket", now):
@@ -264,11 +265,16 @@ class IngestionService:
                 adapter,
             )
             if synced:
+                successful_sources.append(source_name)
                 _source_last_sync_completed_at[source_name] = time.monotonic()
                 if sync_meta.get("full_sync") and getattr(adapter, "last_fetch_complete", True):
                     _source_last_full_sync_completed_at[source_name] = time.monotonic()
 
-        return self._build_sync_result(True)
+        return self._build_sync_result(
+            bool(successful_sources),
+            attempted=bool(source_jobs),
+            successful_sources=successful_sources,
+        )
 
 
     def _empty_changed_market_ids(self):
@@ -278,9 +284,11 @@ class IngestionService:
         }
 
 
-    def _build_sync_result(self, synced):
+    def _build_sync_result(self, synced, attempted=False, successful_sources=None):
         return {
             "synced": bool(synced),
+            "attempted": bool(attempted),
+            "successful_sources": list(successful_sources or []),
             "changed_market_ids_by_platform": {
                 platform: set(market_ids)
                 for platform, market_ids in self._changed_market_ids_by_platform.items()
@@ -336,7 +344,7 @@ class IngestionService:
             is_complete = getattr(adapter, "last_fetch_complete", True)
             mapped_items, duplicate_count = self._dedupe_market_items(mapped_items)
             if duplicate_count:
-                log.warning(
+                log.info(
                     "duplicate markets removed before upsert",
                     source=source_name,
                     duplicate_rows=duplicate_count,
