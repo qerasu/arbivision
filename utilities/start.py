@@ -8,20 +8,30 @@ from pathlib import Path
 import time
 import socket
 
-from arbitrage_bot.core.env_loader import load_env_file
+try:
+    from bootstrap import ensure_repo_on_path, env_file_path, repo_root
+except ModuleNotFoundError:
+    from utilities.bootstrap import ensure_repo_on_path, env_file_path, repo_root
 
-ENV_FILE_PATH = Path.home() / ".config" / "arbivision" / ".env"
+ensure_repo_on_path()
+
+from arbitrage_bot.core.env_loader import load_env_file
+ENV_FILE_PATH = env_file_path()
 
 
 def run_cmd(cmd):
     print(f"running: {cmd}")
-    result = subprocess.run(cmd, shell=True)
+    result = subprocess.run(cmd, shell=True, cwd=repo_root())
     if result.returncode != 0:
         print(f"error while running: {cmd}")
         sys.exit(result.returncode)
 
 
 def _python_exec():
+    venv_python = repo_root() / ".venv" / "bin" / "python3"
+    if venv_python.exists():
+        return str(venv_python)
+
     return sys.executable
 
 
@@ -34,15 +44,15 @@ def _pidfile():
 
 
 def _run_alembic_upgrade(python_exec):
-    repo_root = Path(__file__).resolve().parent
-    alembic_ini = repo_root / 'alembic.ini'
+    project_root = Path(__file__).resolve().parent.parent
+    alembic_ini = project_root / 'alembic.ini'
     display_cmd = f'{python_exec} -m alembic -c {alembic_ini} upgrade head'
     inline_script = textwrap.dedent(
         f"""
         import sys
         from pathlib import Path
 
-        repo_root = Path({str(repo_root)!r}).resolve()
+        repo_root = Path({str(project_root)!r}).resolve()
         sys.path = [p for p in sys.path if Path(p or '.').resolve() != repo_root]
 
         try:
@@ -60,7 +70,7 @@ def _run_alembic_upgrade(python_exec):
 
     cmd = [python_exec, '-c', inline_script]
     print(f"running: {display_cmd}")
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, cwd=repo_root())
 
     return result.returncode
 
@@ -99,6 +109,7 @@ def _wait_for_postgres_ready(db_user, db_name, timeout=5):
     while time.time() < deadline:
         result = subprocess.run(
             cmd,
+            cwd=repo_root(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -127,8 +138,8 @@ def _run_alembic_upgrade_with_retry(python_exec, db_host, db_port, retries=5):
             return
 
         if attempt == retries:
-            repo_root = Path(__file__).resolve().parent
-            display_cmd = f'{python_exec} -m alembic -c {repo_root / "alembic.ini"} upgrade head'
+            project_root = Path(__file__).resolve().parent.parent
+            display_cmd = f'{python_exec} -m alembic -c {project_root / "alembic.ini"} upgrade head'
             print(f"Error while running: {display_cmd}")
             sys.exit(returncode)
 
@@ -198,10 +209,10 @@ def main():
     _run_alembic_upgrade_with_retry(python_exec, db_host, db_port)
 
     # start uvicorn server in current terminal with reload for dev
-    print('starting main server... (press ctrl+c to stop or use stop.py in another terminal)')
+    print('starting main server... (press ctrl+c to stop or use utilities/stop.py in another terminal)')
 
     env = os.environ.copy()
-    env['PYTHONPATH'] = '.'
+    env['PYTHONPATH'] = str(repo_root())
 
     host = os.environ.get("APP_HOST", "127.0.0.1")
     port = _read_int_env("APP_PORT", 8000)
@@ -210,7 +221,7 @@ def main():
     if _is_port_in_use(host, port):
         print(f'ERROR: TCP port {host}:{port} is already in use')
         _show_port_owners(port)
-        print('Stop the existing process first by using: `python3 stop.py`')
+        print('Stop the existing process first by using: `python3 utilities/stop.py`')
         print(f'Or change APP_PORT in {ENV_FILE_PATH}')
 
         return
@@ -229,7 +240,7 @@ def main():
         str(port),
     ]
 
-    proc = subprocess.Popen(cmd, env=env, process_group=0)
+    proc = subprocess.Popen(cmd, env=env, process_group=0, cwd=repo_root())
     _pidfile().write_text(str(proc.pid))
 
     try:

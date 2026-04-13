@@ -6,9 +6,16 @@ import tempfile
 from pathlib import Path
 import time
 
+try:
+    from bootstrap import ensure_repo_on_path, env_file_path
+except ModuleNotFoundError:
+    from utilities.bootstrap import ensure_repo_on_path, env_file_path
+
+ensure_repo_on_path()
+
 from arbitrage_bot.core.env_loader import load_env_file
 
-ENV_FILE_PATH = Path.home() / ".config" / "arbivision" / ".env"
+ENV_FILE_PATH = env_file_path()
 
 
 def _pidfile():
@@ -52,7 +59,7 @@ def _stop_project_containers(drop_db=False):
         success_msg = ""
         
     print(f"running: {cmd}")
-    result = subprocess.run(cmd, shell=True)
+    result = subprocess.run(cmd, shell=True, cwd=Path(__file__).resolve().parent.parent)
     if result.returncode != 0:
         print(f"error while running: {cmd}")
         return False

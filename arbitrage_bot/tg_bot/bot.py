@@ -6,24 +6,17 @@ from urllib.parse import urlencode
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 from datetime import datetime
-from datetime import timedelta
 from datetime import timezone
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 from aiogram.types import LinkPreviewOptions
 from aiogram.types import MenuButtonCommands
-from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import ProgrammingError
-from sqlalchemy.orm import aliased
 
 from arbitrage_bot.core.config import settings
-from arbitrage_bot.core.database import AsyncSessionLocal
 from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.core.observability import incr_counter
 from arbitrage_bot.core.redis import get_redis
-from arbitrage_bot.models.orm import Alert, ArbOpportunity, Market, MarketPair, UserPreference
-from arbitrage_bot.services.calculator import ArbitrageCalculator
-from arbitrage_bot.services.orderbook import OrderbookService
 from arbitrage_bot.services.system_notifier import format_error_details, send_system_error_notification
 from arbitrage_bot.services.system_notifier import is_transient_network_error
 from arbitrage_bot.tg_bot import handlers
@@ -36,7 +29,6 @@ log = get_logger("tg_bot")
 _shared_dp = None
 _shared_delivery_bot = None
 _DELIVERY_DEDUPE_TTL_SECONDS = max(86400, int(settings.ALERTS_DEDUPE_TTL_SECONDS))
-_FRESH_ALERT_CLAIM_GRACE_SECONDS = max(2.0, float(settings.TELEGRAM_ALERTS_POLL_SECONDS) * 5.0)
 
 
 def setup_bot():
@@ -450,31 +442,17 @@ async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, p
             incr_counter("telegram.alert_cancelled_preferences")
             return False
 
-    now = datetime.now(timezone.utc)
     try:
         await _send_alert(bot, alert, prepared_opportunity, pair, market_a, market_b, preferences=current_preferences)
         return True
     except Exception as exc:
-        _mark_alert_retry(alert, exc, now)
-        return False
-
-
-def _mark_alert_retry(alert, exc, now):
-    attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
-    alert.attempt_count = attempt_count
-    alert.error_message = str(exc)
-
-    if attempt_count >= settings.TELEGRAM_DELIVERY_MAX_ATTEMPTS:
+        alert.attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
         alert.status = "failed"
         alert.next_retry_at = None
+        alert.error_message = str(exc)
         incr_counter("telegram.alert_failed")
         incr_counter("telegram.alert_send_failed")
-        return
-
-    alert.status = "retry"
-    alert.next_retry_at = now + timedelta(seconds=settings.TELEGRAM_DELIVERY_RETRY_SECONDS)
-    incr_counter("telegram.alert_retry")
-    incr_counter("telegram.alert_send_failed")
+        return False
 
 
 def _apply_calc_result_to_opportunity(opportunity, calc_result):
@@ -489,73 +467,6 @@ def _apply_calc_result_to_opportunity(opportunity, calc_result):
     opportunity.calculation_json = calc_result
 
 
-async def _revalidate_alert_opportunity(session, opportunity, pair, orderbook_service, calculator, preferences=None):
-    orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs([pair], session)
-    if not orderbooks_data:
-        return False
-
-    current_item = orderbooks_data[0]
-    max_capital = None
-    max_polymarket_capital = None
-    max_predict_fun_capital = None
-    if preferences is not None:
-        max_capital = preferences.get("max_capital_usd")
-        max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
-        max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
-    calc_results = calculator.calculate_opportunities(
-        current_item.get("directions"),
-        max_capital=max_capital,
-        max_polymarket_capital=max_polymarket_capital,
-        max_predict_fun_capital=max_predict_fun_capital,
-    )
-    if not calc_results:
-        return False
-
-    current_result = next(
-        (
-            result
-            for result in calc_results
-            if result.get("direction") == opportunity.direction
-        ),
-        None,
-    )
-    if current_result is None:
-        return False
-
-    _apply_calc_result_to_opportunity(opportunity, current_result)
-    return True
-
-
-async def _claim_deliverable_alert(session, now):
-    market_b_alias = aliased(Market)
-    claim_after = now - timedelta(seconds=_FRESH_ALERT_CLAIM_GRACE_SECONDS)
-    stmt = (
-        select(Alert, ArbOpportunity, MarketPair, Market, market_b_alias, UserPreference)
-        .join(ArbOpportunity, Alert.opportunity_id == ArbOpportunity.id)
-        .join(MarketPair, ArbOpportunity.market_pair_id == MarketPair.id)
-        .join(Market, MarketPair.market_id_a == Market.id)
-        .join(market_b_alias, MarketPair.market_id_b == market_b_alias.id)
-        .outerjoin(UserPreference, Alert.user_id == UserPreference.user_id)
-        .where(
-            Alert.status.in_(["queued", "retry"]),
-            or_(Alert.next_retry_at.is_(None), Alert.next_retry_at <= now),
-            or_(
-                Alert.status == "retry",
-                and_(Alert.status == "queued", Alert.created_at <= claim_after),
-            ),
-        )
-        .order_by(Alert.id)
-        .limit(1)
-        .with_for_update(skip_locked=True, of=Alert)
-    )
-    result = await session.execute(stmt)
-    row = result.first()
-    if row is None:
-        return None
-
-    alert = row[0]
-    alert.status = "processing"
-    return row
 
 
 def _build_runtime_preferences(preferences):
@@ -592,96 +503,6 @@ def _extract_language_from_preferences(preferences):
     return getattr(preferences, "language", None)
 
 
-def _should_skip_alert_for_current_preferences(alert, _opportunity, _market_a, _market_b, preferences):
-    if getattr(alert, "user_id", None) is None:
-        return False
-
-    current_preferences = _build_runtime_preferences(preferences)
-    return bool(current_preferences.get("muted"))
-
-
-async def _drain_queued_alerts(bot):
-    orderbook_service = OrderbookService()
-    calculator = ArbitrageCalculator()
-    try:
-        while True:
-            try:
-                async with AsyncSessionLocal() as session:
-                    for _ in range(20):
-                        now = datetime.now(timezone.utc)
-                        row = await _claim_deliverable_alert(session, now)
-                        if row is None:
-                            break
-
-                        alert, opportunity, pair, market_a, market_b_row, preferences = row
-                        current_preferences = _build_runtime_preferences(preferences)
-                        if _should_skip_alert_for_current_preferences(
-                            alert,
-                            opportunity,
-                            market_a,
-                            market_b_row,
-                            current_preferences,
-                        ):
-                            alert.status = "cancelled"
-                            alert.next_retry_at = None
-                            alert.error_message = "filtered by updated preferences"
-                            incr_counter("telegram.alert_cancelled_preferences")
-                            await session.commit()
-                            continue
-                        try:
-                            is_still_valid = await _revalidate_alert_opportunity(
-                                session,
-                                opportunity,
-                                pair,
-                                orderbook_service,
-                                calculator,
-                                preferences=current_preferences,
-                            )
-                        except Exception as exc:
-                            _mark_alert_retry(alert, exc, now)
-                            incr_counter("telegram.revalidation_error")
-                            await session.commit()
-                            continue
-                        if not is_still_valid:
-                            alert.status = "cancelled"
-                            alert.next_retry_at = None
-                            alert.error_message = "opportunity is no longer available"
-                            incr_counter("telegram.alert_cancelled_revalidation")
-                            await session.commit()
-                            continue
-                        filter_reason = filter_reason_for_preferences(
-                            opportunity,
-                            market_a,
-                            market_b_row,
-                            current_preferences,
-                        )
-                        if filter_reason:
-                            alert.status = "cancelled"
-                            alert.next_retry_at = None
-                            alert.error_message = f"filtered by updated preferences: {filter_reason}"
-                            incr_counter("telegram.alert_cancelled_preferences")
-                            await session.commit()
-                            continue
-                        try:
-                            await _send_alert(bot, alert, opportunity, pair, market_a, market_b_row, preferences=current_preferences)
-                        except Exception as exc:
-                            _mark_alert_retry(alert, exc, now)
-                        await session.commit()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if _is_missing_table_error(exc):
-                    log.info("waiting for database migrations")
-                    await asyncio.sleep(settings.TELEGRAM_ALERTS_POLL_SECONDS)
-                    continue
-                log.error("alert loop error", error=format_error_details(exc))
-                await send_system_error_notification("telegram", "alert loop", exc)
-
-            await asyncio.sleep(settings.TELEGRAM_ALERTS_POLL_SECONDS)
-    finally:
-        await orderbook_service.close()
-
-
 async def start_polling():
     while True:
         try:
@@ -689,7 +510,6 @@ async def start_polling():
             if not bot or not dp:
                 return
 
-            sender_task = asyncio.create_task(_drain_queued_alerts(bot))
             try:
                 await bot.delete_webhook(drop_pending_updates=False)
                 await _configure_bot_ui(bot)
@@ -706,8 +526,6 @@ async def start_polling():
                     except Exception:
                         pass
             finally:
-                sender_task.cancel()
-                await asyncio.gather(sender_task, return_exceptions=True)
                 await bot.session.close()
         except asyncio.CancelledError:
             raise

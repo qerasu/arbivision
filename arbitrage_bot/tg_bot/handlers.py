@@ -606,10 +606,10 @@ def _format_admin_stats_text(stats):
         f"• ⏸ Paused: {users['paused']}",
         "",
         "🚨 Alerts:",
-        "All time:",
+        "• All time:",
         f"• 📤 Sent: {alerts['sent']}",
-        f"• 🗑 Delivery failed: {alerts['dropped']}",
-        "Runtime:",
+        f"• 🗑 Dropped: {alerts['dropped']}",
+        "• Runtime:",
         f"• 🧹 Filtered: {total_filtered}",
     ]
 

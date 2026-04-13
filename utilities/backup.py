@@ -4,13 +4,20 @@ from datetime import datetime
 from pathlib import Path
 import subprocess
 
+try:
+    from bootstrap import ensure_repo_on_path, env_file_path
+except ModuleNotFoundError:
+    from utilities.bootstrap import ensure_repo_on_path, env_file_path
+
+ensure_repo_on_path()
+
 from arbitrage_bot.core.env_loader import load_env_file
 
-ENV_FILE_PATH = Path.home() / ".config" / "arbivision" / ".env"
+ENV_FILE_PATH = env_file_path()
 
 
 def _repo_root():
-    return Path(__file__).resolve().parent
+    return Path(__file__).resolve().parent.parent
 
 
 def _parse_args():

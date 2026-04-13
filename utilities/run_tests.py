@@ -3,9 +3,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from bootstrap import ensure_repo_on_path
+except ModuleNotFoundError:
+    from utilities.bootstrap import ensure_repo_on_path
+
+repo_root = ensure_repo_on_path()
+
 
 def _python_exec():
-    venv_python = Path(".venv/bin/python3")
+    venv_python = repo_root / ".venv" / "bin" / "python3"
     if venv_python.exists():
         return str(venv_python)
 
@@ -16,6 +23,7 @@ def main():
     env = os.environ.copy()
     env["PYTHONPYCACHEPREFIX"] = "/tmp/arbivision-pyc"
     env["PYTHONASYNCIODEBUG"] = "0"
+    env["PYTHONPATH"] = str(repo_root)
     env.pop("PYTHONDEVMODE", None)
     verbose = any(arg in {"-v", "--verbose"} for arg in sys.argv[1:])
     no_buffer = any(arg == "--no-buffer" for arg in sys.argv[1:])
@@ -35,7 +43,7 @@ def main():
     if verbose:
         cmd.append("-v")
 
-    result = subprocess.run(cmd, env=env)
+    result = subprocess.run(cmd, env=env, cwd=repo_root)
     raise SystemExit(result.returncode)
 
 

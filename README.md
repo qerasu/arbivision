@@ -43,8 +43,8 @@ arbitrage_bot/
   run_worker.py    запуск только worker
   run_fanout.py    запуск только fanout
   run_telegram.py  запуск только telegram polling
-start.py           локальный dev-запуск проекта
-stop.py            безопасная остановка процесса и контейнеров
+utilities/start.py локальный dev-запуск проекта
+utilities/stop.py  безопасная остановка процесса и контейнеров
 ```
 
 ## Правила оформления
@@ -100,27 +100,27 @@ python3 -m pip install -r requirements.txt
 3. Запустите проект:
 
 ```bash
-python3 start.py
+python3 utilities/start.py
 ```
 
-Что делает `start.py`:
+Что делает `utilities/start.py`:
 
 - загружает `.env`
 - запускает `docker compose up -d`
 - ждёт готовности Postgres
 - прогоняет `alembic upgrade head`
 - стартует `uvicorn arbitrage_bot.main:app --reload`
-- пишет PID в временный файл, чтобы `stop.py` мог остановить именно этот процесс
+- пишет PID в временный файл, чтобы `utilities/stop.py` мог остановить именно этот процесс
 
 Остановка:
 
 ```bash
-python3 stop.py
+python3 utilities/stop.py
 ```
 
-`stop.py` завершает только сохранённый PID, не пытаясь убивать посторонние `uvicorn`-процессы, а затем делает `docker compose stop`.
+`utilities/stop.py` завершает только сохранённый PID, не пытаясь убивать посторонние `uvicorn`-процессы, а затем делает `docker compose stop`.
 
-Опция `python3 stop.py --drop` удаляет контейнеры и volume базы данных. Это разрушительное действие, поэтому скрипт дополнительно спрашивает подтверждение.
+Опция `python3 utilities/stop.py --drop` удаляет контейнеры и volume базы данных. Это разрушительное действие, поэтому скрипт дополнительно спрашивает подтверждение.
 
 ## Альтернативные способы запуска
 
@@ -241,13 +241,13 @@ python3 -m arbitrage_bot.run_telegram
 Запуск:
 
 ```bash
-python3 run_tests.py
+python3 utilities/run_tests.py
 ```
 
 Для полного запуска тестов нужны переменные окружения (работает только при запущенном проекте)
 
 ```bash
-RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python3 run_tests.py
+RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python3 utilities/run_tests.py
 ```
 
 Или через unittest:

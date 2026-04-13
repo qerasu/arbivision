@@ -154,32 +154,28 @@ class FanoutManager:
             if chat_id in existing_chat_ids:
                 continue
 
-            try:
-                alert = Alert(
-                    opportunity_id=opportunity.id,
-                    user_id=target.get("user_id"),
-                    subscription_id=target.get("subscription_id"),
-                    telegram_chat_id=chat_id,
-                    message_hash=str(opportunity.id),
-                    status="queued",
-                    attempt_count=0,
-                )
-                async with self.db.begin_nested():
-                    self.db.add(alert)
-                    await self.db.flush()
-                    deliveries.append(
-                        {
-                            "alert": alert,
-                            "preferences": target.get("preferences") or {},
-                            "opportunity": target.get("prepared_opportunity") or opportunity,
-                        }
-                    )
-                existing_chat_ids.add(chat_id)
-                incr_counter("fanout.alert_created")
-                incr_counter("fanout.alerts_created")
-            except IntegrityError:
-                existing_chat_ids.add(chat_id)
-                incr_counter("fanout.alert_duplicate")
+            alert = SimpleNamespace(
+                opportunity_id=opportunity.id,
+                user_id=target.get("user_id"),
+                subscription_id=target.get("subscription_id"),
+                telegram_chat_id=chat_id,
+                message_hash=str(opportunity.id),
+                status="queued",
+                attempt_count=0,
+                next_retry_at=None,
+                sent_at=None,
+                error_message=None,
+            )
+            deliveries.append(
+                {
+                    "alert": alert,
+                    "preferences": target.get("preferences") or {},
+                    "opportunity": target.get("prepared_opportunity") or self._snapshot_opportunity(opportunity),
+                }
+            )
+            existing_chat_ids.add(chat_id)
+            incr_counter("fanout.alert_created")
+            incr_counter("fanout.alerts_created")
 
         return deliveries
 
@@ -314,5 +310,21 @@ class FanoutManager:
             "gross_roi": current_result["gross_roi"],
             "net_roi": current_result["net_roi"],
             "calculation_json": current_result,
+        }
+        return SimpleNamespace(**payload)
+
+
+    def _snapshot_opportunity(self, opportunity):
+        payload = {
+            "direction": getattr(opportunity, "direction", None),
+            "avg_price_leg_1": getattr(opportunity, "avg_price_leg_1", 0.0),
+            "avg_price_leg_2": getattr(opportunity, "avg_price_leg_2", 0.0),
+            "shares": getattr(opportunity, "shares", 0.0),
+            "capital_required": getattr(opportunity, "capital_required", 0.0),
+            "gross_profit": getattr(opportunity, "gross_profit", 0.0),
+            "net_profit": getattr(opportunity, "net_profit", 0.0),
+            "gross_roi": getattr(opportunity, "gross_roi", 0.0),
+            "net_roi": getattr(opportunity, "net_roi", 0.0),
+            "calculation_json": getattr(opportunity, "calculation_json", None),
         }
         return SimpleNamespace(**payload)

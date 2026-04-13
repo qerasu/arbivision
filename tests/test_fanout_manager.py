@@ -1,16 +1,10 @@
 import unittest
-from datetime import timedelta
-from datetime import datetime
-from datetime import timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import patch
 
-from sqlalchemy.exc import IntegrityError
-
 from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
-from arbitrage_bot.models.orm import Alert
 from arbitrage_bot.models.orm import Market
 from arbitrage_bot.services.fanout_manager import FanoutManager
 
@@ -41,22 +35,12 @@ class FakeTupleResult:
         return list(self.rows)
 
 
-class FakeNestedTransaction:
-    async def __aenter__(self):
-        return self
-
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-
 class FakeDbSession:
     def __init__(self):
         self.added = []
         self.flush_calls = 0
         self.commit_calls = 0
         self.claim_rows = None
-        self.fail_on_chat_ids = set()
 
 
     def add(self, item):
@@ -65,18 +49,10 @@ class FakeDbSession:
 
     async def flush(self):
         self.flush_calls += 1
-        if self.added and isinstance(self.added[-1], Alert):
-            chat_id = self.added[-1].telegram_chat_id
-            if chat_id in self.fail_on_chat_ids:
-                raise IntegrityError("duplicate", None, None)
 
 
     async def commit(self):
         self.commit_calls += 1
-
-
-    def begin_nested(self):
-        return FakeNestedTransaction()
 
 
     async def execute(self, stmt):
@@ -164,10 +140,8 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
             created_count = await manager._fanout_opportunity(opportunity, market_a, market_b)
 
         self.assertEqual(created_count, 1)
-        self.assertEqual(db.flush_calls, 1)
-        self.assertEqual(len(db.added), 1)
-        self.assertIsInstance(db.added[0], Alert)
-        self.assertEqual(db.added[0].telegram_chat_id, "1001")
+        self.assertEqual(db.flush_calls, 0)
+        self.assertEqual(len(db.added), 0)
         counters = snapshot_counters()
         self.assertEqual(counters["fanout.alerts_created"], 1)
         self.assertNotIn("fanout.drop.min_roi", counters)
@@ -361,9 +335,8 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot_counters()["fanout.drop.max_capital"], 1)
 
 
-    async def test_fanout_skips_duplicate_alert_insert_without_failing_batch(self):
+    async def test_fanout_keeps_distinct_targets_in_batch(self):
         db = FakeDbSession()
-        db.fail_on_chat_ids.add("1002")
         manager = FanoutManager(db)
         opportunity = SimpleNamespace(
             id=7,
@@ -422,7 +395,7 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         ):
             created_count = await manager._fanout_opportunity(opportunity, market_a, market_b)
 
-        self.assertEqual(created_count, 1)
+        self.assertEqual(created_count, 2)
 
 
     async def test_claim_pending_opportunities_marks_rows_as_processing(self):
@@ -560,7 +533,9 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(deliveries), 1)
-        self.assertEqual(db.flush_calls, 1)
+        self.assertEqual(db.flush_calls, 0)
+        self.assertEqual(deliveries[0]["alert"].telegram_chat_id, "1001")
+        self.assertEqual(deliveries[0]["alert"].status, "queued")
 
 
     async def test_create_alert_deliveries_uses_target_specific_recalculation_before_insert(self):
@@ -643,46 +618,3 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(deliveries), 1)
         self.assertAlmostEqual(deliveries[0]["opportunity"].capital_required, 4.65)
         self.assertAlmostEqual(deliveries[0]["opportunity"].shares, 5.0)
-
-
-class TelegramDeliveryRetryTests(unittest.TestCase):
-    def test_mark_alert_retry_sets_retry_with_backoff(self):
-        from arbitrage_bot.tg_bot.bot import _mark_alert_retry
-
-        alert = SimpleNamespace(
-            status="queued",
-            attempt_count=0,
-            next_retry_at=None,
-            error_message=None,
-        )
-        now = datetime(2026, 4, 3, tzinfo=timezone.utc)
-
-        with patch("arbitrage_bot.tg_bot.bot.settings.TELEGRAM_DELIVERY_MAX_ATTEMPTS", 3), patch(
-            "arbitrage_bot.tg_bot.bot.settings.TELEGRAM_DELIVERY_RETRY_SECONDS",
-            15.0,
-        ):
-            _mark_alert_retry(alert, RuntimeError("boom"), now)
-
-        self.assertEqual(alert.status, "retry")
-        self.assertEqual(alert.attempt_count, 1)
-        self.assertEqual(alert.next_retry_at, now + timedelta(seconds=15))
-        self.assertEqual(alert.error_message, "boom")
-
-
-    def test_mark_alert_retry_marks_failed_after_limit(self):
-        from arbitrage_bot.tg_bot.bot import _mark_alert_retry
-
-        alert = SimpleNamespace(
-            status="retry",
-            attempt_count=2,
-            next_retry_at=None,
-            error_message=None,
-        )
-        now = datetime(2026, 4, 3, tzinfo=timezone.utc)
-
-        with patch("arbitrage_bot.tg_bot.bot.settings.TELEGRAM_DELIVERY_MAX_ATTEMPTS", 3):
-            _mark_alert_retry(alert, RuntimeError("boom"), now)
-
-        self.assertEqual(alert.status, "failed")
-        self.assertEqual(alert.attempt_count, 3)
-        self.assertIsNone(alert.next_retry_at)

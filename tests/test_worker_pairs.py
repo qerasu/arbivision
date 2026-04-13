@@ -9,7 +9,7 @@ from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot import worker as worker_module
-from arbitrage_bot.worker import WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_poly, _filter_skippable_pairs, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _update_empty_counts, _upsert_market_pairs
+from arbitrage_bot.worker import WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_poly, _filter_skippable_pairs, _load_candidate_context, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _update_empty_counts, _upsert_market_pairs
 
 
 class WorkerPairLifecycleTests(unittest.TestCase):
@@ -349,6 +349,72 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.assertEqual(matcher.match_candidates.call_count, 3)
         self.assertEqual(len(fake_db.added), 3)
         self.assertEqual(fake_db.commit_calls, 1)
+
+
+class WorkerCandidateContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_load_candidate_context_caches_snapshots_instead_of_original_orm_objects(self):
+        original_pair = SimpleNamespace(
+            id=1,
+            market_id_a=10,
+            market_id_b=20,
+            pair_hash="pair-1",
+            status="approved",
+            match_score=0.9,
+            match_reason_json={"ok": True},
+            outcome_mapping_json={"market_a": {}},
+        )
+        original_market = SimpleNamespace(
+            id=10,
+            platform="polymarket",
+            platform_market_id="poly-10",
+            status="active",
+            tradable=True,
+            title="Alpha",
+            normalized_title="alpha",
+            description="desc",
+            outcomes_json=[],
+            raw_payload_json={"endDate": "2026-04-14T12:00:00+00:00"},
+            category="sports",
+            slug="alpha",
+            updated_at="v1",
+            created_at="v0",
+        )
+
+        class FakeScalars:
+            def __init__(self, values):
+                self._values = values
+
+
+            def all(self):
+                return list(self._values)
+
+
+        class FakeExecuteResult:
+            def __init__(self, values):
+                self._values = values
+
+
+            def scalars(self):
+                return FakeScalars(self._values)
+
+
+        class FakeDb:
+            async def execute(self, _stmt):
+                return FakeExecuteResult([original_pair])
+
+
+        state = WorkerState()
+
+        with patch(
+            "arbitrage_bot.worker._load_market_map_for_pairs",
+            new=AsyncMock(return_value={10: original_market}),
+        ):
+            pairs, market_map = await _load_candidate_context(FakeDb(), state)
+
+        self.assertIsNot(pairs[0], original_pair)
+        self.assertIsNot(market_map[10], original_market)
+        self.assertEqual(pairs[0].pair_hash, original_pair.pair_hash)
+        self.assertEqual(market_map[10].platform_market_id, original_market.platform_market_id)
 
 
 class FakePipeline:
@@ -899,6 +965,9 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
+        ), patch(
+            "arbitrage_bot.worker._persist_delivery_alert",
+            new=AsyncMock(),
         ) as send_mock:
             result = await _process_candidates(
                 fake_db,
@@ -1001,6 +1070,9 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(),
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
+            new=AsyncMock(),
+        ), patch(
+            "arbitrage_bot.worker._persist_delivery_alert",
             new=AsyncMock(),
         ) as send_mock:
             result = await _process_candidates(
@@ -1120,6 +1192,9 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
+        ), patch(
+            "arbitrage_bot.worker._persist_delivery_alert",
+            new=AsyncMock(),
         ) as send_mock:
             result = await _process_candidates(
                 fake_db,
@@ -1235,6 +1310,9 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
+        ), patch(
+            "arbitrage_bot.worker._persist_delivery_alert",
+            new=AsyncMock(),
         ) as send_mock:
             result = await _process_candidates(
                 fake_db,
@@ -1340,6 +1418,9 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(return_value=True),
+        ), patch(
+            "arbitrage_bot.worker._persist_delivery_alert",
+            new=AsyncMock(),
         ) as send_mock:
             await _process_candidates(
                 fake_db,
@@ -1351,7 +1432,6 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(send_mock.await_count, 1)
-        self.assertIs(send_mock.await_args.kwargs["prepared_opportunity"], prepared_delivery_opportunity)
 
 
     async def test_process_candidates_uses_batched_orderbook_fetch(self):

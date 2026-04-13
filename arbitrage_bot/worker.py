@@ -1,14 +1,16 @@
 import asyncio
 import time
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import field
 import json
 from datetime import datetime, timezone
 from datetime import timedelta
+from types import SimpleNamespace
 from arbitrage_bot.core.database import AsyncSessionLocal
 from arbitrage_bot.core.redis import get_redis
-from arbitrage_bot.models.orm import Market, MarketPair
+from arbitrage_bot.models.orm import Alert, Market, MarketPair
 from arbitrage_bot.services.ingestion import IngestionService
 from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot.services.orderbook import OrderbookService
@@ -43,6 +45,56 @@ class WorkerState:
     pair_cycle_offsets: dict = field(default_factory=dict)
 
 
+def _snapshot_market(market):
+    return SimpleNamespace(
+        id=getattr(market, "id", None),
+        platform=getattr(market, "platform", None),
+        platform_market_id=getattr(market, "platform_market_id", None),
+        status=getattr(market, "status", None),
+        tradable=getattr(market, "tradable", None),
+        title=getattr(market, "title", None),
+        normalized_title=getattr(market, "normalized_title", None),
+        description=getattr(market, "description", None),
+        outcomes_json=getattr(market, "outcomes_json", None),
+        raw_payload_json=getattr(market, "raw_payload_json", None),
+        category=getattr(market, "category", None),
+        slug=getattr(market, "slug", None),
+        updated_at=getattr(market, "updated_at", None),
+        created_at=getattr(market, "created_at", None),
+    )
+
+
+def _snapshot_pair(pair):
+    return SimpleNamespace(
+        id=getattr(pair, "id", None),
+        market_id_a=getattr(pair, "market_id_a", None),
+        market_id_b=getattr(pair, "market_id_b", None),
+        pair_hash=getattr(pair, "pair_hash", None),
+        status=getattr(pair, "status", None),
+        match_score=getattr(pair, "match_score", None),
+        match_reason_json=getattr(pair, "match_reason_json", None),
+        outcome_mapping_json=getattr(pair, "outcome_mapping_json", None),
+        created_at=getattr(pair, "created_at", None),
+    )
+
+
+async def _persist_delivery_alert(db, alert):
+    db.add(
+        Alert(
+            opportunity_id=getattr(alert, "opportunity_id", None),
+            user_id=getattr(alert, "user_id", None),
+            subscription_id=getattr(alert, "subscription_id", None),
+            telegram_chat_id=getattr(alert, "telegram_chat_id", None),
+            message_hash=str(getattr(alert, "message_hash", "") or ""),
+            status=getattr(alert, "status", "failed"),
+            attempt_count=int(getattr(alert, "attempt_count", 0) or 0),
+            next_retry_at=getattr(alert, "next_retry_at", None),
+            sent_at=getattr(alert, "sent_at", None),
+            error_message=getattr(alert, "error_message", None),
+        )
+    )
+
+
 async def run_sync_loop(state=None):
     # infinite market update loop
     runtime_state = state or WorkerState()
@@ -56,7 +108,11 @@ async def run_sync_loop(state=None):
             raise
         except Exception as e:
             # logging sync error
-            log.error("sync loop error", error=format_error_details(e))
+            log.error(
+                "sync loop error",
+                error=format_error_details(e),
+                traceback=traceback.format_exc(),
+            )
             incr_counter("worker.cycle_failed")
             await send_system_error_notification("worker", "sync loop", e)
             
@@ -169,10 +225,15 @@ async def _load_candidate_context(db, state, force_refresh=False):
     )
     pairs = (await db.execute(pair_stmt)).scalars().all()
     market_map = await _load_market_map_for_pairs(db, pairs)
+    pair_snapshots = [_snapshot_pair(pair) for pair in pairs]
+    market_snapshots = {
+        market_id: _snapshot_market(market)
+        for market_id, market in market_map.items()
+    }
     state.candidate_context_loaded = True
-    state.candidate_pairs = list(pairs)
-    state.candidate_market_map = dict(market_map)
-    return pairs, market_map
+    state.candidate_pairs = list(pair_snapshots)
+    state.candidate_market_map = dict(market_snapshots)
+    return pair_snapshots, market_snapshots
 
 
 async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, state):
@@ -188,6 +249,13 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
             return
 
     poly_markets, pf_markets = await _load_active_markets_by_platform(db)
+    active_market_ids = {
+        market.id
+        for market in poly_markets
+    }.union(
+        market.id
+        for market in pf_markets
+    )
     poly_by_id = {market.id: market for market in poly_markets}
     pf_by_id = {market.id: market for market in pf_markets}
     poly_changed = list(poly_markets) if full_rematch else [
@@ -240,7 +308,7 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         stale_pairs = [pair for pair in existing_pairs if pair.status == "stale"]
         await _clear_empty_counts_for_pairs(stale_pairs, state)
     if not new_pairs and not has_updates:
-        _prune_market_signature_cache(state, poly_markets, pf_markets)
+        _prune_market_signature_cache(state, active_market_ids)
         return
 
     if new_pairs:
@@ -251,7 +319,7 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
     except IntegrityError:
         await db.rollback()
 
-    _prune_market_signature_cache(state, poly_markets, pf_markets)
+    _prune_market_signature_cache(state, active_market_ids)
 
 
 async def _load_active_markets_by_platform(db):
@@ -498,6 +566,7 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
                             calculator,
                             prepared_opportunity=delivery.get("opportunity"),
                         )
+                        await _persist_delivery_alert(db, delivery["alert"])
                         if sent:
                             incr_counter("worker.immediate_send_success")
                         else:
@@ -548,15 +617,17 @@ def _build_cached_market_signatures(markets, matcher, state):
     signatures = {}
 
     for market in markets:
-        fingerprint = _market_signature_fingerprint(market)
+        market_snapshot = _snapshot_market(market)
+        fingerprint = _market_signature_fingerprint(market_snapshot)
         cached_entry = state.market_signature_cache.get(market.id)
         if cached_entry is not None and cached_entry["fingerprint"] == fingerprint:
             cached_entry["last_seen_at"] = time.monotonic()
-            cached_entry["signature"]["market"] = market
+            cached_entry["signature"]["market"] = market_snapshot
             signatures[market.id] = cached_entry["signature"]
             continue
 
-        signature = matcher.build_market_signature(market)
+        signature = matcher.build_market_signature(market_snapshot)
+        signature["market"] = market_snapshot
         state.market_signature_cache[market.id] = {
             "fingerprint": fingerprint,
             "signature": signature,
@@ -584,11 +655,15 @@ def _build_candidate_index_from_signatures(signatures):
 
 
 def _prune_market_signature_cache(state, *market_groups):
-    active_market_ids = {
-        market.id
-        for group in market_groups
-        for market in group
-    }
+    active_market_ids = set()
+    for group in market_groups:
+        for item in group:
+            if isinstance(item, (int, str)):
+                active_market_ids.add(int(item))
+                continue
+            market_id = getattr(item, "id", None)
+            if market_id is not None:
+                active_market_ids.add(market_id)
     stale_market_ids = [
         market_id
         for market_id in state.market_signature_cache
