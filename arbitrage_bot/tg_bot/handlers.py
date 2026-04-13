@@ -16,6 +16,7 @@ from arbitrage_bot.models.orm import User
 from arbitrage_bot.models.orm import UserPreference
 from arbitrage_bot.tg_bot.localization import translate
 from arbitrage_bot.tg_bot.preferences import clear_ui_state
+from arbitrage_bot.tg_bot.preferences import disable_user_preferences
 from arbitrage_bot.tg_bot.preferences import ensure_telegram_user
 from arbitrage_bot.tg_bot.preferences import format_home_text
 from arbitrage_bot.tg_bot.preferences import format_preferences_text
@@ -97,7 +98,7 @@ async def on_nav_callback(callback):
             await _safe_edit_text(
                 callback,
                 format_preferences_text(preferences),
-                reply_markup=_build_settings_keyboard(preferences),
+                reply_markup=_build_settings_keyboard(preferences, chat_id=callback.message.chat.id),
             )
         elif action == "toggle_mute":
             preferences = await toggle_mute(session, callback.message.chat.id)
@@ -139,12 +140,31 @@ async def on_nav_callback(callback):
                 translate(
                     lang,
                     "Your settings were reset.\n\n"
-                    "All Telegram filters are disabled for your chat, so you will receive every alert that passes system checks.\n\n",
+                    "Default Telegram filters were restored for your chat.\n\n",
                     "Ваши настройки сброшены.\n\n"
-                    "Все Telegram-фильтры для этого чата отключены, поэтому вы будете получать все алерты, которые проходят системные проверки.\n\n",
+                    "Для этого чата восстановлены Telegram-фильтры по умолчанию.\n\n",
                 ) +
                 f"{format_preferences_text(preferences)}",
-                reply_markup=_build_settings_keyboard(preferences),
+                reply_markup=_build_settings_keyboard(preferences, chat_id=callback.message.chat.id),
+            )
+        elif action == "disable_filters":
+            if not _is_admin_chat(callback.message.chat.id):
+                await _safe_answer_callback(callback)
+                return
+            preferences = await disable_user_preferences(session, callback.message.chat.id)
+            await clear_ui_state(session, callback.message.chat.id)
+            lang = preferences.get("language")
+            await _safe_edit_text(
+                callback,
+                translate(
+                    lang,
+                    "All Telegram filters are disabled for this admin chat.\n\n"
+                    "You will receive every alert that passes system checks.\n\n",
+                    "Для этого админского чата отключены все Telegram-фильтры.\n\n"
+                    "Вы будете получать все алерты, которые проходят системные проверки.\n\n",
+                ) +
+                f"{format_preferences_text(preferences)}",
+                reply_markup=_build_settings_keyboard(preferences, chat_id=callback.message.chat.id),
             )
 
     await _safe_answer_callback(callback)
@@ -239,7 +259,7 @@ async def _apply_setting_update(message, field_name, value):
                 chat_id=message.chat.id,
                 message_id=prompt_message_id,
                 text=text,
-                reply_markup=_build_settings_keyboard(preferences),
+                reply_markup=_build_settings_keyboard(preferences, chat_id=message.chat.id),
             )
             await _safe_delete_message(message)
             return
@@ -249,7 +269,7 @@ async def _apply_setting_update(message, field_name, value):
 
     await message.answer(
         text,
-        reply_markup=_build_settings_keyboard(preferences),
+        reply_markup=_build_settings_keyboard(preferences, chat_id=message.chat.id),
     )
     await _safe_delete_message(message)
 
@@ -307,58 +327,68 @@ def _build_home_keyboard(preferences=None, chat_id=None):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _build_settings_keyboard(preferences=None):
+def _build_settings_keyboard(preferences=None, chat_id=None):
     lang = (preferences or {}).get("language")
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"→ {translate(lang, 'Min ROI', 'Мин. ROI')}",
+                callback_data="tg_edit:min_roi_percent",
+            ),
+            InlineKeyboardButton(
+                text=f"→ {translate(lang, 'Min volume', 'Мин. объём')}",
+                callback_data="tg_edit:min_capital_usd",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"→ {translate(lang, 'Max volume', 'Макс. объём')}",
+                callback_data="tg_edit:max_capital_usd",
+            ),
+            InlineKeyboardButton(
+                text=f"→ {translate(lang, 'Min profit', 'Мин. прибыль')}",
+                callback_data="tg_edit:min_profit_usd",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"→ {translate(lang, 'Polymarket balance', 'Баланс Polymarket')}",
+                callback_data="tg_edit:max_polymarket_capital_usd",
+            ),
+            InlineKeyboardButton(
+                text=f"→ {translate(lang, 'Predict.Fun balance', 'Баланс Predict.Fun')}",
+                callback_data="tg_edit:max_predict_fun_capital_usd",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"→ {translate(lang, 'Max market end', 'Макс. срок рынка')}",
+                callback_data="tg_edit:max_days_to_close",
+            ),
+        ],
+    ]
+    if _is_admin_chat(chat_id):
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"→ {translate(lang, 'Min ROI', 'Мин. ROI')}",
-                    callback_data="tg_edit:min_roi_percent",
+                    text=translate(lang, "⛔ Disable all filters", "⛔ Выключить все фильтры"),
+                    callback_data="tg_nav:disable_filters",
                 ),
-                InlineKeyboardButton(
-                    text=f"→ {translate(lang, 'Min volume', 'Мин. объём')}",
-                    callback_data="tg_edit:min_capital_usd",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"→ {translate(lang, 'Max volume', 'Макс. объём')}",
-                    callback_data="tg_edit:max_capital_usd",
-                ),
-                InlineKeyboardButton(
-                    text=f"→ {translate(lang, 'Min profit', 'Мин. прибыль')}",
-                    callback_data="tg_edit:min_profit_usd",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"→ {translate(lang, 'Polymarket balance', 'Баланс Polymarket')}",
-                    callback_data="tg_edit:max_polymarket_capital_usd",
-                ),
-                InlineKeyboardButton(
-                    text=f"→ {translate(lang, 'Predict.Fun balance', 'Баланс Predict.Fun')}",
-                    callback_data="tg_edit:max_predict_fun_capital_usd",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"→ {translate(lang, 'Max market end', 'Макс. срок рынка')}",
-                    callback_data="tg_edit:max_days_to_close",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=translate(lang, "Reset all", "Сбросить всё"),
-                    callback_data="tg_nav:reset",
-                ),
-                InlineKeyboardButton(
-                    text=translate(lang, "← Back", "← Назад"),
-                    callback_data="tg_nav:home",
-                ),
-            ],
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=translate(lang, "Reset all", "Сбросить всё"),
+                callback_data="tg_nav:reset",
+            ),
+            InlineKeyboardButton(
+                text=translate(lang, "← Back", "← Назад"),
+                callback_data="tg_nav:home",
+            ),
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _build_prompt_keyboard(preferences=None):

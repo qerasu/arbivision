@@ -260,6 +260,31 @@ async def reset_user_preferences(db_session, chat_id):
     return _serialize_user_preferences(preferences)
 
 
+async def disable_user_preferences(db_session, chat_id):
+    telegram_chat = await ensure_telegram_user(db_session, chat_id)
+    stmt = select(UserPreference).where(UserPreference.user_id == telegram_chat.user_id)
+    result = await db_session.execute(stmt)
+    preferences = result.scalars().first()
+
+    if preferences is None:
+        preferences = UserPreference(
+            user_id=telegram_chat.user_id,
+            muted=False,
+        )
+        db_session.add(preferences)
+
+    preferences.min_roi_percent = None
+    preferences.min_capital_usd = None
+    preferences.max_capital_usd = None
+    preferences.max_polymarket_capital_usd = None
+    preferences.max_predict_fun_capital_usd = None
+    preferences.min_profit_usd = None
+    preferences.max_days_to_close = None
+    preferences.updated_at = datetime.now(timezone.utc)
+    await db_session.commit()
+    return _serialize_user_preferences(preferences)
+
+
 async def get_telegram_alert_targets(db_session):
     stmt = (
         select(Subscription, UserPreference, User)
