@@ -9,7 +9,6 @@ from sqlalchemy.future import select
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.database import AsyncSessionLocal
 from arbitrage_bot.core.observability import snapshot_counters
-from arbitrage_bot.models.orm import Alert
 from arbitrage_bot.models.orm import Subscription
 from arbitrage_bot.models.orm import TelegramChat
 from arbitrage_bot.models.orm import User
@@ -21,8 +20,10 @@ from arbitrage_bot.tg_bot.preferences import format_home_text
 from arbitrage_bot.tg_bot.preferences import format_preferences_text
 from arbitrage_bot.tg_bot.preferences import format_setting_prompt
 from arbitrage_bot.tg_bot.preferences import get_ui_state
+from arbitrage_bot.tg_bot.preferences import get_setting_label
 from arbitrage_bot.tg_bot.preferences import get_user_language
 from arbitrage_bot.tg_bot.preferences import get_user_preferences
+from arbitrage_bot.tg_bot.preferences import iter_settings_fields
 from arbitrage_bot.tg_bot.preferences import reset_user_preferences
 from arbitrage_bot.tg_bot.preferences import set_user_language
 from arbitrage_bot.tg_bot.preferences import set_user_preference
@@ -310,52 +311,23 @@ def _build_home_keyboard(preferences=None, chat_id=None):
 
 def _build_settings_keyboard(preferences=None, chat_id=None):
     lang = (preferences or {}).get("language")
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"→ {translate(lang, 'Min ROI', 'Мин. ROI')}",
-                callback_data="tg_edit:min_roi_percent",
-            ),
-            InlineKeyboardButton(
-                text=f"→ {translate(lang, 'Min volume', 'Мин. объём')}",
-                callback_data="tg_edit:min_capital_usd",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"→ {translate(lang, 'Max volume', 'Макс. объём')}",
-                callback_data="tg_edit:max_capital_usd",
-            ),
-            InlineKeyboardButton(
-                text=f"→ {translate(lang, 'Min profit', 'Мин. прибыль')}",
-                callback_data="tg_edit:min_profit_usd",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"→ {translate(lang, 'Polymarket balance', 'Баланс Polymarket')}",
-                callback_data="tg_edit:max_polymarket_capital_usd",
-            ),
-            InlineKeyboardButton(
-                text=f"→ {translate(lang, 'Predict.Fun balance', 'Баланс Predict.Fun')}",
-                callback_data="tg_edit:max_predict_fun_capital_usd",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"→ {translate(lang, 'Min market end', 'Мин. срок рынка')}",
-                callback_data="tg_edit:min_days_to_close",
-            ),
-            InlineKeyboardButton(
-                text=f"→ {translate(lang, 'Max market end', 'Макс. срок рынка')}",
-                callback_data="tg_edit:max_days_to_close",
-            ),
-        ],
-    ]
+    fields = list(iter_settings_fields())
+    rows = []
+    for index in range(0, len(fields), 2):
+        chunk = fields[index:index + 2]
+        row = []
+        for field in chunk:
+            row.append(
+                InlineKeyboardButton(
+                    text=f"→ {get_setting_label(field['name'], language=lang)}",
+                    callback_data=f"tg_edit:{field['name']}",
+                )
+            )
+        rows.append(row)
     rows.append(
         [
             InlineKeyboardButton(
-                text=translate(lang, "Reset all", "Сбросить всё"),
+                text=translate(lang, "Disable all", "Отключить всё"),
                 callback_data="tg_nav:reset",
             ),
             InlineKeyboardButton(
@@ -479,26 +451,7 @@ def _format_success_value(field_name, value, language=None):
 
 
 def _settings_success_label(field_name, language=None):
-    ru_labels = {
-        "min_roi_percent": "Мин. ROI",
-        "min_capital_usd": "Мин. объём",
-        "max_capital_usd": "Макс. объём",
-        "max_polymarket_capital_usd": "Баланс Polymarket",
-        "max_predict_fun_capital_usd": "Баланс Predict.Fun",
-        "min_profit_usd": "Мин. прибыль",
-        "min_days_to_close": "Мин. срок рынка",
-        "max_days_to_close": "Макс. срок рынка",
-    }
-    return translate(language, {
-        "min_roi_percent": "Min ROI",
-        "min_capital_usd": "Min volume",
-        "max_capital_usd": "Max volume",
-        "max_polymarket_capital_usd": "Polymarket balance",
-        "max_predict_fun_capital_usd": "Predict.Fun balance",
-        "min_profit_usd": "Min profit",
-        "min_days_to_close": "Min market end",
-        "max_days_to_close": "Max market end",
-    }[field_name], ru_labels[field_name])
+    return get_setting_label(field_name, language=language)
 
 
 def _is_admin_chat(chat_id):
@@ -539,27 +492,7 @@ async def _load_admin_stats(db_session):
             User.status == "active",
         )
     )
-    alerts_stmt = select(
-        func.count(Alert.id).filter(Alert.status == "sent").label("sent"),
-        func.count(Alert.id).filter(Alert.status.in_(("cancelled", "failed"))).label("dropped"),
-    )
-    reasons_stmt = (
-        select(
-            Alert.error_message,
-            func.count(Alert.id).label("count"),
-        )
-        .where(
-            Alert.status.in_(("cancelled", "failed")),
-            Alert.error_message.is_not(None),
-        )
-        .group_by(Alert.error_message)
-        .order_by(func.count(Alert.id).desc(), Alert.error_message.asc())
-        .limit(8)
-    )
-
     users_row = (await db_session.execute(users_stmt)).one()
-    alerts_row = (await db_session.execute(alerts_stmt)).one()
-    reason_rows = (await db_session.execute(reasons_stmt)).all()
     runtime_metrics = snapshot_counters()
 
     total_users = int(users_row.total or 0)
@@ -578,6 +511,9 @@ async def _load_admin_stats(db_session):
         elif key == "telegram.alert_send_failed":
             runtime_alert_drop_reasons["send_failed"] = int(value)
 
+    runtime_sent = int(runtime_metrics.get("telegram.alert_sent", 0))
+    runtime_dropped = sum(runtime_alert_drop_reasons.values())
+
     return {
         "users": {
             "total": total_users,
@@ -585,16 +521,10 @@ async def _load_admin_stats(db_session):
             "paused": paused_users,
         },
         "alerts": {
-            "sent": int(alerts_row.sent or 0),
-            "dropped": int(alerts_row.dropped or 0),
+            "sent": runtime_sent,
+            "dropped": runtime_dropped,
         },
-        "alert_drop_reasons": [
-            {
-                "reason": _normalize_alert_reason(error_message),
-                "count": int(count),
-            }
-            for error_message, count in reason_rows
-        ],
+        "alert_drop_reasons": [],
         "runtime_alert_drop_reasons": runtime_alert_drop_reasons,
         "runtime_opportunity_filter_reasons": runtime_opportunity_filter_reasons,
     }
@@ -616,10 +546,9 @@ def _format_admin_stats_text(stats):
         f"• ⏸ Paused: {users['paused']}",
         "",
         "🚨 Alerts:",
-        "• All time:",
+        "• Runtime:",
         f"• 📤 Sent: {alerts['sent']}",
         f"• 🗑 Dropped: {alerts['dropped']}",
-        "• Runtime:",
         f"• 🧹 Filtered: {total_filtered}",
     ]
 
@@ -628,7 +557,7 @@ def _format_admin_stats_text(stats):
         lines.extend(
             [
                 "",
-                "🧾 Alert cancellations/failures (all time, DB):",
+                "🧾 Alert cancellations/failures:",
             ]
         )
         for item in alert_drop_reasons:

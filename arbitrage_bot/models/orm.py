@@ -44,34 +44,6 @@ class MarketPair(Base):
     outcome_mapping_json = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
-
-class ArbOpportunity(Base):
-    __tablename__ = "arb_opportunities"
-    __table_args__ = (
-        Index("ix_arb_opportunities_fanout_status_created_at", "fanout_status", "created_at"),
-        Index("ix_arb_opportunities_market_pair_id", "market_pair_id"),
-        Index("ix_arb_opportunities_pair_direction_status", "market_pair_id", "direction", "fanout_status"),
-    )
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    market_pair_id = Column(Integer, ForeignKey("market_pairs.id"), nullable=False)
-    direction = Column(String, nullable=False)
-    price_leg_1 = Column(Float, nullable=False)
-    price_leg_2 = Column(Float, nullable=False)
-    avg_price_leg_1 = Column(Float, nullable=False)
-    avg_price_leg_2 = Column(Float, nullable=False)
-    shares = Column(Float, nullable=False)
-    capital_required = Column(Float, nullable=False)
-    gross_profit = Column(Float, nullable=False)
-    net_profit = Column(Float, nullable=False)
-    gross_roi = Column(Float, nullable=False)
-    net_roi = Column(Float, nullable=False)
-    calculation_json = Column(JSON, nullable=True)
-    fanout_status = Column(String, nullable=False, default="queued")
-    fanout_processed_at = Column(DateTime(timezone=True), nullable=True)
-    fanout_error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-
-
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -130,28 +102,6 @@ class Subscription(Base):
     status = Column(String, nullable=False, default="active")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
-
-
-class Alert(Base):
-    __tablename__ = "alerts"
-    __table_args__ = (
-        UniqueConstraint("opportunity_id", "telegram_chat_id", name="uq_alerts_opportunity_chat"),
-        Index("ix_alerts_status_next_retry_at_id", "status", "next_retry_at", "id"),
-        Index("ix_alerts_opportunity_id", "opportunity_id"),
-    )
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    opportunity_id = Column(Integer, ForeignKey("arb_opportunities.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    subscription_id = Column(Integer, ForeignKey("subscriptions.id"), nullable=True)
-    telegram_chat_id = Column(String, nullable=False)
-    message_hash = Column(String, nullable=False)
-    status = Column(String, default="queued", nullable=False)
-    attempt_count = Column(Integer, nullable=False, default=0)
-    next_retry_at = Column(DateTime(timezone=True), nullable=True)
-    sent_at = Column(DateTime(timezone=True), nullable=True)
-    error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
-
 
 class SettingsRecord(Base):
     __tablename__ = "settings"

@@ -19,9 +19,6 @@ class MainRuntimeModeTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.main.run_worker_runtime",
             new=Mock(return_value="worker"),
         ), patch(
-            "arbitrage_bot.main.run_fanout_runtime",
-            new=Mock(return_value="fanout"),
-        ), patch(
             "arbitrage_bot.main.run_telegram_runtime",
             new=Mock(return_value="telegram"),
         ), patch(
@@ -46,10 +43,10 @@ class MainRuntimeModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(coroutines, ["worker"])
 
 
-    async def test_lifespan_starts_only_fanout_in_fanout_mode(self):
+    async def test_lifespan_starts_nothing_in_fanout_mode(self):
         coroutines = await self._collect_runtime_targets("fanout")
 
-        self.assertEqual(coroutines, ["fanout"])
+        self.assertEqual(coroutines, [])
 
 
     async def test_lifespan_starts_only_telegram_in_telegram_mode(self):

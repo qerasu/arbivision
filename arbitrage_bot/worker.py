@@ -10,7 +10,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from arbitrage_bot.core.database import AsyncSessionLocal
 from arbitrage_bot.core.redis import get_redis
-from arbitrage_bot.models.orm import Alert, Market, MarketPair
+from arbitrage_bot.models.orm import Market, MarketPair
 from arbitrage_bot.services.ingestion import IngestionService
 from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot.services.orderbook import OrderbookService
@@ -75,23 +75,6 @@ def _snapshot_pair(pair):
         match_reason_json=getattr(pair, "match_reason_json", None),
         outcome_mapping_json=getattr(pair, "outcome_mapping_json", None),
         created_at=getattr(pair, "created_at", None),
-    )
-
-
-async def _persist_delivery_alert(db, alert):
-    db.add(
-        Alert(
-            opportunity_id=getattr(alert, "opportunity_id", None),
-            user_id=getattr(alert, "user_id", None),
-            subscription_id=getattr(alert, "subscription_id", None),
-            telegram_chat_id=getattr(alert, "telegram_chat_id", None),
-            message_hash=str(getattr(alert, "message_hash", "") or ""),
-            status=getattr(alert, "status", "failed"),
-            attempt_count=int(getattr(alert, "attempt_count", 0) or 0),
-            next_retry_at=getattr(alert, "next_retry_at", None),
-            sent_at=getattr(alert, "sent_at", None),
-            error_message=getattr(alert, "error_message", None),
-        )
     )
 
 
@@ -530,10 +513,24 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
             incr_counter("calculator.drop.no_profitable_directions")
             continue
         incr_counter("worker.calc_positive_spread", len(calc_results))
+        revalidated_directions, revalidated_results = await _revalidate_pair_opportunities(
+            db,
+            orderbook_service,
+            calculator,
+            pair,
+            market_map,
+        )
+        if revalidated_directions is None:
+            continue
 
         for calc_result in calc_results:
             try:
-                opportunity = await alert_manager.process_opportunity(pair, calc_result)
+                revalidated_calc_result = revalidated_results.get(calc_result.get("direction"))
+                if revalidated_calc_result is None:
+                    incr_counter("worker.opportunity_dropped_revalidation")
+                    continue
+
+                opportunity = await alert_manager.process_opportunity(pair, revalidated_calc_result)
                 if not opportunity:
                     continue
                 incr_counter("worker.opportunities_created")
@@ -543,15 +540,11 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
                     market_b,
                     delivery_targets=delivery_targets,
                     skip_existing_lookup=True,
-                    directions=directions,
+                    directions=revalidated_directions,
                     calculator=calculator,
                 )
                 if deliveries:
                     deliverable_opportunity_count += 1
-                opportunity.fanout_status = "processed"
-                opportunity.fanout_processed_at = datetime.now(timezone.utc)
-                opportunity.fanout_error_message = None
-                await db.commit()
                 await alert_manager.finalize_opportunity(opportunity)
                 if _should_send_immediately():
                     for delivery in deliveries:
@@ -562,17 +555,14 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
                             market_a,
                             market_b,
                             delivery["preferences"],
-                            directions,
+                            revalidated_directions,
                             calculator,
                             prepared_opportunity=delivery.get("opportunity"),
                         )
-                        await _persist_delivery_alert(db, delivery["alert"])
                         if sent:
                             incr_counter("worker.immediate_send_success")
                         else:
                             incr_counter("worker.immediate_send_failed")
-                    if deliveries:
-                        await db.commit()
                 incr_counter("worker.opportunity_processed")
                 opportunity_count += 1
             except Exception as e:
@@ -596,6 +586,38 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         "opportunities": opportunity_count,
         "deliverable_opportunities": deliverable_opportunity_count,
     }
+
+
+async def _revalidate_pair_opportunities(db, orderbook_service, calculator, pair, market_map):
+    fresh_orderbooks = await orderbook_service.fetch_orderbooks_for_pairs(
+        [pair],
+        db,
+        market_map=market_map,
+        bypass_cache=True,
+    )
+    if not fresh_orderbooks:
+        incr_counter("worker.revalidation_missing_orderbooks")
+        return None, {}
+
+    directions = fresh_orderbooks[0].get("directions")
+    if not directions:
+        incr_counter("worker.revalidation_missing_directions")
+        return None, {}
+
+    calc_results = calculator.calculate_opportunities(directions)
+    if not calc_results:
+        incr_counter("worker.revalidation_no_profitable_directions")
+        return directions, {}
+
+    incr_counter("worker.revalidation_positive_spread", len(calc_results))
+    results_by_direction = {}
+    for result in calc_results:
+        direction = result.get("direction")
+        if not direction:
+            continue
+        results_by_direction[direction] = result
+
+    return directions, results_by_direction
 
 
 def _pair_empty_count_key(pair_hash):

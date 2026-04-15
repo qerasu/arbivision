@@ -1,24 +1,14 @@
-from datetime import datetime, timezone
 import time
 from types import SimpleNamespace
-
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import aliased
 
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.core.observability import incr_counter
-from arbitrage_bot.models.orm import Alert
-from arbitrage_bot.models.orm import ArbOpportunity
-from arbitrage_bot.models.orm import Market
-from arbitrage_bot.models.orm import MarketPair
 from arbitrage_bot.tg_bot.preferences import filter_reason_for_preferences
 from arbitrage_bot.tg_bot.preferences import get_global_preferences
 from arbitrage_bot.tg_bot.preferences import get_telegram_alert_targets
 
 log = get_logger("fanout_manager")
-
 
 
 class FanoutManager:
@@ -30,63 +20,7 @@ class FanoutManager:
 
 
     async def process_pending_opportunities(self, limit=50):
-        delivery_targets = await self._get_delivery_targets()
-        processed_count = 0
-        rows = await self._claim_pending_opportunities(limit)
-        if not rows:
-            return 0
-
-        for row in rows:
-            opportunity, pair, market_a, market_b = row
-            try:
-                incr_counter("fanout.opportunity_claimed")
-                created_alerts = await self._fanout_opportunity(
-                    opportunity,
-                    market_a,
-                    market_b,
-                    delivery_targets=delivery_targets,
-                )
-                opportunity.fanout_status = "processed"
-                opportunity.fanout_processed_at = datetime.now(timezone.utc)
-                opportunity.fanout_error_message = None
-                processed_count += created_alerts
-                incr_counter("fanout.opportunity_processed")
-            except Exception as exc:
-                if opportunity.fanout_status == "retry":
-                    opportunity.fanout_status = "failed"
-                    incr_counter("fanout.opportunity_failed")
-                else:
-                    opportunity.fanout_status = "retry"
-                    incr_counter("fanout.opportunity_retry")
-                opportunity.fanout_error_message = str(exc)
-
-        await self.db.commit()
-
-        return processed_count
-
-
-    async def _claim_pending_opportunities(self, limit):
-        market_b_alias = aliased(Market)
-        stmt = (
-            select(ArbOpportunity, MarketPair, Market, market_b_alias)
-            .join(MarketPair, ArbOpportunity.market_pair_id == MarketPair.id)
-            .join(Market, MarketPair.market_id_a == Market.id)
-            .join(market_b_alias, MarketPair.market_id_b == market_b_alias.id)
-            .where(ArbOpportunity.fanout_status.in_(["queued", "retry"]))
-            .order_by(ArbOpportunity.id)
-            .limit(limit)
-            .with_for_update(skip_locked=True, of=ArbOpportunity)
-        )
-        result = await self.db.execute(stmt)
-        rows = result.all()
-        if not rows:
-            return []
-
-        for opportunity, _, _, _ in rows:
-            opportunity.fanout_status = "processing"
-            opportunity.fanout_error_message = None
-
-        return rows
+        return 0
 
 
     async def _fanout_opportunity(self, opportunity, market_a, market_b, delivery_targets=None):
@@ -105,7 +39,6 @@ class FanoutManager:
             market_a,
             market_b,
             delivery_targets=delivery_targets,
-            skip_existing_lookup=skip_existing_lookup,
             directions=directions,
             calculator=calculator,
         )
@@ -115,7 +48,7 @@ class FanoutManager:
         return await self._get_delivery_targets()
 
 
-    async def _create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, skip_existing_lookup=False, directions=None, calculator=None):
+    async def _create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, directions=None, calculator=None):
         targets = delivery_targets if delivery_targets is not None else await self._get_delivery_targets()
         eligible_targets, drop_reasons = self._filter_targets(
             opportunity,
@@ -131,7 +64,6 @@ class FanoutManager:
                 incr_counter(f"fanout.drop.{drop_reason}")
             log.debug(
                 "opportunity filtered: no eligible targets",
-                opportunity_id=getattr(opportunity, "id", None),
                 pair_id=getattr(opportunity, "market_pair_id", None),
                 direction=getattr(opportunity, "direction", None),
                 net_roi_pct=round(getattr(opportunity, "net_roi", 0.0) * 100, 2),
@@ -142,24 +74,18 @@ class FanoutManager:
             )
             return []
 
-        existing_chat_ids = set()
-        if not skip_existing_lookup:
-            existing_stmt = select(Alert.telegram_chat_id).where(Alert.opportunity_id == opportunity.id)
-            existing_result = await self.db.execute(existing_stmt)
-            existing_chat_ids = set(existing_result.scalars().all())
-
         deliveries = []
+        existing_chat_ids = set()
         for target in eligible_targets:
             chat_id = target["telegram_chat_id"]
             if chat_id in existing_chat_ids:
                 continue
 
             alert = SimpleNamespace(
-                opportunity_id=opportunity.id,
                 user_id=target.get("user_id"),
                 subscription_id=target.get("subscription_id"),
                 telegram_chat_id=chat_id,
-                message_hash=str(opportunity.id),
+                message_hash=getattr(opportunity, "message_hash", None) or self._fallback_message_hash(opportunity),
                 status="queued",
                 attempt_count=0,
                 next_retry_at=None,
@@ -311,6 +237,7 @@ class FanoutManager:
             "gross_roi": current_result["gross_roi"],
             "net_roi": current_result["net_roi"],
             "calculation_json": current_result,
+            "message_hash": getattr(opportunity, "message_hash", None),
         }
         return SimpleNamespace(**payload)
 
@@ -327,5 +254,10 @@ class FanoutManager:
             "gross_roi": getattr(opportunity, "gross_roi", 0.0),
             "net_roi": getattr(opportunity, "net_roi", 0.0),
             "calculation_json": getattr(opportunity, "calculation_json", None),
+            "message_hash": getattr(opportunity, "message_hash", None),
         }
         return SimpleNamespace(**payload)
+
+
+    def _fallback_message_hash(self, opportunity):
+        return f"{getattr(opportunity, 'pair_hash', 'unknown')}:{getattr(opportunity, 'direction', 'unknown')}"

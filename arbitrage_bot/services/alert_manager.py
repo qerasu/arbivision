@@ -1,12 +1,10 @@
+import hashlib
 import json
-
-from sqlalchemy import select
+from types import SimpleNamespace
 
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.core.redis import get_redis
-from arbitrage_bot.models.orm import Alert
-from arbitrage_bot.models.orm import ArbOpportunity
 
 log = get_logger("alert_manager")
 
@@ -21,14 +19,6 @@ class AlertManager:
 
     async def process_opportunity(self, pair, calc_result):
         direction = calc_result["direction"]
-        if await self._has_sent_alert_for_pair_direction(pair.id, direction):
-            log.debug(
-                "opportunity skipped: already sent alert",
-                pair_id=pair.id,
-                direction=direction,
-            )
-            return False
-
         redis = await get_redis()
         dedupe_key = f"alert-dedupe:{pair.pair_hash}:{direction}"
         state_to_save = self._build_dedupe_state(calc_result)
@@ -42,9 +32,7 @@ class AlertManager:
 
         if last_alert_data:
             last_state = self._parse_dedupe_state(last_alert_data)
-            if last_state is None:
-                last_alert_data = None
-            else:
+            if last_state is not None:
                 profit_diff = calc_result["net_profit"] - last_state["net_profit"]
                 roi_diff = calc_result["net_roi"] - last_state["net_roi"]
 
@@ -60,15 +48,9 @@ class AlertManager:
                     )
                     return False
 
-        opp = self._build_opportunity(
-            pair.id,
-            calc_result,
-            fanout_status="queued",
-        )
-        self.db.add(opp)
-        await self.db.flush()
-        self._attach_dedupe_state(opp, dedupe_key, state_to_save)
-        return opp
+        opportunity = self._build_opportunity(pair, calc_result, state_to_save)
+        self._attach_dedupe_state(opportunity, dedupe_key, state_to_save)
+        return opportunity
 
 
     async def finalize_opportunity(self, opportunity):
@@ -85,23 +67,36 @@ class AlertManager:
         self._clear_dedupe_state(opportunity)
 
 
-    def _build_opportunity(self, pair_id, calc_result, fanout_status):
-        return ArbOpportunity(
-            market_pair_id=pair_id,
-            direction=calc_result["direction"],
-            price_leg_1=calc_result["avg_price_leg_1"],
-            price_leg_2=calc_result["avg_price_leg_2"],
-            avg_price_leg_1=calc_result["avg_price_leg_1"],
-            avg_price_leg_2=calc_result["avg_price_leg_2"],
-            shares=calc_result["shares"],
-            capital_required=calc_result["capital_required"],
-            gross_profit=calc_result["gross_profit"],
-            net_profit=calc_result["net_profit"],
-            gross_roi=calc_result["gross_roi"],
-            net_roi=calc_result["net_roi"],
-            calculation_json=calc_result,
-            fanout_status=fanout_status,
-        )
+    def _build_opportunity(self, pair, calc_result, state_to_save):
+        payload = {
+            "id": None,
+            "market_pair_id": getattr(pair, "id", None),
+            "pair_hash": getattr(pair, "pair_hash", None),
+            "direction": calc_result["direction"],
+            "price_leg_1": calc_result["avg_price_leg_1"],
+            "price_leg_2": calc_result["avg_price_leg_2"],
+            "avg_price_leg_1": calc_result["avg_price_leg_1"],
+            "avg_price_leg_2": calc_result["avg_price_leg_2"],
+            "shares": calc_result["shares"],
+            "capital_required": calc_result["capital_required"],
+            "gross_profit": calc_result["gross_profit"],
+            "net_profit": calc_result["net_profit"],
+            "gross_roi": calc_result["gross_roi"],
+            "net_roi": calc_result["net_roi"],
+            "calculation_json": calc_result,
+            "message_hash": self._build_message_hash(pair, calc_result, state_to_save),
+        }
+        return SimpleNamespace(**payload)
+
+
+    def _build_message_hash(self, pair, calc_result, state_to_save):
+        raw_payload = {
+            "pair_hash": getattr(pair, "pair_hash", None),
+            "direction": calc_result["direction"],
+            "state": state_to_save,
+        }
+        encoded = json.dumps(raw_payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha1(encoded.encode("utf-8")).hexdigest()
 
 
     def _attach_dedupe_state(self, opportunity, dedupe_key, state_to_save):
@@ -155,16 +150,3 @@ class AlertManager:
             await redis.setex(dedupe_key, self.dedupe_ttl, json.dumps(state_to_save))
         except Exception:
             pass
-
-
-    async def _has_sent_alert_for_pair_direction(self, pair_id, direction):
-        stmt = (
-            select(Alert.id)
-            .join(ArbOpportunity, Alert.opportunity_id == ArbOpportunity.id)
-            .where(ArbOpportunity.market_pair_id == pair_id)
-            .where(ArbOpportunity.direction == direction)
-            .where(Alert.status == "sent")
-            .limit(1)
-        )
-        result = await self.db.execute(stmt)
-        return result.first() is not None

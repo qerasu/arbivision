@@ -2,7 +2,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from arbitrage_bot.api import internal
 from arbitrage_bot.core.config import settings
-from arbitrage_bot.runtime import run_fanout_runtime
 from arbitrage_bot.runtime import managed_runtime
 from arbitrage_bot.runtime import run_telegram_runtime
 from arbitrage_bot.runtime import run_worker_runtime
@@ -14,9 +13,6 @@ async def lifespan(_app):
 
     if settings.APP_RUNTIME_MODE in {"all", "worker"}:
         coroutines.append(run_worker_runtime())
-
-    if settings.APP_RUNTIME_MODE == "fanout":
-        coroutines.append(run_fanout_runtime())
 
     if settings.APP_RUNTIME_MODE in {"all", "telegram"}:
         coroutines.append(run_telegram_runtime())

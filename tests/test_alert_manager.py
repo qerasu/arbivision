@@ -2,10 +2,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from arbitrage_bot.models.orm import ArbOpportunity
-from arbitrage_bot.core.config import settings
-from arbitrage_bot.models.orm import Market
-from arbitrage_bot.models.orm import SettingsRecord as OrmSettings
 from arbitrage_bot.services.alert_manager import AlertManager
 
 
@@ -24,154 +20,37 @@ class FakeRedis:
         self.setex_calls.append((key, ttl, value))
 
 
-    async def delete(self, key):
-        self.data.pop(key, None)
-
-
-class FakeDbSession:
-    def __init__(self):
-        self.added = []
-        self.flush_calls = 0
-        self.commit_calls = 0
-        self.rollback_calls = 0
-        self.fail_commit = False
-        self.global_preferences = None
-        self.opportunities = []
-        self.sent_alert_rows = []
-
-
-    def add(self, item):
-        self.added.append(item)
-        if getattr(item, "id", None) is None:
-            item.id = len(self.added)
-        if isinstance(item, OrmSettings):
-            self.global_preferences = item
-        if isinstance(item, ArbOpportunity) and item not in self.opportunities:
-            self.opportunities.append(item)
-
-
-    async def flush(self):
-        self.flush_calls += 1
-
-
-    async def commit(self):
-        if self.fail_commit:
-            raise RuntimeError("commit failed")
-        self.commit_calls += 1
-
-
-    async def rollback(self):
-        self.rollback_calls += 1
-
-
-    async def execute(self, stmt):
-        compiled = str(stmt)
-        if "FROM alerts JOIN arb_opportunities" in compiled:
-            return FakeRowResult(self.sent_alert_rows[:1])
-        if "FROM settings" in compiled:
-            return FakeScalarResult(
-                [self.global_preferences] if self.global_preferences is not None else []
-            )
-        if "FROM arb_opportunities" in compiled:
-            suppressed = [
-                opportunity
-                for opportunity in self.opportunities
-                if getattr(opportunity, "fanout_status", None) == "suppressed"
-            ]
-            suppressed.sort(key=lambda opportunity: opportunity.id, reverse=True)
-            return FakeScalarResult(suppressed[:1])
-        raise AssertionError(f"unexpected stmt: {compiled}")
-
-
-class FakeScalarResult:
-    def __init__(self, items):
-        self.items = items
-
-
-    def scalars(self):
-        return self
-
-
-    def first(self):
-        return self.items[0] if self.items else None
-
-
-    def all(self):
-        return list(self.items)
-
-
-class FakeRowResult:
-    def __init__(self, items):
-        self.items = items
-
-
-    def first(self):
-        return self.items[0] if self.items else None
-
-
 class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
-    def _build_markets(self):
-        return (
-            Market(
-                id=101,
-                platform="polymarket",
-                platform_market_id="poly-101",
-                status="active",
-                tradable=True,
-                title="market a",
-                normalized_title="market a",
-                description="",
-                outcomes_json=[],
-                raw_payload_json={"endDate": "2026-03-25T00:00:00+00:00"},
-                category="",
-                slug="",
-            ),
-            Market(
-                id=202,
-                platform="predict_fun",
-                platform_market_id="pf-202",
-                status="active",
-                tradable=True,
-                title="market b",
-                normalized_title="market b",
-                description="",
-                outcomes_json=[],
-                raw_payload_json={"resolveDate": "2026-03-26T00:00:00+00:00"},
-                category="",
-                slug="",
-            ),
-        )
-
-
-    async def test_creates_opportunity_and_updates_dedupe_cache_on_finalize(self):
-        db = FakeDbSession()
-        redis = FakeRedis()
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        calc_result = {
+    def _build_calc_result(self, *, net_profit=7.5, net_roi=0.12):
+        return {
             "direction": "A_yes_B_no",
             "avg_price_leg_1": 0.40,
             "avg_price_leg_2": 0.50,
             "shares": 10.0,
             "capital_required": 9.0,
             "gross_profit": 1.0,
-            "net_profit": 7.5,
+            "net_profit": net_profit,
             "gross_roi": 0.11,
-            "net_roi": 0.12,
+            "net_roi": net_roi,
         }
 
+
+    async def test_creates_runtime_opportunity_and_updates_dedupe_cache_on_finalize(self):
+        redis = FakeRedis()
+        manager = AlertManager(db_session=None)
+        pair = SimpleNamespace(id=7, pair_hash="pair-123")
+
         with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-            opportunity = await manager.process_opportunity(pair, calc_result)
+            opportunity = await manager.process_opportunity(pair, self._build_calc_result())
             await manager.finalize_opportunity(opportunity)
 
-        self.assertEqual(opportunity.fanout_status, "queued")
-        self.assertEqual(db.flush_calls, 1)
-        self.assertEqual(db.commit_calls, 0)
+        self.assertEqual(opportunity.market_pair_id, 7)
+        self.assertEqual(opportunity.direction, "A_yes_B_no")
+        self.assertTrue(opportunity.message_hash)
         self.assertEqual(len(redis.setex_calls), 1)
 
 
-    async def test_skips_alert_when_profit_deltas_are_below_threshold(self):
-        db = FakeDbSession()
+    async def test_skips_opportunity_when_profit_deltas_are_below_threshold(self):
         redis = FakeRedis(
             {
                 "alert-dedupe:pair-123:A_yes_B_no": (
@@ -179,277 +58,37 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
                 )
             }
         )
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        market_a, market_b = self._build_markets()
-        calc_result = {
-            "direction": "A_yes_B_no",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 11.0,
-            "gross_roi": 0.11,
-            "net_roi": 0.201,
-        }
+        manager = AlertManager(db_session=None)
+        pair = SimpleNamespace(id=7, pair_hash="pair-123")
 
         with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-            result = await manager.process_opportunity(pair, calc_result)
+            result = await manager.process_opportunity(
+                pair,
+                self._build_calc_result(net_profit=11.0, net_roi=0.201),
+            )
 
         self.assertFalse(result)
-        self.assertEqual(db.commit_calls, 0)
         self.assertEqual(redis.setex_calls, [])
 
 
-    async def test_ignores_legacy_suppressed_opportunity_and_creates_new_queued_row(self):
-        db = FakeDbSession()
+    async def test_uses_stable_message_hash_for_same_payload(self):
         redis = FakeRedis()
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        legacy_suppressed = ArbOpportunity(
-            id=11,
-            market_pair_id=pair.id,
-            direction="A_yes_B_no",
-            avg_price_leg_1=0.40,
-            avg_price_leg_2=0.50,
-            shares=10.0,
-            capital_required=9.0,
-            gross_profit=1.0,
-            net_profit=7.5,
-            gross_roi=0.11,
-            net_roi=0.12,
-            calculation_json={"direction": "A_yes_B_no"},
-            fanout_status="suppressed",
-        )
-        db.opportunities.append(legacy_suppressed)
-        calc_result = {
-            "direction": "A_yes_B_no",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 12.0,
-            "gross_roi": 0.11,
-            "net_roi": 0.18,
-        }
+        manager = AlertManager(db_session=None)
+        pair = SimpleNamespace(id=7, pair_hash="pair-123")
 
         with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-            created = await manager.process_opportunity(pair, calc_result)
-            await manager.finalize_opportunity(created)
+            first = await manager.process_opportunity(pair, self._build_calc_result(net_profit=12.0, net_roi=0.22))
+            second = await manager.process_opportunity(pair, self._build_calc_result(net_profit=12.0, net_roi=0.22))
 
-        self.assertIsNot(created, legacy_suppressed)
-        self.assertEqual(created.fanout_status, "queued")
-        self.assertEqual(len(db.opportunities), 2)
-        self.assertEqual(db.commit_calls, 0)
-        self.assertEqual(len(redis.setex_calls), 1)
+        self.assertEqual(first.message_hash, second.message_hash)
 
 
-    async def test_creates_new_opportunity_when_dedupe_state_is_invalid(self):
-        db = FakeDbSession()
-        redis = FakeRedis({"alert-dedupe:pair-123:A_yes_B_no": "not-json"})
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        calc_result = {
-            "direction": "A_yes_B_no",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 7.5,
-            "gross_roi": 0.11,
-            "net_roi": 0.12,
-        }
+    async def test_finalize_without_metadata_is_noop(self):
+        redis = FakeRedis()
+        manager = AlertManager(db_session=None)
+        opportunity = SimpleNamespace(direction="A_yes_B_no")
 
         with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-            created = await manager.process_opportunity(pair, calc_result)
-            await manager.finalize_opportunity(created)
-
-        self.assertEqual(created.fanout_status, "queued")
-        self.assertEqual(db.commit_calls, 0)
-        self.assertEqual(len(redis.setex_calls), 1)
-
-
-    async def test_persists_opportunity_even_when_global_filters_would_later_block_fanout(self):
-        db = FakeDbSession()
-        db.global_preferences = OrmSettings(
-            key="tg_alert_prefs:global",
-            value_json={
-                "min_roi_percent": 1.0,
-                "max_capital_usd": None,
-                "max_days_to_close": None,
-            },
-        )
-        redis = FakeRedis()
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        market_a, market_b = self._build_markets()
-        calc_result = {
-            "direction": "A_yes_B_no",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 1.0,
-            "gross_roi": 0.11,
-            "net_roi": 0.0001,
-        }
-
-        original_chat_ids = settings.TELEGRAM_DEFAULT_CHAT_IDS
-        settings.TELEGRAM_DEFAULT_CHAT_IDS = ["1001"]
-        try:
-            with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-                result = await manager.process_opportunity(pair, calc_result)
-        finally:
-            settings.TELEGRAM_DEFAULT_CHAT_IDS = original_chat_ids
-
-        self.assertEqual(result.fanout_status, "queued")
-        self.assertEqual(db.commit_calls, 0)
-
-
-    async def test_finalize_opportunity_continues_when_redis_is_unavailable(self):
-        db = FakeDbSession()
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        calc_result = {
-            "direction": "A_no_B_yes",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 7.5,
-            "gross_roi": 0.11,
-            "net_roi": 0.12,
-        }
-
-        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=None):
-            opportunity = await manager.process_opportunity(pair, calc_result)
-
-        with patch("arbitrage_bot.services.alert_manager.get_redis", side_effect=RuntimeError("redis down")):
             await manager.finalize_opportunity(opportunity)
 
-        self.assertFalse(hasattr(opportunity, "_dedupe_key"))
-        self.assertFalse(hasattr(opportunity, "_dedupe_state"))
-
-
-    async def test_process_opportunity_continues_when_redis_is_unavailable(self):
-        db = FakeDbSession()
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        calc_result = {
-            "direction": "A_no_B_yes",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 7.5,
-            "gross_roi": 0.11,
-            "net_roi": 0.12,
-        }
-
-        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=None):
-            opportunity = await manager.process_opportunity(pair, calc_result)
-
-        self.assertEqual(opportunity.fanout_status, "queued")
-        self.assertEqual(db.commit_calls, 0)
-
-
-    async def test_persists_opportunity_even_when_global_max_capital_would_block_fanout(self):
-        db = FakeDbSession()
-        db.global_preferences = OrmSettings(
-            key="tg_alert_prefs:global",
-            value_json={
-                "min_roi_percent": None,
-                "max_capital_usd": 5.0,
-                "max_days_to_close": None,
-            },
-        )
-        redis = FakeRedis()
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        market_a, market_b = self._build_markets()
-        calc_result = {
-            "direction": "A_yes_B_no",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 7.5,
-            "gross_roi": 0.11,
-            "net_roi": 0.12,
-        }
-
-        original_chat_ids = settings.TELEGRAM_DEFAULT_CHAT_IDS
-        settings.TELEGRAM_DEFAULT_CHAT_IDS = ["1001"]
-        try:
-            with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-                result = await manager.process_opportunity(pair, calc_result)
-        finally:
-            settings.TELEGRAM_DEFAULT_CHAT_IDS = original_chat_ids
-
-        self.assertEqual(result.fanout_status, "queued")
-        self.assertEqual(db.commit_calls, 0)
-
-
-    async def test_ignores_provided_preferences_and_only_queues_opportunity(self):
-        db = FakeDbSession()
-        redis = FakeRedis()
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        market_a, market_b = self._build_markets()
-        calc_result = {
-            "direction": "A_yes_B_no",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 7.5,
-            "gross_roi": 0.11,
-            "net_roi": 0.12,
-        }
-
-        original_chat_ids = settings.TELEGRAM_DEFAULT_CHAT_IDS
-        settings.TELEGRAM_DEFAULT_CHAT_IDS = ["1001"]
-        try:
-            with patch(
-                "arbitrage_bot.services.alert_manager.get_redis",
-                return_value=redis,
-            ):
-                opportunity = await manager.process_opportunity(pair, calc_result)
-        finally:
-            settings.TELEGRAM_DEFAULT_CHAT_IDS = original_chat_ids
-
-        self.assertEqual(opportunity.fanout_status, "queued")
-
-
-    async def test_skips_opportunity_when_same_pair_direction_was_already_sent(self):
-        db = FakeDbSession()
-        db.sent_alert_rows = [(1,)]
-        redis = FakeRedis()
-        manager = AlertManager(db)
-        pair = SimpleNamespace(id=7, pair_hash="pair-123", market_id_a=101, market_id_b=202)
-        calc_result = {
-            "direction": "A_yes_B_no",
-            "avg_price_leg_1": 0.40,
-            "avg_price_leg_2": 0.50,
-            "shares": 10.0,
-            "capital_required": 9.0,
-            "gross_profit": 1.0,
-            "net_profit": 30.0,
-            "gross_roi": 0.11,
-            "net_roi": 0.45,
-        }
-
-        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
-            result = await manager.process_opportunity(pair, calc_result)
-
-        self.assertFalse(result)
-        self.assertEqual(db.added, [])
         self.assertEqual(redis.setex_calls, [])

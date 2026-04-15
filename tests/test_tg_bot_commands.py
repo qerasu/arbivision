@@ -115,7 +115,7 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("🚨 Alerts:", text)
         self.assertIn("• 📤 Sent: 10", text)
         self.assertIn("• 🗑 Dropped: 4", text)
-        self.assertIn("🧾 Alert cancellations/failures (all time, DB):", text)
+        self.assertIn("🧾 Alert cancellations/failures:", text)
         self.assertIn("• cancelled_after_revalidation: 3", text)
         self.assertIn("⚙️ Delivery cancellations (since restart, runtime):", text)
         self.assertIn("• cancelled_by_updated_preferences: 2", text)
@@ -140,9 +140,9 @@ class TelegramBotCommandsTests(unittest.TestCase):
 
 
     def test_is_missing_table_error_detects_undefined_table(self):
-        orig = Exception('relation "alerts" does not exist')
+        orig = Exception('relation "subscriptions" does not exist')
         orig.sqlstate = "42P01"
-        exc = ProgrammingError("SELECT * FROM alerts", {}, orig)
+        exc = ProgrammingError("SELECT * FROM subscriptions", {}, orig)
 
         self.assertTrue(_is_missing_table_error(exc))
 

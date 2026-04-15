@@ -113,64 +113,7 @@ def upgrade():
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index('ix_subscriptions_user_id_status', 'subscriptions', ['user_id', 'status'], unique=False)
-    op.create_table('arb_opportunities',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('market_pair_id', sa.Integer(), nullable=False),
-    sa.Column('direction', sa.String(), nullable=False),
-    sa.Column('price_leg_1', sa.Float(), nullable=False),
-    sa.Column('price_leg_2', sa.Float(), nullable=False),
-    sa.Column('avg_price_leg_1', sa.Float(), nullable=False),
-    sa.Column('avg_price_leg_2', sa.Float(), nullable=False),
-    sa.Column('shares', sa.Float(), nullable=False),
-    sa.Column('capital_required', sa.Float(), nullable=False),
-    sa.Column('gross_profit', sa.Float(), nullable=False),
-    sa.Column('net_profit', sa.Float(), nullable=False),
-    sa.Column('gross_roi', sa.Float(), nullable=False),
-    sa.Column('net_roi', sa.Float(), nullable=False),
-    sa.Column('calculation_json', sa.JSON(), nullable=True),
-    sa.Column('fanout_status', sa.String(), nullable=False, server_default='queued'),
-    sa.Column('fanout_processed_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('fanout_error_message', sa.Text(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(['market_pair_id'], ['market_pairs.id'], ),
-    sa.PrimaryKeyConstraint('id')
-    )
-    op.alter_column('arb_opportunities', 'fanout_status', server_default=None)
-    op.create_index('ix_arb_opportunities_fanout_status_created_at', 'arb_opportunities', ['fanout_status', 'created_at'], unique=False)
-    op.create_index('ix_arb_opportunities_market_pair_id', 'arb_opportunities', ['market_pair_id'], unique=False)
-    op.create_index('ix_arb_opportunities_pair_direction_status', 'arb_opportunities', ['market_pair_id', 'direction', 'fanout_status'], unique=False)
-
-    op.create_table('alerts',
-    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-    sa.Column('opportunity_id', sa.Integer(), nullable=False),
-    sa.Column('user_id', sa.Integer(), nullable=True),
-    sa.Column('subscription_id', sa.Integer(), nullable=True),
-    sa.Column('telegram_chat_id', sa.String(), nullable=False),
-    sa.Column('message_hash', sa.String(), nullable=False),
-    sa.Column('status', sa.String(), nullable=False),
-    sa.Column('attempt_count', sa.Integer(), nullable=False, server_default='0'),
-    sa.Column('next_retry_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('sent_at', sa.DateTime(timezone=True), nullable=True),
-    sa.Column('error_message', sa.Text(), nullable=True),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(['opportunity_id'], ['arb_opportunities.id'], ),
-    sa.ForeignKeyConstraint(['subscription_id'], ['subscriptions.id'], name='fk_alerts_subscription_id_subscriptions'),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name='fk_alerts_user_id_users'),
-    sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('opportunity_id', 'telegram_chat_id', name='uq_alerts_opportunity_chat')
-    )
-    op.alter_column('alerts', 'attempt_count', server_default=None)
-    op.create_index('ix_alerts_opportunity_id', 'alerts', ['opportunity_id'], unique=False)
-    op.create_index('ix_alerts_status_next_retry_at_id', 'alerts', ['status', 'next_retry_at', 'id'], unique=False)
-
 def downgrade():
-    op.drop_index('ix_alerts_status_next_retry_at_id', table_name='alerts')
-    op.drop_index('ix_alerts_opportunity_id', table_name='alerts')
-    op.drop_table('alerts')
-    op.drop_index('ix_arb_opportunities_pair_direction_status', table_name='arb_opportunities')
-    op.drop_index('ix_arb_opportunities_market_pair_id', table_name='arb_opportunities')
-    op.drop_index('ix_arb_opportunities_fanout_status_created_at', table_name='arb_opportunities')
-    op.drop_table('arb_opportunities')
     op.drop_index('ix_subscriptions_user_id_status', table_name='subscriptions')
     op.drop_table('subscriptions')
     op.drop_table('user_preferences')

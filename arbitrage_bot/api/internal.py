@@ -3,8 +3,7 @@ from sqlalchemy import func
 from sqlalchemy.future import select
 
 from arbitrage_bot.core.database import get_db
-from arbitrage_bot.models.orm import Alert
-from arbitrage_bot.models.orm import ArbOpportunity
+from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.models.orm import Market
 from arbitrage_bot.models.orm import MarketPair
 
@@ -18,6 +17,7 @@ async def health_check():
 
 @router.get("/status")
 async def status_check(db=Depends(get_db)):
+    runtime_metrics = snapshot_counters()
     markets_stmt = select(
         func.count(Market.id).label("total"),
         func.count().filter(Market.status == "active").label("active"),
@@ -28,17 +28,12 @@ async def status_check(db=Depends(get_db)):
             MarketPair.status.in_(("approved", "auto_approved"))
         ).label("approved"),
     )
-    opportunities_stmt = select(func.count(ArbOpportunity.id))
-    queued_fanout_stmt = select(func.count(ArbOpportunity.id)).where(
-        ArbOpportunity.fanout_status.in_(("queued", "retry"))
-    )
-    alerts_stmt = select(func.count(Alert.id)).where(Alert.status == "queued")
 
     markets_row = (await db.execute(markets_stmt)).one()
     pairs_row = (await db.execute(pairs_stmt)).one()
-    opportunities_total = (await db.execute(opportunities_stmt)).scalar_one()
-    queued_fanout = (await db.execute(queued_fanout_stmt)).scalar_one()
-    queued_alerts = (await db.execute(alerts_stmt)).scalar_one()
+    opportunities_total = int(runtime_metrics.get("worker.opportunities_created", 0))
+    filtered_opportunities = int(runtime_metrics.get("fanout.opportunity_filtered_all_targets", 0))
+    sent_alerts = int(runtime_metrics.get("telegram.alert_sent", 0))
 
     return {
         "status": "ok",
@@ -53,9 +48,9 @@ async def status_check(db=Depends(get_db)):
         },
         "opportunity_counts": {
             "total": opportunities_total,
-            "queued_fanout": queued_fanout,
+            "filtered_runtime": filtered_opportunities,
         },
         "alert_counts": {
-            "queued": queued_alerts,
+            "sent_runtime": sent_alerts,
         },
     }

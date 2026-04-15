@@ -965,9 +965,6 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
-        ), patch(
-            "arbitrage_bot.worker._persist_delivery_alert",
-            new=AsyncMock(),
         ) as send_mock:
             result = await _process_candidates(
                 fake_db,
@@ -1071,9 +1068,6 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
-        ), patch(
-            "arbitrage_bot.worker._persist_delivery_alert",
-            new=AsyncMock(),
         ) as send_mock:
             result = await _process_candidates(
                 fake_db,
@@ -1086,7 +1080,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["opportunities"], 1)
         self.assertEqual(result["deliverable_opportunities"], 1)
-        self.assertEqual(fake_db.commit_calls, 2)
+        self.assertEqual(fake_db.commit_calls, 0)
         send_mock.assert_awaited_once()
 
 
@@ -1191,9 +1185,6 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(),
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
-            new=AsyncMock(),
-        ), patch(
-            "arbitrage_bot.worker._persist_delivery_alert",
             new=AsyncMock(),
         ) as send_mock:
             result = await _process_candidates(
@@ -1310,9 +1301,6 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
-        ), patch(
-            "arbitrage_bot.worker._persist_delivery_alert",
-            new=AsyncMock(),
         ) as send_mock:
             result = await _process_candidates(
                 fake_db,
@@ -1418,9 +1406,6 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(return_value=True),
-        ), patch(
-            "arbitrage_bot.worker._persist_delivery_alert",
-            new=AsyncMock(),
         ) as send_mock:
             await _process_candidates(
                 fake_db,

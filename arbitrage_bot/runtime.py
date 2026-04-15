@@ -1,7 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from arbitrage_bot.fanout_worker import run_fanout_loop
 from arbitrage_bot.services.system_notifier import close_shared_bot
 from arbitrage_bot.tg_bot.bot import close_shared_delivery_bot
 from arbitrage_bot.tg_bot.bot import start_polling
@@ -24,10 +23,6 @@ async def managed_runtime(*coroutines):
 
 async def run_worker_runtime():
     await run_sync_loop()
-
-
-async def run_fanout_runtime():
-    await run_fanout_loop()
 
 
 async def run_telegram_runtime():

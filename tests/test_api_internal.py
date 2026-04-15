@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from arbitrage_bot.api.internal import health_check
 from arbitrage_bot.api.internal import status_check
@@ -39,13 +40,18 @@ class InternalApiTests(unittest.IsolatedAsyncioTestCase):
             [
                 SimpleNamespace(total=100, active=42),
                 SimpleNamespace(total=12, approved=5),
-                3,
-                1,
-                2,
             ]
         )
 
-        payload = await status_check(db=db)
+        with patch(
+            "arbitrage_bot.api.internal.snapshot_counters",
+            return_value={
+                "worker.opportunities_created": 3,
+                "fanout.opportunity_filtered_all_targets": 1,
+                "telegram.alert_sent": 2,
+            },
+        ):
+            payload = await status_check(db=db)
 
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["service"], "arbitrage-alert-bot")
@@ -54,6 +60,6 @@ class InternalApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["pair_counts"]["total"], 12)
         self.assertEqual(payload["pair_counts"]["approved"], 5)
         self.assertEqual(payload["opportunity_counts"]["total"], 3)
-        self.assertEqual(payload["opportunity_counts"]["queued_fanout"], 1)
-        self.assertEqual(payload["alert_counts"]["queued"], 2)
+        self.assertEqual(payload["opportunity_counts"]["filtered_runtime"], 1)
+        self.assertEqual(payload["alert_counts"]["sent_runtime"], 2)
         self.assertNotIn("runtime_metrics", payload)

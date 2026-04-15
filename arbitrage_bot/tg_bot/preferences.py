@@ -22,15 +22,75 @@ DEFAULT_PREFERENCES = {
     "min_days_to_close": None,
     "max_days_to_close": 5,
 }
-FIELD_LABELS = {
-    "min_roi_percent": "Min ROI",
-    "min_capital_usd": "Min volume",
-    "max_capital_usd": "Max volume",
-    "max_polymarket_capital_usd": "Polymarket balance",
-    "max_predict_fun_capital_usd": "Predict.Fun balance",
-    "min_profit_usd": "Min profit",
-    "min_days_to_close": "Min market end",
-    "max_days_to_close": "Max market end",
+SETTINGS_FIELDS = (
+    {
+        "name": "min_roi_percent",
+        "icon": "📈",
+        "label_en": "Min ROI",
+        "label_ru": "Мин. ROI",
+        "description_en": "Enter the minimum ROI percentage required to receive a signal.",
+        "description_ru": "Введите минимальный ROI в процентах для получения сигнала.",
+    },
+    {
+        "name": "min_capital_usd",
+        "icon": "📦",
+        "label_en": "Min volume",
+        "label_ru": "Мин. объём",
+        "description_en": "Enter the minimum volume in USD required for an alert.",
+        "description_ru": "Введите минимальный объём в USD для получения алерта.",
+    },
+    {
+        "name": "max_capital_usd",
+        "icon": "💵",
+        "label_en": "Max volume",
+        "label_ru": "Макс. объём",
+        "description_en": "Enter the maximum volume in USD allowed for an alert.",
+        "description_ru": "Введите максимальный объём в USD для получения алерта.",
+    },
+    {
+        "name": "min_profit_usd",
+        "icon": "💰",
+        "label_en": "Min profit",
+        "label_ru": "Мин. прибыль",
+        "description_en": "Enter the minimum profit in USD required for an alert.",
+        "description_ru": "Введите минимальную прибыль в USD для получения алерта.",
+    },
+    {
+        "name": "max_polymarket_capital_usd",
+        "icon": "🔵",
+        "label_en": "Polymarket balance",
+        "label_ru": "Баланс Polymarket",
+        "description_en": "Enter how much USD you have available on Polymarket.",
+        "description_ru": "Введите, сколько USD у вас доступно на Polymarket.",
+    },
+    {
+        "name": "max_predict_fun_capital_usd",
+        "icon": "🟣",
+        "label_en": "Predict.Fun balance",
+        "label_ru": "Баланс Predict.Fun",
+        "description_en": "Enter how much USD you have available on Predict.Fun.",
+        "description_ru": "Введите, сколько USD у вас доступно на Predict.Fun.",
+    },
+    {
+        "name": "min_days_to_close",
+        "icon": "⌛",
+        "label_en": "Min market end",
+        "label_ru": "Мин. срок рынка",
+        "description_en": "Enter the minimum number of days until market expiry.",
+        "description_ru": "Введите минимальное количество дней до окончания рынка.",
+    },
+    {
+        "name": "max_days_to_close",
+        "icon": "⏳",
+        "label_en": "Max market end",
+        "label_ru": "Макс. срок рынка",
+        "description_en": "Enter the maximum number of days until market expiry.",
+        "description_ru": "Введите максимальное количество дней до окончания рынка.",
+    },
+)
+FIELD_METADATA = {
+    item["name"]: item
+    for item in SETTINGS_FIELDS
 }
 DATETIME_FIELDS = (
     "endDate",
@@ -57,6 +117,20 @@ DATETIME_FIELDS = (
 
 def default_preferences():
     return dict(DEFAULT_PREFERENCES)
+
+
+def iter_settings_fields():
+    return SETTINGS_FIELDS
+
+
+def get_setting_label(field_name, language=None):
+    metadata = FIELD_METADATA[field_name]
+    return translate(language, metadata["label_en"], metadata["label_ru"])
+
+
+def get_setting_description(field_name, language=None):
+    metadata = FIELD_METADATA[field_name]
+    return translate(language, metadata["description_en"], metadata["description_ru"])
 
 
 def _make_default_preference(user_id):
@@ -365,37 +439,16 @@ async def _save_global_preferences(db_session, preferences):
 
 def format_preferences_text(preferences, language=None):
     lang = language or preferences.get("language")
-    min_roi_str = _format_roi_value(preferences, language=lang)
-    min_capital = preferences.get("min_capital_usd")
-    min_capital_str = translate(lang, "off", "выкл") if min_capital is None else _format_money(min_capital, fallback='')
-    max_capital = preferences.get("max_capital_usd")
-    max_capital_str = translate(lang, "off", "выкл") if max_capital is None else _format_money(max_capital, fallback='')
-    max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
-    max_polymarket_capital_str = translate(lang, "off", "выкл") if max_polymarket_capital is None else _format_money(max_polymarket_capital, fallback='')
-    max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
-    max_predict_fun_capital_str = translate(lang, "off", "выкл") if max_predict_fun_capital is None else _format_money(max_predict_fun_capital, fallback='')
-    min_profit = preferences.get("min_profit_usd")
-    min_profit_str = translate(lang, "off", "выкл") if min_profit is None else _format_money(min_profit, fallback='')
-    min_days = _format_days(preferences.get("min_days_to_close"), language=lang)
-    max_days = _format_days(preferences.get("max_days_to_close"), language=lang)
+    lines = []
+    for field in SETTINGS_FIELDS:
+        field_name = field["name"]
+        lines.append(
+            f"{field['icon']} {get_setting_label(field_name, language=lang)}\n"
+            f"{translate(lang, 'Current', 'Сейчас')}: {_format_field_value(field_name, preferences, language=lang)}"
+        )
     return (
         f"{translate(lang, '⚙️ Your alert settings', '⚙️ Ваши настройки алертов')}\n\n"
-        f"📈 {translate(lang, 'Min ROI', 'Мин. ROI')}\n"
-        f"{translate(lang, 'Current', 'Сейчас')}: {min_roi_str}\n\n"
-        f"📦 {translate(lang, 'Min volume', 'Мин. объём')}\n"
-        f"{translate(lang, 'Current', 'Сейчас')}: {min_capital_str}\n\n"
-        f"💵 {translate(lang, 'Volume', 'Макс. объём')}\n"
-        f"{translate(lang, 'Current', 'Сейчас')}: {max_capital_str}\n\n"
-        f"🔵 {translate(lang, 'Polymarket volume limit', 'Лимит объёма Polymarket')}\n"
-        f"{translate(lang, 'Current', 'Сейчас')}: {max_polymarket_capital_str}\n\n"
-        f"🟣 {translate(lang, 'Predict.Fun volume limit', 'Лимит объёма Predict.Fun')}\n"
-        f"{translate(lang, 'Current', 'Сейчас')}: {max_predict_fun_capital_str}\n\n"
-        f"💰 {translate(lang, 'Min profit', 'Мин. прибыль')}\n"
-        f"{translate(lang, 'Current', 'Сейчас')}: {min_profit_str}\n\n"
-        f"⌛ {translate(lang, 'Min market end', 'Мин. срок рынка')}\n"
-        f"{translate(lang, 'Current', 'Сейчас')}: {min_days}\n\n"
-        f"⏳ {translate(lang, 'Max market end', 'Макс. срок рынка')}\n"
-        f"{translate(lang, 'Current', 'Сейчас')}: {max_days}"
+        + "\n\n".join(lines)
     )
 
 
@@ -407,22 +460,13 @@ def format_home_text(preferences, language=None):
 
     # собираем только включённые фильтры (значение != None)
     filter_lines = []
-    filter_defs = [
-        ("min_roi_percent", "📈", "Min ROI", "Мин. ROI"),
-        ("min_capital_usd", "📦", "Min volume", "Мин. объём"),
-        ("max_capital_usd", "💵", "Max volume", "Макс. объём"),
-        ("max_polymarket_capital_usd", "🔵", "Polymarket balance", "Баланс Polymarket"),
-        ("max_predict_fun_capital_usd", "🟣", "Predict.Fun balance", "Баланс Predict.Fun"),
-        ("min_profit_usd", "💰", "Min profit", "Мин. прибыль"),
-        ("min_days_to_close", "⌛", "Min market end", "Мин. срок рынка"),
-        ("max_days_to_close", "⏳", "Max market end", "Макс. срок рынка"),
-    ]
-    for field, icon, label_en, label_ru in filter_defs:
-        value = preferences.get(field)
+    for field in SETTINGS_FIELDS:
+        field_name = field["name"]
+        value = preferences.get(field_name)
         if value is None:
             continue
-        formatted = _format_field_value(field, preferences, language=lang)
-        filter_lines.append(f"• {icon} {translate(lang, label_en, label_ru)}: {formatted}")
+        formatted = _format_field_value(field_name, preferences, language=lang)
+        filter_lines.append(f"• {field['icon']} {get_setting_label(field_name, language=lang)}: {formatted}")
 
     header = (
         f"{translate(lang, '🔎 Arbitrage Scanner', '🔎 Сканер арбитража')}\n\n"
@@ -457,18 +501,9 @@ def format_status_text(preferences, language=None):
 
 def format_setting_prompt(field_name, preferences, language=None):
     lang = language or preferences.get("language")
-    label = _field_label(field_name, language=lang)
+    label = get_setting_label(field_name, language=lang)
     current_value = _format_field_value(field_name, preferences, language=lang)
-    description = {
-        "min_roi_percent": translate(lang, "Enter the minimum ROI percentage required to receive a signal.", "Введите минимальный ROI в процентах для получения сигнала."),
-        "min_capital_usd": translate(lang, "Enter the minimum volume in USD required for an alert.", "Введите минимальный объём в USD для получения алерта."),
-        "max_capital_usd": translate(lang, "Enter the maximum volume in USD allowed for an alert.", "Введите максимальный объём в USD для получения алерта."),
-        "max_polymarket_capital_usd": translate(lang, "Enter how much USD you have available on Polymarket.", "Введите, сколько USD у вас доступно на Polymarket."),
-        "max_predict_fun_capital_usd": translate(lang, "Enter how much USD you have available on Predict.Fun.", "Введите, сколько USD у вас доступно на Predict.Fun."),
-        "min_profit_usd": translate(lang, "Enter the minimum profit in USD required for an alert.", "Введите минимальную прибыль в USD для получения алерта."),
-        "min_days_to_close": translate(lang, "Enter the minimum number of days until market expiry.", "Введите минимальное количество дней до окончания рынка."),
-        "max_days_to_close": translate(lang, "Enter the maximum number of days until market expiry.", "Введите максимальное количество дней до окончания рынка."),
-    }[field_name]
+    description = get_setting_description(field_name, language=lang)
 
     return (
         f"{translate(lang, '⚙️ Arbitrage Scanner', '⚙️ Сканер арбитража')}\n\n"
@@ -622,17 +657,7 @@ def _format_roi_value(preferences, language=None):
 
 
 def _field_label(field_name, language=None):
-    ru_labels = {
-        "min_roi_percent": "Мин. ROI",
-        "min_capital_usd": "Мин. объём",
-        "max_capital_usd": "Макс. объём",
-        "max_polymarket_capital_usd": "Баланс Polymarket",
-        "max_predict_fun_capital_usd": "Баланс Predict.Fun",
-        "min_profit_usd": "Мин. прибыль",
-        "min_days_to_close": "Мин. срок рынка",
-        "max_days_to_close": "Макс. срок рынка",
-    }
-    return translate(language, FIELD_LABELS[field_name], ru_labels[field_name])
+    return get_setting_label(field_name, language=language)
 
 
 def _extract_platform_capitals(opportunity, market_a, market_b):

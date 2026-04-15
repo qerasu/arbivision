@@ -32,7 +32,7 @@ class OrderbookService:
         await self.predict_fun.close()
 
 
-    async def fetch_orderbooks_for_pairs(self, market_pairs, db_session, market_map=None):
+    async def fetch_orderbooks_for_pairs(self, market_pairs, db_session, market_map=None, bypass_cache=False):
         prepared_pairs = []
         for pair in market_pairs:
             poly_platform_id, pf_platform_id = await self._resolve_pair_platform_market_ids(
@@ -59,7 +59,10 @@ class OrderbookService:
         if not prepared_pairs:
             return []
 
-        pf_orderbooks, pf_drop_reasons = await self._fetch_predict_fun_orderbooks(prepared_pairs)
+        pf_orderbooks, pf_drop_reasons = await self._fetch_predict_fun_orderbooks(
+            prepared_pairs,
+            bypass_cache=bypass_cache,
+        )
         retained_pairs = []
         for item in prepared_pairs:
             pf_market_id = item["pf_market_id"]
@@ -73,7 +76,10 @@ class OrderbookService:
         if not prepared_pairs:
             return []
 
-        polymarket_books = await self._fetch_polymarket_books(prepared_pairs)
+        polymarket_books = await self._fetch_polymarket_books(
+            prepared_pairs,
+            bypass_cache=bypass_cache,
+        )
         results = []
 
         for item in prepared_pairs:
@@ -212,22 +218,24 @@ class OrderbookService:
         return market_a.get("yes"), market_a.get("no")
 
 
-    async def _fetch_predict_fun_orderbook_with_reason(self, market_id, semaphore=None):
-        cached_value = self._get_cache_value(_predict_fun_orderbook_cache, market_id)
-        if cached_value is _CACHE_MISS:
-            return None, "predict_fun_market_not_found"
-        if cached_value is not None:
-            return cached_value, None
-
-        if semaphore is None:
-            return await self._fetch_predict_fun_orderbook_uncached(market_id)
-
-        async with semaphore:
+    async def _fetch_predict_fun_orderbook_with_reason(self, market_id, semaphore=None, bypass_cache=False):
+        if not bypass_cache:
             cached_value = self._get_cache_value(_predict_fun_orderbook_cache, market_id)
             if cached_value is _CACHE_MISS:
                 return None, "predict_fun_market_not_found"
             if cached_value is not None:
                 return cached_value, None
+
+        if semaphore is None:
+            return await self._fetch_predict_fun_orderbook_uncached(market_id)
+
+        async with semaphore:
+            if not bypass_cache:
+                cached_value = self._get_cache_value(_predict_fun_orderbook_cache, market_id)
+                if cached_value is _CACHE_MISS:
+                    return None, "predict_fun_market_not_found"
+                if cached_value is not None:
+                    return cached_value, None
             return await self._fetch_predict_fun_orderbook_uncached(market_id)
 
 
@@ -255,7 +263,9 @@ class OrderbookService:
 
         self._set_cache_value(_predict_fun_orderbook_cache, market_id, payload)
         return payload, None
-    async def _fetch_predict_fun_orderbooks(self, prepared_pairs):
+
+
+    async def _fetch_predict_fun_orderbooks(self, prepared_pairs, bypass_cache=False):
         unique_market_ids = {
             item["pf_market_id"]
             for item in prepared_pairs
@@ -266,7 +276,11 @@ class OrderbookService:
 
         semaphore = asyncio.Semaphore(self._pair_fetch_concurrency)
         tasks = [
-            self._fetch_single_predict_fun_orderbook(market_id, semaphore)
+            self._fetch_single_predict_fun_orderbook(
+                market_id,
+                semaphore,
+                bypass_cache=bypass_cache,
+            )
             for market_id in sorted(unique_market_ids)
         ]
         results = await asyncio.gather(*tasks)
@@ -296,15 +310,16 @@ class OrderbookService:
         return orderbooks, drop_reasons
 
 
-    async def _fetch_single_predict_fun_orderbook(self, market_id, semaphore):
+    async def _fetch_single_predict_fun_orderbook(self, market_id, semaphore, bypass_cache=False):
         payload, drop_reason = await self._fetch_predict_fun_orderbook_with_reason(
             market_id,
             semaphore=semaphore,
+            bypass_cache=bypass_cache,
         )
         return market_id, payload, drop_reason
 
 
-    async def _fetch_polymarket_books(self, prepared_pairs):
+    async def _fetch_polymarket_books(self, prepared_pairs, bypass_cache=False):
         token_ids = set()
         for item in prepared_pairs:
             pair_mapping = getattr(item["pair"], "outcome_mapping_json", None) or {}
@@ -322,6 +337,9 @@ class OrderbookService:
         missing_token_ids = []
         books = {}
         for token_id in sorted(token_ids):
+            if bypass_cache:
+                missing_token_ids.append(token_id)
+                continue
             cached_value = self._get_cache_value(_polymarket_book_cache, token_id)
             if cached_value is _CACHE_MISS:
                 continue
