@@ -1,10 +1,10 @@
 import asyncio
+import json
 import time
 import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import field
-import json
 from datetime import datetime, timezone
 from datetime import timedelta
 from types import SimpleNamespace
@@ -163,12 +163,12 @@ def _extract_changed_market_ids_by_platform(sync_result):
             "predict_fun": set(),
         }
 
-    result = sync_result
-    changed_market_ids_by_platform = result.get("changed_market_ids_by_platform") or {}
+    changed_market_ids_by_platform = sync_result.get("changed_market_ids_by_platform") or {}
     return {
         "polymarket": set(changed_market_ids_by_platform.get("polymarket") or []),
         "predict_fun": set(changed_market_ids_by_platform.get("predict_fun") or []),
     }
+
 
 def _has_changed_market_ids(changed_market_ids_by_platform):
     return any(changed_market_ids_by_platform.values())
@@ -982,10 +982,6 @@ async def _update_empty_counts(checked_pairs, pairs_with_data, state):
         )
         for key in sorted_keys[:len(sorted_keys) // 2]:
             state.pair_empty_counts.pop(key, None)
-
-
-def _candidate_markets_for_poly(poly_signature, matcher, pf_index):
-    return _candidate_markets_for_signature(poly_signature, matcher, pf_index)
 
 
 def _candidate_markets_for_signature(source_signature, matcher, candidate_index):

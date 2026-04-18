@@ -568,15 +568,6 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.tg_bot.handlers.AsyncSessionLocal",
             return_value=FakeSessionContext(),
         ), patch(
-            "arbitrage_bot.tg_bot.handlers.get_ui_state",
-            new=AsyncMock(
-                return_value={
-                    "mode": "awaiting_value",
-                    "field_name": "min_roi_percent",
-                    "prompt_message_id": 77,
-                }
-            ),
-        ), patch(
             "arbitrage_bot.tg_bot.handlers.set_user_preference",
             new=AsyncMock(
                 return_value={
@@ -591,7 +582,16 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.tg_bot.handlers.clear_ui_state",
             new=AsyncMock(),
         ):
-            await _apply_setting_update(message, "min_roi_percent", 1.5)
+            await _apply_setting_update(
+                message,
+                "min_roi_percent",
+                1.5,
+                {
+                    "mode": "awaiting_value",
+                    "field_name": "min_roi_percent",
+                    "prompt_message_id": 77,
+                },
+            )
 
         message.bot.edit_message_text.assert_awaited_once()
         message.answer.assert_not_awaited()
@@ -613,15 +613,6 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.tg_bot.handlers.AsyncSessionLocal",
             return_value=FakeSessionContext(),
         ), patch(
-            "arbitrage_bot.tg_bot.handlers.get_ui_state",
-            new=AsyncMock(
-                return_value={
-                    "mode": "awaiting_value",
-                    "field_name": "min_roi_percent",
-                    "prompt_message_id": 77,
-                }
-            ),
-        ), patch(
             "arbitrage_bot.tg_bot.handlers.set_user_preference",
             new=AsyncMock(
                 return_value={
@@ -636,7 +627,16 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.tg_bot.handlers.clear_ui_state",
             new=AsyncMock(),
         ):
-            await _apply_setting_update(message, "min_roi_percent", 1.5)
+            await _apply_setting_update(
+                message,
+                "min_roi_percent",
+                1.5,
+                {
+                    "mode": "awaiting_value",
+                    "field_name": "min_roi_percent",
+                    "prompt_message_id": 77,
+                },
+            )
 
         message.bot.edit_message_text.assert_awaited_once()
         message.answer.assert_awaited_once()

@@ -36,14 +36,23 @@ arbitrage_bot/
   models/          SQLAlchemy ORM-модели
   services/        ingestion, matcher, orderbook, calculator, fanout
   tg_bot/          Telegram UI, обработчики и настройки пользователей
+    bot.py         доставка алертов и форматирование сообщений
+    handlers.py    обработчики команд и callback-ов
+    localization.py функция translate(language, en, ru)
+    preferences.py  CRUD пользовательских настроек и UI-state
   main.py          FastAPI app c lifespan-рантаймом
   api_app.py       FastAPI app только с API, без фоновых рантаймов
   runtime.py       общий запуск worker / telegram
   worker.py        основной цикл обработки рынков
   run_worker.py    запуск только worker
   run_telegram.py  запуск только telegram polling
-utilities/start.py локальный dev-запуск проекта
-utilities/stop.py  безопасная остановка процесса и контейнеров
+utilities/
+  start.py         локальный dev-запуск проекта
+  stop.py          безопасная остановка процесса и контейнеров
+  run_tests.py     запуск тестов
+  backup.py        бэкап данных
+  bootstrap.py     начальная настройка окружения
+  auto_update.py   автообновление из git
 ```
 
 
@@ -275,3 +284,4 @@ python3 -m unittest tests.test_worker_pairs tests.test_alert_manager tests.test_
 - Redis используется для dedupe и служебных кешей
 - при недоступном Redis часть dedupe/cache логики деградирует мягко, без обязательного падения всего сервиса
 - язык пользователя хранится в `user_preferences.language` и применяется ко всем текстам и кнопкам бота
+- `database_url` экранирует user/password через `urllib.parse.quote_plus`, поэтому спецсимволы в пароле безопасны

@@ -10,7 +10,7 @@ from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot import worker as worker_module
-from arbitrage_bot.worker import WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_poly, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
+from arbitrage_bot.worker import WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_signature, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
 
 
 class WorkerPairLifecycleTests(unittest.TestCase):
@@ -152,7 +152,7 @@ class WorkerPairLifecycleTests(unittest.TestCase):
             self.assertTrue(_should_run_db_cleanup(310.0, self.state))
 
 
-    def test_candidate_markets_for_poly_limits_ranked_candidates(self):
+    def test_candidate_markets_for_signature_limits_ranked_candidates(self):
         matcher = MatcherService()
         matcher.max_ranked_candidates = 2
         poly_market = SimpleNamespace(
@@ -171,12 +171,12 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         pf_index = matcher.build_candidate_index(pf_markets)
         poly_signature = matcher.build_market_signature(poly_market)
 
-        candidates = _candidate_markets_for_poly(poly_signature, matcher, pf_index)
+        candidates = _candidate_markets_for_signature(poly_signature, matcher, pf_index)
 
         self.assertEqual(len(candidates), 2)
 
 
-    def test_candidate_markets_for_poly_uses_coarse_ranking_signals(self):
+    def test_candidate_markets_for_signature_uses_coarse_ranking_signals(self):
         matcher = MatcherService()
         poly_market = SimpleNamespace(
             id=1,
@@ -193,7 +193,7 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         pf_index = matcher.build_candidate_index(pf_markets)
         poly_signature = matcher.build_market_signature(poly_market)
 
-        candidates = _candidate_markets_for_poly(poly_signature, matcher, pf_index)
+        candidates = _candidate_markets_for_signature(poly_signature, matcher, pf_index)
 
         self.assertEqual(candidates[0]["market"].id, 10)
 

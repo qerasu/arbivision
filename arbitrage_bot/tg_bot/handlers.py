@@ -42,14 +42,13 @@ async def cmd_start(message):
         )
         language = await get_user_language(session, message.chat.id)
 
-    if language is None:
-        await message.answer(
-            "🌐 Please choose your language:",
-            reply_markup=_build_language_keyboard(),
-        )
-        return
+        if language is None:
+            await message.answer(
+                "🌐 Please choose your language:",
+                reply_markup=_build_language_keyboard(),
+            )
+            return
 
-    async with AsyncSessionLocal() as session:
         preferences = await get_user_preferences(session, message.chat.id)
         await clear_ui_state(session, message.chat.id)
 
@@ -200,7 +199,7 @@ async def on_plain_text_setting(message):
                 await message.answer(str(exc))
                 return
 
-            await _apply_setting_update(message, field_name, value)
+            await _apply_setting_update(message, field_name, value, ui_state)
             return
 
         if not await _has_started_bot(session, message.chat.id):
@@ -217,9 +216,8 @@ async def on_plain_text_setting(message):
     )
 
 
-async def _apply_setting_update(message, field_name, value):
+async def _apply_setting_update(message, field_name, value, ui_state):
     async with AsyncSessionLocal() as session:
-        ui_state = await get_ui_state(session, message.chat.id)
         preferences = await set_user_preference(session, message.chat.id, field_name, value)
         await clear_ui_state(session, message.chat.id)
 
@@ -229,7 +227,7 @@ async def _apply_setting_update(message, field_name, value):
         prompt_message_id = ui_state.get("prompt_message_id")
 
     text = (
-        f"{_settings_success_label(field_name, language=lang)} "
+        f"{get_setting_label(field_name, language=lang)} "
         f"{translate(lang, 'updated to', 'обновлён до')} "
         f"{_format_success_value(field_name, value, language=lang)}.\n\n"
         f"{format_preferences_text(preferences)}"
@@ -450,10 +448,6 @@ def _format_success_value(field_name, value, language=None):
     return str(value)
 
 
-def _settings_success_label(field_name, language=None):
-    return get_setting_label(field_name, language=language)
-
-
 def _is_admin_chat(chat_id):
     if chat_id is None:
         return False
@@ -587,18 +581,3 @@ def _format_admin_stats_text(stats):
             lines.append(f"• {reason}: {count}")
 
     return "\n".join(lines)
-
-
-def _normalize_alert_reason(error_message):
-    text = str(error_message or "").strip()
-    if not text:
-        return "unknown"
-    if text == "opportunity is no longer available":
-        return "cancelled_after_revalidation"
-    if text == "filtered by updated preferences":
-        return "cancelled_by_updated_preferences"
-    if text.startswith("filtered by updated preferences: "):
-        return f"cancelled_by_updated_preferences:{text.removeprefix('filtered by updated preferences: ').strip()}"
-    if text == "delivery deduped after restart":
-        return "delivery_deduped_after_restart"
-    return text

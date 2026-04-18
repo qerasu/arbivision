@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from arbitrage_bot.core.env_loader import load_env_file
 
@@ -28,7 +29,7 @@ def _get_list_setting(name, default):
     raw = os.getenv(name, "")
 
     if not raw:
-        return default
+        return list(default)
         
     return [x.strip() for x in raw.split(",") if x.strip()]
 
@@ -79,7 +80,7 @@ class Settings:
 
     @property
     def database_url(self):
-        return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        return f"postgresql+asyncpg://{quote_plus(self.POSTGRES_USER)}:{quote_plus(self.POSTGRES_PASSWORD)}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
 
     @property
