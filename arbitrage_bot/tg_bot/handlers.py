@@ -510,6 +510,8 @@ async def _load_admin_stats(db_session):
             runtime_alert_drop_reasons["cancelled_after_revalidation"] = int(value)
         elif key == "telegram.alert_send_failed":
             runtime_alert_drop_reasons["send_failed"] = int(value)
+        elif key == "telegram.alert_repeat_suppressed":
+            runtime_alert_drop_reasons["repeat_suppressed"] = int(value)
 
     runtime_sent = int(runtime_metrics.get("telegram.alert_sent", 0))
     runtime_dropped = sum(runtime_alert_drop_reasons.values())

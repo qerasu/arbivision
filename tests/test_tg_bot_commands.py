@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime
 from datetime import timezone
@@ -7,11 +8,14 @@ from unittest.mock import patch
 
 from aiogram.exceptions import TelegramBadRequest
 from arbitrage_bot.core.config import settings
+from arbitrage_bot.core.observability import reset_counters
+from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.tg_bot.bot import _apply_calc_result_to_opportunity
 from arbitrage_bot.tg_bot.bot import _build_bot_commands
 from arbitrage_bot.tg_bot.bot import _build_market_url
 from arbitrage_bot.tg_bot.bot import _format_alert_message
 from arbitrage_bot.tg_bot.bot import _is_missing_table_error
+from arbitrage_bot.tg_bot.bot import send_alert_immediately
 from arbitrage_bot.tg_bot.handlers import _format_inactive_chat_text
 from arbitrage_bot.tg_bot.handlers import _format_unhandled_message_text
 from arbitrage_bot.tg_bot.handlers import _build_home_keyboard
@@ -48,7 +52,7 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertEqual(keyboard.inline_keyboard[2][1].text, "→ Predict.Fun balance")
         self.assertEqual(keyboard.inline_keyboard[3][0].text, "→ Min market end")
         self.assertEqual(keyboard.inline_keyboard[3][1].text, "→ Max market end")
-        self.assertEqual(keyboard.inline_keyboard[4][0].text, "Reset all")
+        self.assertEqual(keyboard.inline_keyboard[4][0].text, "Disable all")
         self.assertEqual(keyboard.inline_keyboard[4][1].text, "← Back")
 
 
@@ -61,8 +65,8 @@ class TelegramBotCommandsTests(unittest.TestCase):
         finally:
             settings.TELEGRAM_SYSTEM_ERROR_CHAT_IDS = original_system_error_chat_ids
 
-        self.assertEqual(admin_keyboard.inline_keyboard[4][0].text, "Reset all")
-        self.assertEqual(user_keyboard.inline_keyboard[4][0].text, "Reset all")
+        self.assertEqual(admin_keyboard.inline_keyboard[4][0].text, "Disable all")
+        self.assertEqual(user_keyboard.inline_keyboard[4][0].text, "Disable all")
 
 
     def test_build_home_keyboard_shows_resume_when_muted(self):
@@ -347,13 +351,13 @@ class TelegramBotCommandsTests(unittest.TestCase):
     def test_format_unhandled_message_text_explains_button_flow(self):
         text = _format_unhandled_message_text(
             {
-                "min_roi_percent": 5.0,
+                "min_roi_percent": 2.0,
                 "min_capital_usd": 10.0,
-                "max_capital_usd": 150.0,
+                "max_capital_usd": 50.0,
                 "max_polymarket_capital_usd": None,
                 "max_predict_fun_capital_usd": None,
                 "min_profit_usd": None,
-                "max_days_to_close": 5,
+                "max_days_to_close": 15,
                 "muted": False,
             }
         )
@@ -397,6 +401,39 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("Объём", text)
         self.assertIn("Завершится", text)
         self.assertIn("Открыть рынки", text)
+
+
+    def test_format_alert_message_marks_repeat_update(self):
+        opportunity = SimpleNamespace(
+            direction="A_yes_B_no",
+            net_profit=7.0,
+            net_roi=0.14,
+            capital_required=43.0,
+            shares=50.0,
+            avg_price_leg_1=0.36,
+            avg_price_leg_2=0.50,
+            calculation_json={},
+        )
+        pair = SimpleNamespace(match_score=1.0)
+        market_a = SimpleNamespace(
+            platform="polymarket",
+            title="Will Manchester United FC win on 2026-03-20?",
+            slug="manchester-united-win",
+            raw_payload_json={"endDate": "2026-03-28T00:00:00+00:00"},
+        )
+        market_b = SimpleNamespace(
+            platform="predict_fun",
+            title="Manchester United FC",
+            slug="",
+            platform_market_id="pf-123",
+            raw_payload_json={"resolveDate": "2026-03-27T00:00:00+00:00"},
+        )
+
+        with patch("arbitrage_bot.tg_bot.bot.datetime") as datetime_mock:
+            datetime_mock.now.return_value = datetime(2026, 3, 21, tzinfo=timezone.utc)
+            text = _format_alert_message(opportunity, pair, market_a, market_b, is_repeat=True)
+
+        self.assertIn("Update: market state improved since your previous alert.", text)
 
 
     def test_apply_calc_result_to_opportunity_updates_runtime_values(self):
@@ -500,6 +537,7 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
                 "fanout.drop.max_capital": 2,
                 "telegram.alert_cancelled_preferences": 1,
                 "telegram.alert_send_failed": 3,
+                "telegram.alert_repeat_suppressed": 4,
             },
         ):
             stats = await _load_admin_stats(session)
@@ -509,6 +547,7 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
             {
                 "cancelled_by_updated_preferences": 1,
                 "send_failed": 3,
+                "repeat_suppressed": 4,
             },
         )
         self.assertEqual(
@@ -622,13 +661,13 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.tg_bot.handlers.get_user_preferences",
             new=AsyncMock(
                 return_value={
-                    "min_roi_percent": 5.0,
+                    "min_roi_percent": 2.0,
                     "min_capital_usd": 10.0,
-                    "max_capital_usd": 150.0,
+                    "max_capital_usd": 50.0,
                     "max_polymarket_capital_usd": None,
                     "max_predict_fun_capital_usd": None,
                     "min_profit_usd": None,
-                    "max_days_to_close": 5,
+                    "max_days_to_close": 15,
                     "muted": False,
                 }
             ),
@@ -669,6 +708,207 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
 
         message.answer.assert_awaited_once_with(_format_inactive_chat_text(language="en"))
         preferences_mock.assert_not_awaited()
+
+
+class FakeTelegramAlertRedis:
+    def __init__(self, initial_data=None):
+        self.data = dict(initial_data or {})
+        self.set_calls = []
+        self.setex_calls = []
+
+
+    async def get(self, key):
+        return self.data.get(key)
+
+
+    async def set(self, key, value, ex=None):
+        self.data[key] = value
+        self.set_calls.append((key, value, ex))
+
+
+    async def setex(self, key, ttl, value):
+        self.data[key] = value
+        self.setex_calls.append((key, ttl, value))
+
+
+class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        reset_counters()
+
+
+    def _build_pair(self):
+        return SimpleNamespace(
+            pair_hash="pair-1",
+            outcome_mapping_json={
+                "market_a": {"yes_label": "YES", "no_label": "NO"},
+                "market_b": {"yes_label": "YES", "no_label": "NO"},
+            },
+        )
+
+
+    def _build_markets(self):
+        return (
+            SimpleNamespace(
+                platform="polymarket",
+                title="Will Manchester United FC win on 2026-03-20?",
+                slug="manchester-united-win",
+                raw_payload_json={"endDate": "2026-03-28T00:00:00+00:00"},
+            ),
+            SimpleNamespace(
+                platform="predict_fun",
+                title="Manchester United FC",
+                slug="",
+                platform_market_id="pf-123",
+                raw_payload_json={"resolveDate": "2026-03-27T00:00:00+00:00"},
+            ),
+        )
+
+
+    def _build_runtime_opportunity(self, *, net_profit=7.0, net_roi=0.14, pair_hash="pair-1"):
+        return SimpleNamespace(
+            pair_hash=pair_hash,
+            direction="A_yes_B_no",
+            net_profit=net_profit,
+            net_roi=net_roi,
+            capital_required=43.0,
+            shares=50.0,
+            avg_price_leg_1=0.36,
+            avg_price_leg_2=0.50,
+            gross_profit=7.0,
+            gross_roi=0.14,
+            calculation_json={},
+        )
+
+
+    def _build_alert(self, *, message_hash):
+        return SimpleNamespace(
+            telegram_chat_id="1001",
+            message_hash=message_hash,
+            attempt_count=0,
+            status="queued",
+            next_retry_at=None,
+            sent_at=None,
+            error_message=None,
+        )
+
+
+    async def test_send_alert_immediately_marks_first_delivery_as_initial(self):
+        redis = FakeTelegramAlertRedis()
+        bot = SimpleNamespace(send_message=AsyncMock())
+        alert = self._build_alert(message_hash="hash-1")
+        opportunity = self._build_runtime_opportunity()
+        pair = self._build_pair()
+        market_a, market_b = self._build_markets()
+
+        with patch("arbitrage_bot.tg_bot.bot._get_delivery_bot", return_value=bot), patch(
+            "arbitrage_bot.tg_bot.bot.get_redis",
+            return_value=redis,
+        ):
+            sent = await send_alert_immediately(
+                alert,
+                opportunity,
+                pair,
+                market_a,
+                market_b,
+                preferences={},
+                directions={},
+                calculator=SimpleNamespace(),
+                prepared_opportunity=opportunity,
+            )
+
+        self.assertTrue(sent)
+        self.assertEqual(alert.status, "sent")
+        text = bot.send_message.await_args.kwargs["text"]
+        self.assertNotIn("Update: market state improved since your previous alert.", text)
+        self.assertEqual(
+            json.loads(redis.data["telegram-alert-event:1001:pair-1:A_yes_B_no"])["message_hash"],
+            "hash-1",
+        )
+
+
+    async def test_send_alert_immediately_marks_material_repeat_as_update(self):
+        redis = FakeTelegramAlertRedis(
+            {
+                "telegram-alert-event:1001:pair-1:A_yes_B_no": json.dumps(
+                    {
+                        "message_hash": "hash-1",
+                        "net_profit": 7.0,
+                        "net_roi": 0.14,
+                        "shares": 50.0,
+                    }
+                )
+            }
+        )
+        bot = SimpleNamespace(send_message=AsyncMock())
+        alert = self._build_alert(message_hash="hash-2")
+        opportunity = self._build_runtime_opportunity(net_profit=11.5, net_roi=0.151)
+        pair = self._build_pair()
+        market_a, market_b = self._build_markets()
+
+        with patch("arbitrage_bot.tg_bot.bot._get_delivery_bot", return_value=bot), patch(
+            "arbitrage_bot.tg_bot.bot.get_redis",
+            return_value=redis,
+        ):
+            sent = await send_alert_immediately(
+                alert,
+                opportunity,
+                pair,
+                market_a,
+                market_b,
+                preferences={},
+                directions={},
+                calculator=SimpleNamespace(),
+                prepared_opportunity=opportunity,
+            )
+
+        self.assertTrue(sent)
+        text = bot.send_message.await_args.kwargs["text"]
+        self.assertIn("Update: market state improved since your previous alert.", text)
+        counters = snapshot_counters()
+        self.assertEqual(counters["telegram.alert_repeat_sent"], 1)
+
+
+    async def test_send_alert_immediately_suppresses_repeat_without_material_improvement(self):
+        redis = FakeTelegramAlertRedis(
+            {
+                "telegram-alert-event:1001:pair-1:A_yes_B_no": json.dumps(
+                    {
+                        "message_hash": "hash-1",
+                        "net_profit": 7.0,
+                        "net_roi": 0.14,
+                        "shares": 50.0,
+                    }
+                )
+            }
+        )
+        bot = SimpleNamespace(send_message=AsyncMock())
+        alert = self._build_alert(message_hash="hash-2")
+        opportunity = self._build_runtime_opportunity(net_profit=8.0, net_roi=0.141)
+        pair = self._build_pair()
+        market_a, market_b = self._build_markets()
+
+        with patch("arbitrage_bot.tg_bot.bot._get_delivery_bot", return_value=bot), patch(
+            "arbitrage_bot.tg_bot.bot.get_redis",
+            return_value=redis,
+        ):
+            sent = await send_alert_immediately(
+                alert,
+                opportunity,
+                pair,
+                market_a,
+                market_b,
+                preferences={},
+                directions={},
+                calculator=SimpleNamespace(),
+                prepared_opportunity=opportunity,
+            )
+
+        self.assertFalse(sent)
+        self.assertEqual(alert.status, "suppressed")
+        self.assertEqual(alert.error_message, "repeat suppressed: market state change below resend threshold")
+        bot.send_message.assert_not_awaited()
+        counters = snapshot_counters()
+        self.assertEqual(counters["telegram.alert_repeat_suppressed"], 1)
 
 
 class TelegramBotCallbackTests(unittest.IsolatedAsyncioTestCase):

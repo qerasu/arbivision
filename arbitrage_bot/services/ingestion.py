@@ -342,12 +342,14 @@ class IngestionService:
             platform = mapped_items[0]["platform"] if mapped_items else self._source_platform_name(source_name)
             is_partial = getattr(adapter, "last_fetch_partial", False)
             is_complete = getattr(adapter, "last_fetch_complete", True)
-            mapped_items, duplicate_count = self._dedupe_market_items(mapped_items)
+            mapped_items, duplicate_count, duplicate_metadata = self._dedupe_market_items(mapped_items)
             if duplicate_count:
                 log.info(
                     "duplicate markets removed before upsert",
                     source=source_name,
                     duplicate_rows=duplicate_count,
+                    duplicate_distinct_markets=duplicate_metadata["distinct_market_ids"],
+                    sample_market_ids=duplicate_metadata["sample_market_ids"],
                 )
                 await record_duplicate_markets(source_name, duplicate_count)
             else:
@@ -406,21 +408,29 @@ class IngestionService:
     def _dedupe_market_items(self, items):
         deduped = {}
         duplicate_count = 0
+        duplicate_market_ids = set()
+        sample_market_ids = []
 
         for item in items:
             key = (item["platform"], item["platform_market_id"])
             if key in deduped:
                 duplicate_count += 1
+                duplicate_market_ids.add(item["platform_market_id"])
+                if len(sample_market_ids) < 5:
+                    sample_market_ids.append(item["platform_market_id"])
             deduped[key] = item
 
-        return list(deduped.values()), duplicate_count
+        return list(deduped.values()), duplicate_count, {
+            "distinct_market_ids": len(duplicate_market_ids),
+            "sample_market_ids": sample_market_ids,
+        }
 
 
     async def _upsert_markets(self, items):
         if not items:
             return set()
 
-        items, _ = self._dedupe_market_items(items)
+        items, _, _ = self._dedupe_market_items(items)
 
         if self._supports_postgresql_upsert():
             return await self._upsert_markets_postgresql(items)

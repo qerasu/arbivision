@@ -18,7 +18,7 @@ from arbitrage_bot.tg_bot.preferences import format_preferences_text
 
 class TelegramPreferencesTests(unittest.TestCase):
     def test_filter_reason_returns_none_when_opportunity_passes_all_filters(self):
-        opportunity = SimpleNamespace(net_roi=0.12, capital_required=100.0)
+        opportunity = SimpleNamespace(net_roi=0.12, capital_required=40.0)
         now = datetime(2026, 3, 21, tzinfo=timezone.utc)
         market = SimpleNamespace(raw_payload_json={"endDate": (now + timedelta(days=3)).isoformat()})
 
@@ -36,14 +36,14 @@ class TelegramPreferencesTests(unittest.TestCase):
     def test_default_preferences_use_expected_values(self):
         preferences = default_preferences()
 
-        self.assertEqual(preferences["min_roi_percent"], 5)
+        self.assertEqual(preferences["min_roi_percent"], 2)
         self.assertEqual(preferences["min_capital_usd"], 10)
-        self.assertEqual(preferences["max_capital_usd"], 150)
+        self.assertEqual(preferences["max_capital_usd"], 50)
         self.assertIsNone(preferences["max_polymarket_capital_usd"])
         self.assertIsNone(preferences["max_predict_fun_capital_usd"])
         self.assertIsNone(preferences["min_profit_usd"])
         self.assertIsNone(preferences["min_days_to_close"])
-        self.assertEqual(preferences["max_days_to_close"], 5)
+        self.assertEqual(preferences["max_days_to_close"], 15)
 
 
     def test_filter_reason_blocks_by_min_roi(self):
@@ -227,9 +227,9 @@ class TelegramPreferencesTests(unittest.TestCase):
         self.assertIn("Your alert settings", text)
         self.assertIn("Min ROI\nCurrent: 2.50%", text)
         self.assertIn("Min volume\nCurrent: $50", text)
-        self.assertIn("Volume\nCurrent: $500", text)
-        self.assertIn("Polymarket volume limit\nCurrent: $220", text)
-        self.assertIn("Predict.Fun volume limit\nCurrent: $280", text)
+        self.assertIn("Max volume\nCurrent: $500", text)
+        self.assertIn("Polymarket balance\nCurrent: $220", text)
+        self.assertIn("Predict.Fun balance\nCurrent: $280", text)
         self.assertIn("Min profit\nCurrent: $10", text)
         self.assertIn("Min market end\nCurrent: 2 days", text)
         self.assertIn("Max market end\nCurrent: 7 days", text)
@@ -250,10 +250,10 @@ class TelegramPreferencesTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("Volume\nCurrent: $140.50", text)
+        self.assertIn("Max volume\nCurrent: $140.50", text)
         self.assertIn("Min volume\nCurrent: $40.25", text)
-        self.assertIn("Polymarket volume limit\nCurrent: $60.75", text)
-        self.assertIn("Predict.Fun volume limit\nCurrent: $79.75", text)
+        self.assertIn("Polymarket balance\nCurrent: $60.75", text)
+        self.assertIn("Predict.Fun balance\nCurrent: $79.75", text)
         self.assertIn("Min profit\nCurrent: $7.50", text)
 
 
@@ -280,7 +280,7 @@ class TelegramPreferencesTests(unittest.TestCase):
     def test_effective_min_roi_returns_default(self):
         value = effective_min_roi(default_preferences())
 
-        self.assertEqual(value, 5.0)
+        self.assertEqual(value, 2.0)
 
 
     def test_effective_min_roi_returns_none_when_filters_are_reset(self):

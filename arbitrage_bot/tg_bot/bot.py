@@ -1,5 +1,6 @@
 import asyncio
 import html
+import json
 import math
 from urllib.parse import parse_qsl
 from urllib.parse import urlencode
@@ -29,6 +30,7 @@ log = get_logger("tg_bot")
 _shared_dp = None
 _shared_delivery_bot = None
 _DELIVERY_DEDUPE_TTL_SECONDS = max(86400, int(settings.ALERTS_DEDUPE_TTL_SECONDS))
+_EVENT_REPEAT_TTL_SECONDS = max(300, int(settings.ALERTS_DEDUPE_TTL_SECONDS))
 
 
 def setup_bot():
@@ -40,7 +42,7 @@ def setup_bot():
         return None, None
 
     bot = Bot(token=token)
-    
+
     if _shared_dp is None:
         _shared_dp = Dispatcher()
         _shared_dp.include_router(handlers.router)
@@ -69,7 +71,7 @@ async def _configure_bot_ui(bot):
     await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
 
 
-def _format_alert_message(opportunity, pair, market_a, market_b, language=None):
+def _format_alert_message(opportunity, pair, market_a, market_b, language=None, is_repeat=False):
     direction = _describe_direction(opportunity.direction, pair)
     title = html.escape(market_a.title or market_b.title or "ARBITRAGE OPPORTUNITY")
     profit = _format_money(opportunity.net_profit)
@@ -83,9 +85,13 @@ def _format_alert_message(opportunity, pair, market_a, market_b, language=None):
     volumes_ratio = _format_volumes_ratio(opportunity.avg_price_leg_1, opportunity.avg_price_leg_2, language=language)
     expires = _format_expiry_line(market_a, market_b, language=language)
     links = _format_market_links(market_a, market_b)
+    repeat_notice = ""
+    if is_repeat:
+        repeat_notice = f"{_format_repeat_alert_notice(language)}\n\n"
 
     return (
         f"🚨 {title}\n\n"
+        f"{repeat_notice}"
         f"💰 {translate(language, 'Profit', 'Прибыль')}: {profit}\n"
         f"📈 {translate(language, 'Spread', 'Спред')}: {spread}\n"
         f"💵 {translate(language, 'Volume', 'Объём')}: {capital}\n"
@@ -95,6 +101,14 @@ def _format_alert_message(opportunity, pair, market_a, market_b, language=None):
         f"• {direction['leg_2_label']} {translate(language, 'on', 'на')} Predict.Fun: {leg_2_price} = {leg_2_cost}\n"
         f"📊 {translate(language, 'Volumes ratio', 'Соотношение объёмов')}: {volumes_ratio}x\n\n"
         f"🔗 {translate(language, 'Open markets', 'Открыть рынки')}:\n{links}"
+    )
+
+
+def _format_repeat_alert_notice(language=None):
+    return translate(
+        language,
+        "🔄 Update: market state improved since your previous alert.",
+        "🔄 Обновление: рыночная ситуация улучшилась с прошлого алерта.",
     )
 
 
@@ -285,11 +299,11 @@ def _is_missing_table_error(exc):
         return True
 
     details = format_error_details(exc).lower()
-    
+
     return "does not exist" in details and "relation" in details
 
 
-async def _send_alert(bot, alert, opportunity, pair, market_a, market_b_row, preferences=None):
+async def _send_alert(bot, alert, opportunity, pair, market_a, market_b_row, preferences=None, is_repeat=False):
     if await _is_duplicate_delivery(alert):
         alert.status = "sent"
         alert.next_retry_at = None
@@ -301,7 +315,7 @@ async def _send_alert(bot, alert, opportunity, pair, market_a, market_b_row, pre
 
     await bot.send_message(
         chat_id=alert.telegram_chat_id,
-        text=_format_alert_message(opportunity, pair, market_a, market_b_row, language=language),
+        text=_format_alert_message(opportunity, pair, market_a, market_b_row, language=language, is_repeat=is_repeat),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
@@ -353,6 +367,97 @@ async def _store_delivery_marker(alert):
         )
     except Exception:
         pass
+
+
+def _alert_event_state_key(alert, opportunity, pair=None):
+    chat_id = str(getattr(alert, "telegram_chat_id", "") or "")
+    pair_hash = str(getattr(opportunity, "pair_hash", "") or getattr(pair, "pair_hash", "") or "")
+    direction = str(getattr(opportunity, "direction", "") or "")
+    if not chat_id or not pair_hash or not direction:
+        return None
+
+    return f"telegram-alert-event:{chat_id}:{pair_hash}:{direction}"
+
+
+def _build_alert_event_state(alert, opportunity):
+    return {
+        "message_hash": str(getattr(alert, "message_hash", "") or ""),
+        "net_profit": float(getattr(opportunity, "net_profit", 0.0) or 0.0),
+        "net_roi": float(getattr(opportunity, "net_roi", 0.0) or 0.0),
+        "shares": float(getattr(opportunity, "shares", 0.0) or 0.0),
+    }
+
+
+def _parse_alert_event_state(raw_value):
+    try:
+        parsed = json.loads(raw_value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    try:
+        return {
+            "message_hash": str(parsed.get("message_hash", "") or ""),
+            "net_profit": float(parsed["net_profit"]),
+            "net_roi": float(parsed["net_roi"]),
+            "shares": float(parsed.get("shares", 0.0) or 0.0),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+async def _load_alert_event_state(alert, opportunity, pair=None):
+    state_key = _alert_event_state_key(alert, opportunity, pair=pair)
+    if state_key is None:
+        return None
+
+    try:
+        redis = await get_redis()
+        if redis is None:
+            return None
+        raw_value = await redis.get(state_key)
+    except Exception:
+        return None
+
+    if not raw_value:
+        return None
+
+    return _parse_alert_event_state(raw_value)
+
+
+async def _store_alert_event_state(alert, event_opportunity, sent_opportunity, pair=None):
+    state_key = _alert_event_state_key(alert, event_opportunity, pair=pair)
+    if state_key is None:
+        return
+
+    try:
+        redis = await get_redis()
+        if redis is None:
+            return
+        await redis.setex(
+            state_key,
+            _EVENT_REPEAT_TTL_SECONDS,
+            json.dumps(_build_alert_event_state(alert, sent_opportunity)),
+        )
+    except Exception:
+        pass
+
+
+def _should_send_repeat_alert(last_state, alert, opportunity):
+    current_message_hash = str(getattr(alert, "message_hash", "") or "")
+    if current_message_hash and current_message_hash == last_state["message_hash"]:
+        return False, "repeat suppressed: already notified for current market state"
+
+    profit_diff = float(getattr(opportunity, "net_profit", 0.0) or 0.0) - last_state["net_profit"]
+    roi_diff = float(getattr(opportunity, "net_roi", 0.0) or 0.0) - last_state["net_roi"]
+    min_profit_delta = float(settings.ALERTS_DELTA_PROFIT_THRESHOLD_USD)
+    min_roi_delta = float(settings.ALERTS_DELTA_ROI_THRESHOLD_PERCENT) / 100.0
+    if profit_diff >= min_profit_delta or roi_diff >= min_roi_delta:
+        return True, None
+
+    return False, "repeat suppressed: market state change below resend threshold"
 
 
 def _clone_opportunity(opportunity):
@@ -442,8 +547,31 @@ async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, p
             incr_counter("telegram.alert_cancelled_preferences")
             return False
 
+    last_state = await _load_alert_event_state(alert, opportunity, pair=pair)
+    is_repeat = last_state is not None
+    if last_state is not None:
+        should_send_repeat, suppress_reason = _should_send_repeat_alert(last_state, alert, prepared_opportunity)
+        if not should_send_repeat:
+            alert.status = "suppressed"
+            alert.next_retry_at = None
+            alert.error_message = suppress_reason
+            incr_counter("telegram.alert_repeat_suppressed")
+            return False
+
     try:
-        await _send_alert(bot, alert, prepared_opportunity, pair, market_a, market_b, preferences=current_preferences)
+        await _send_alert(
+            bot,
+            alert,
+            prepared_opportunity,
+            pair,
+            market_a,
+            market_b,
+            preferences=current_preferences,
+            is_repeat=is_repeat,
+        )
+        await _store_alert_event_state(alert, opportunity, prepared_opportunity, pair=pair)
+        if is_repeat:
+            incr_counter("telegram.alert_repeat_sent")
         return True
     except Exception as exc:
         alert.attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
@@ -465,9 +593,6 @@ def _apply_calc_result_to_opportunity(opportunity, calc_result):
     opportunity.gross_roi = calc_result["gross_roi"]
     opportunity.net_roi = calc_result["net_roi"]
     opportunity.calculation_json = calc_result
-
-
-
 
 def _build_runtime_preferences(preferences):
     values = default_preferences()

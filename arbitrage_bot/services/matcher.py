@@ -90,6 +90,21 @@ class MatcherService:
         poly_signature = poly_signature or self.build_market_signature(poly_market)
         pf_signature = pf_signature or self.build_market_signature(pf_market)
 
+        if (
+            poly_signature["event_granularity"] != pf_signature["event_granularity"]
+            and (
+                poly_signature["event_granularity"] != "default"
+                or pf_signature["event_granularity"] != "default"
+            )
+        ):
+            return self._build_rejection(
+                poly_market,
+                pf_market,
+                poly_signature,
+                pf_signature,
+                "event_granularity_mismatch",
+            )
+
         if poly_signature["variant"] != pf_signature["variant"]:
             return self._build_rejection(
                 poly_market,
@@ -678,10 +693,12 @@ class MatcherService:
             getattr(market, "title", "") or "",
             getattr(market, "slug", "") or "",
             getattr(market, "category", "") or "",
+            getattr(market, "description", "") or "",
             raw_payload.get("title") or "",
             raw_payload.get("name") or "",
             raw_payload.get("groupItemTitle") or "",
             raw_payload.get("question") or "",
+            raw_payload.get("description") or "",
             raw_payload.get("category") or "",
             raw_payload.get("subcategory") or "",
         ]
@@ -710,6 +727,66 @@ class MatcherService:
             )
         ):
             return "second_half"
+
+        return "default"
+
+
+    def _detect_event_granularity(self, market):
+        haystack = self._market_context_haystack(market)
+
+        if any(
+            phrase in haystack
+            for phrase in (
+                "who will win series",
+                "win series",
+                "wins series",
+                "best of 7 series",
+                "best of seven series",
+                "first round series",
+                "series between",
+            )
+        ):
+            return "series"
+
+        if any(
+            phrase in haystack
+            for phrase in (
+                "map 1",
+                "map 2",
+                "map 3",
+                "map 4",
+                "map 5",
+            )
+        ):
+            return "map"
+
+        if any(
+            phrase in haystack
+            for phrase in (
+                "set 1",
+                "set 2",
+                "set 3",
+                "set 4",
+                "set 5",
+            )
+        ):
+            return "set"
+
+        if any(
+            phrase in haystack
+            for phrase in (
+                "scheduled for",
+                "upcoming nba game",
+                "upcoming game",
+                "final score",
+                "if the rockets win",
+                "if the lakers win",
+                "if the game is postponed",
+                "if the game is canceled",
+                "game will resolve to",
+            )
+        ):
+            return "game"
 
         return "default"
 
@@ -1224,6 +1301,7 @@ class MatcherService:
             "kind": self._detect_market_kind(market, participants),
             "variant": self._detect_market_variant(market),
             "scope": self._detect_market_scope(market),
+            "event_granularity": self._detect_event_granularity(market),
             "comparison_type": self._detect_comparison_type(market),
         }
 

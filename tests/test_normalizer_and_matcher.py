@@ -248,6 +248,42 @@ class MatcherServiceTests(unittest.TestCase):
         self.assertEqual(decision["reason"]["reject_reason"], "participant_mismatch")
 
 
+    def test_rejects_series_market_against_single_game_market(self):
+        poly_market = SimpleNamespace(
+            id=10,
+            title="NBA Playoffs: Who Will Win Series? - Lakers vs. Rockets",
+            outcomes_json=[
+                {"id": "poly-a", "label": "Lakers"},
+                {"id": "poly-b", "label": "Rockets"},
+            ],
+            raw_payload_json={},
+            category="sports",
+            description="",
+        )
+        pf_market = SimpleNamespace(
+            id=20,
+            title="Rockets vs. Lakers",
+            outcomes_json=[
+                {"id": "pf-a", "label": "Rockets"},
+                {"id": "pf-b", "label": "Lakers"},
+            ],
+            raw_payload_json={
+                "description": (
+                    "In the upcoming NBA game, scheduled for April 18 at 8:30PM ET: "
+                    "If the Rockets win, the market will resolve to Rockets. "
+                    "If the Lakers win, the market will resolve to Lakers."
+                ),
+            },
+            category="sports",
+            description="",
+        )
+
+        decision = self.matcher.explain_match(poly_market, pf_market)
+
+        self.assertFalse(decision["matched"])
+        self.assertEqual(decision["reason"]["reject_reason"], "event_granularity_mismatch")
+
+
     def test_matches_binary_head_to_head_market_against_named_matchup(self):
         poly_market = SimpleNamespace(
             id=10,

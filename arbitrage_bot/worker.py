@@ -25,7 +25,7 @@ from arbitrage_bot.services.operations_monitor import record_worker_cycle
 from arbitrage_bot.tg_bot.bot import send_alert_immediately
 from arbitrage_bot.tg_bot.preferences import extract_pair_close_datetime
 from sqlalchemy.future import select
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, delete, or_
 from sqlalchemy.exc import IntegrityError
 
 log = get_logger("worker")
@@ -42,6 +42,7 @@ class WorkerState:
     candidate_pairs: list = field(default_factory=list)
     candidate_market_map: dict = field(default_factory=dict)
     last_full_pair_rematch_completed_at: float | None = None
+    last_db_cleanup_completed_at: float | None = None
     pair_cycle_offsets: dict = field(default_factory=dict)
 
 
@@ -149,6 +150,7 @@ async def _run_cycle(db, state):
             opportunities=cycle_stats["opportunities"],
             deliverable_opportunities=cycle_stats["deliverable_opportunities"],
         )
+        await _run_database_cleanup_if_due(db, state)
     finally:
         await ingestion.close()
         await orderbook_service.close()
@@ -188,6 +190,100 @@ def _should_run_full_pair_rematch(now, state):
 
 def _mark_full_pair_rematch_completed(state):
     state.last_full_pair_rematch_completed_at = time.monotonic()
+
+
+def _should_run_db_cleanup(now, state):
+    interval = float(settings.DB_CLEANUP_INTERVAL_SECONDS)
+    if interval <= 0:
+        return False
+
+    if state.last_db_cleanup_completed_at is None:
+        return True
+
+    return (now - state.last_db_cleanup_completed_at) >= interval
+
+
+def _mark_db_cleanup_completed(state, now=None):
+    state.last_db_cleanup_completed_at = time.monotonic() if now is None else float(now)
+
+
+async def _run_database_cleanup_if_due(db, state):
+    now = time.monotonic()
+    if not _should_run_db_cleanup(now, state):
+        return
+
+    try:
+        deleted_pairs, deleted_markets = await _cleanup_database_records(db, state)
+        _mark_db_cleanup_completed(state, now=now)
+        log.info(
+            "database cleanup completed",
+            deleted_pairs=deleted_pairs,
+            deleted_markets=deleted_markets,
+        )
+        incr_counter("worker.db_cleanup_completed")
+        if deleted_pairs:
+            incr_counter("worker.db_cleanup_pairs_deleted", deleted_pairs)
+        if deleted_markets:
+            incr_counter("worker.db_cleanup_markets_deleted", deleted_markets)
+    except Exception as exc:
+        log.error(
+            "database cleanup failed",
+            error=format_error_details(exc),
+        )
+        incr_counter("worker.db_cleanup_failed")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        await send_system_error_notification("worker", "database cleanup", exc)
+
+
+async def _cleanup_database_records(db, state):
+    retention_seconds = max(
+        float(settings.DB_CLEANUP_RETENTION_SECONDS),
+        float(settings.DB_CLEANUP_INTERVAL_SECONDS),
+    )
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=retention_seconds)
+
+    stale_pairs_stmt = select(MarketPair.id, MarketPair.pair_hash).where(
+        MarketPair.status.in_(["stale", "failed"]),
+        MarketPair.created_at < cutoff,
+    )
+    stale_pair_rows = (await db.execute(stale_pairs_stmt)).all()
+    stale_pair_ids = [pair_id for pair_id, _ in stale_pair_rows]
+    stale_pair_hashes = [pair_hash for _, pair_hash in stale_pair_rows]
+
+    if stale_pair_ids:
+        await db.execute(delete(MarketPair).where(MarketPair.id.in_(stale_pair_ids)))
+        for pair_hash in stale_pair_hashes:
+            await _clear_empty_count(pair_hash, state)
+
+    referenced_market_ids_stmt = select(MarketPair.market_id_a).union(
+        select(MarketPair.market_id_b)
+    )
+    referenced_market_rows = (await db.execute(referenced_market_ids_stmt)).all()
+    referenced_market_ids = {
+        market_id
+        for market_id, in referenced_market_rows
+        if market_id is not None
+    }
+
+    closed_markets_stmt = select(Market.id).where(
+        Market.status != "active",
+        Market.updated_at < cutoff,
+    )
+    if referenced_market_ids:
+        closed_markets_stmt = closed_markets_stmt.where(~Market.id.in_(referenced_market_ids))
+    stale_market_rows = (await db.execute(closed_markets_stmt)).all()
+    stale_market_ids = [market_id for market_id, in stale_market_rows]
+
+    if stale_market_ids:
+        await db.execute(delete(Market).where(Market.id.in_(stale_market_ids)))
+
+    if stale_pair_ids or stale_market_ids:
+        await db.commit()
+
+    return len(stale_pair_ids), len(stale_market_ids)
 
 
 def _invalidate_candidate_context_cache(state):

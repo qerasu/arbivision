@@ -1,4 +1,5 @@
 import unittest
+from time import monotonic
 from unittest.mock import AsyncMock
 from unittest.mock import patch
 
@@ -103,6 +104,21 @@ class OperationsMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_mock.await_count, 2)
         self.assertEqual(send_mock.await_args_list[0].kwargs["level"], "warning")
         self.assertEqual(send_mock.await_args_list[1].kwargs["level"], "recovery")
+
+
+    async def test_telegram_connectivity_ignores_request_timeout_failures(self):
+        with patch(
+            "arbitrage_bot.services.operations_monitor.send_system_notification",
+            new=AsyncMock(return_value=True),
+        ) as send_mock:
+            operations_monitor.record_telegram_polling_failure(
+                "Failed to fetch updates - TelegramNetworkError: HTTP Client says - Request timeout error"
+            )
+            await operations_monitor.evaluate_telegram_connectivity(now=monotonic() + 600.0)
+
+        send_mock.assert_not_awaited()
+        self.assertIsNone(operations_monitor._telegram_state["first_failure_at"])
+        self.assertIsNone(operations_monitor._telegram_state["last_failure_at"])
 
 
     async def test_telegram_connectivity_sends_only_recovery_when_warning_delivery_failed(self):

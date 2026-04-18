@@ -13,6 +13,11 @@ _DELIVERABLE_WARNING_STREAK = 5
 _DELIVERABLE_CRITICAL_STREAK = 10
 _TELEGRAM_DOWN_THRESHOLD_SECONDS = 180.0
 _TELEGRAM_RECOVERY_SECONDS = 60.0
+_TELEGRAM_IGNORED_FAILURE_MARKERS = (
+    "request timeout error",
+    "clientoserror:",
+    "record layer failure",
+)
 
 _duplicate_state = {}
 _orderbook_state = {"warning_streak": 0, "critical_streak": 0, "severity": None}
@@ -99,6 +104,9 @@ async def record_worker_cycle(active_pairs, pairs_with_books, opportunities, del
 def record_telegram_polling_failure(message):
     text = str(message or "")
     if "Failed to fetch updates -" not in text:
+        return
+    lowered = text.lower()
+    if any(marker in lowered for marker in _TELEGRAM_IGNORED_FAILURE_MARKERS):
         return
 
     now = monotonic()

@@ -100,6 +100,22 @@ class IngestionOutcomeNormalizationTests(unittest.TestCase):
         self.assertEqual(mapped["outcomes_json"][1]["clob_token_id"], "clob-b")
 
 
+    def test_dedupe_market_items_returns_duplicate_metadata(self):
+        items, duplicate_count, duplicate_metadata = self.service._dedupe_market_items(
+            [
+                {"platform": "polymarket", "platform_market_id": "100", "title": "first"},
+                {"platform": "polymarket", "platform_market_id": "100", "title": "second"},
+                {"platform": "polymarket", "platform_market_id": "101", "title": "unique"},
+                {"platform": "polymarket", "platform_market_id": "101", "title": "latest"},
+            ]
+        )
+
+        self.assertEqual(duplicate_count, 2)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(duplicate_metadata["distinct_market_ids"], 2)
+        self.assertEqual(duplicate_metadata["sample_market_ids"], ["100", "101"])
+
+
 class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         ingestion_module._source_last_sync_completed_at.clear()

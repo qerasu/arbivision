@@ -13,14 +13,14 @@ from arbitrage_bot.tg_bot.localization import translate
 GLOBAL_SETTINGS_KEY = "tg_alert_prefs:global"
 UI_STATE_KEY_PREFIX = "tg_ui_state:"
 DEFAULT_PREFERENCES = {
-    "min_roi_percent": 5,
+    "min_roi_percent": 2,
     "min_capital_usd": 10,
-    "max_capital_usd": 150,
+    "max_capital_usd": 50,
     "max_polymarket_capital_usd": None,
     "max_predict_fun_capital_usd": None,
     "min_profit_usd": None,
     "min_days_to_close": None,
-    "max_days_to_close": 5,
+    "max_days_to_close": 15,
 }
 SETTINGS_FIELDS = (
     {

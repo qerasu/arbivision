@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,7 +10,7 @@ from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot import worker as worker_module
-from arbitrage_bot.worker import WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_poly, _filter_skippable_pairs, _load_candidate_context, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _update_empty_counts, _upsert_market_pairs
+from arbitrage_bot.worker import WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_poly, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
 
 
 class WorkerPairLifecycleTests(unittest.TestCase):
@@ -137,6 +138,18 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.assertEqual(stale_pair.status, "stale")
         self.assertEqual(approved_pair.status, "stale")
         self.assertEqual(failed_pair.status, "failed")
+
+
+    def test_should_run_db_cleanup_on_first_cycle(self):
+        self.assertTrue(_should_run_db_cleanup(10.0, self.state))
+
+
+    def test_should_run_db_cleanup_after_interval_elapsed(self):
+        _mark_db_cleanup_completed(self.state, now=10.0)
+
+        with patch.object(worker_module.settings, "DB_CLEANUP_INTERVAL_SECONDS", 300.0):
+            self.assertFalse(_should_run_db_cleanup(200.0, self.state))
+            self.assertTrue(_should_run_db_cleanup(310.0, self.state))
 
 
     def test_candidate_markets_for_poly_limits_ranked_candidates(self):
@@ -349,6 +362,111 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.assertEqual(matcher.match_candidates.call_count, 3)
         self.assertEqual(len(fake_db.added), 3)
         self.assertEqual(fake_db.commit_calls, 1)
+
+
+class WorkerDatabaseCleanupTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.state = WorkerState()
+
+
+    async def test_cleanup_database_records_deletes_old_stale_pairs_and_unused_closed_markets(self):
+        class FakeRowResult:
+            def __init__(self, rows):
+                self.rows = rows
+
+
+            def all(self):
+                return list(self.rows)
+
+
+        class FakeDb:
+            def __init__(self):
+                self.commit_calls = 0
+                self.statements = []
+
+
+            async def execute(self, stmt):
+                compiled = str(stmt)
+                self.statements.append(compiled)
+                if compiled.startswith("SELECT market_pairs.id, market_pairs.pair_hash"):
+                    return FakeRowResult([(11, "pair-old")])
+                if "SELECT market_pairs.market_id_a" in compiled and "UNION" in compiled:
+                    return FakeRowResult([(5,)])
+                if compiled.startswith("SELECT markets.id"):
+                    return FakeRowResult([(7,)])
+                if compiled.startswith("DELETE FROM market_pairs"):
+                    return FakeRowResult([])
+                if compiled.startswith("DELETE FROM markets"):
+                    return FakeRowResult([])
+                raise AssertionError(f"unexpected stmt: {compiled}")
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+        fake_db = FakeDb()
+
+        with patch.object(worker_module.settings, "DB_CLEANUP_INTERVAL_SECONDS", 10800.0), patch.object(
+            worker_module.settings,
+            "DB_CLEANUP_RETENTION_SECONDS",
+            86400.0,
+        ), patch(
+            "arbitrage_bot.worker._clear_empty_count",
+            new=AsyncMock(),
+        ) as clear_empty_count_mock:
+            deleted_pairs, deleted_markets = await _cleanup_database_records(fake_db, self.state)
+
+        self.assertEqual(deleted_pairs, 1)
+        self.assertEqual(deleted_markets, 1)
+        self.assertEqual(fake_db.commit_calls, 1)
+        clear_empty_count_mock.assert_awaited_once_with("pair-old", self.state)
+        self.assertTrue(any(stmt.startswith("DELETE FROM market_pairs") for stmt in fake_db.statements))
+        self.assertTrue(any(stmt.startswith("DELETE FROM markets") for stmt in fake_db.statements))
+
+
+    async def test_cleanup_database_records_skips_commit_when_nothing_to_delete(self):
+        class FakeRowResult:
+            def __init__(self, rows):
+                self.rows = rows
+
+
+            def all(self):
+                return list(self.rows)
+
+
+        class FakeDb:
+            def __init__(self):
+                self.commit_calls = 0
+
+
+            async def execute(self, stmt):
+                compiled = str(stmt)
+                if compiled.startswith("SELECT market_pairs.id, market_pairs.pair_hash"):
+                    return FakeRowResult([])
+                if "SELECT market_pairs.market_id_a" in compiled and "UNION" in compiled:
+                    return FakeRowResult([])
+                if compiled.startswith("SELECT markets.id"):
+                    return FakeRowResult([])
+                raise AssertionError(f"unexpected stmt: {compiled}")
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+        fake_db = FakeDb()
+
+        with patch(
+            "arbitrage_bot.worker._clear_empty_count",
+            new=AsyncMock(),
+        ) as clear_empty_count_mock:
+            deleted_pairs, deleted_markets = await _cleanup_database_records(fake_db, self.state)
+
+        self.assertEqual(deleted_pairs, 0)
+        self.assertEqual(deleted_markets, 0)
+        self.assertEqual(fake_db.commit_calls, 0)
+        clear_empty_count_mock.assert_not_awaited()
 
 
 class WorkerCandidateContextTests(unittest.IsolatedAsyncioTestCase):
@@ -717,6 +835,110 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         upsert_mock.assert_not_awaited()
         ingestion.close.assert_awaited_once()
         orderbook_service.close.assert_awaited_once()
+
+
+    async def test_run_cycle_runs_database_cleanup_when_due(self):
+        fake_db = SimpleNamespace()
+        ingestion = SimpleNamespace(
+            sync_markets=AsyncMock(return_value=False),
+            close=AsyncMock(),
+        )
+        orderbook_service = SimpleNamespace(close=AsyncMock())
+
+        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
+            "arbitrage_bot.worker.MatcherService",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.OrderbookService",
+            return_value=orderbook_service,
+        ), patch(
+            "arbitrage_bot.worker.ArbitrageCalculator",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker._process_candidates",
+            new=AsyncMock(
+                return_value={
+                    "approved_pairs": 0,
+                    "active_pairs": 0,
+                    "pairs_with_books": 0,
+                    "skipped_pairs": 0,
+                    "opportunities": 0,
+                    "deliverable_opportunities": 0,
+                }
+            ),
+        ), patch(
+            "arbitrage_bot.worker._should_run_full_pair_rematch",
+            return_value=False,
+        ), patch(
+            "arbitrage_bot.worker._cleanup_database_records",
+            new=AsyncMock(return_value=(2, 3)),
+        ) as cleanup_mock, patch(
+            "arbitrage_bot.worker.send_system_error_notification",
+            new=AsyncMock(return_value=False),
+        ) as system_error_mock:
+            await _run_cycle(fake_db, self.state)
+
+        cleanup_mock.assert_awaited_once_with(fake_db, self.state)
+        system_error_mock.assert_not_awaited()
+        self.assertIsNotNone(self.state.last_db_cleanup_completed_at)
+
+
+    async def test_run_cycle_skips_database_cleanup_when_not_due(self):
+        fake_db = SimpleNamespace()
+        ingestion = SimpleNamespace(
+            sync_markets=AsyncMock(return_value=False),
+            close=AsyncMock(),
+        )
+        orderbook_service = SimpleNamespace(close=AsyncMock())
+        self.state.last_db_cleanup_completed_at = time.monotonic()
+
+        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
+            "arbitrage_bot.worker.MatcherService",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.OrderbookService",
+            return_value=orderbook_service,
+        ), patch(
+            "arbitrage_bot.worker.ArbitrageCalculator",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker._process_candidates",
+            new=AsyncMock(
+                return_value={
+                    "approved_pairs": 0,
+                    "active_pairs": 0,
+                    "pairs_with_books": 0,
+                    "skipped_pairs": 0,
+                    "opportunities": 0,
+                    "deliverable_opportunities": 0,
+                }
+            ),
+        ), patch(
+            "arbitrage_bot.worker._should_run_full_pair_rematch",
+            return_value=False,
+        ), patch.object(
+            worker_module.settings,
+            "DB_CLEANUP_INTERVAL_SECONDS",
+            10800.0,
+        ), patch(
+            "arbitrage_bot.worker._cleanup_database_records",
+            new=AsyncMock(return_value=(2, 3)),
+        ) as cleanup_mock:
+            await _run_cycle(fake_db, self.state)
+
+        cleanup_mock.assert_not_awaited()
 
 
     async def test_process_candidates_reuses_cached_pair_context_between_calls(self):
