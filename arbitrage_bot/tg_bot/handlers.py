@@ -536,7 +536,7 @@ def _format_admin_stats_text(stats):
     lines = [
         "📊 Bot stats",
         "",
-        "👥 Users:",
+        "👥 Users: test cd",
         f"• 🧮 Total: {users['total']}",
         f"• ✅ Active: {users['active']}",
         f"• ⏸ Paused: {users['paused']}",
@@ -564,7 +564,7 @@ def _format_admin_stats_text(stats):
         lines.extend(
             [
                 "",
-                "⚙️ Delivery cancellations (since restart (хуй)):",
+                "⚙️ Delivery cancellations (since restart):",
             ]
         )
         for reason, count in runtime_alert_drop_reasons.items():
