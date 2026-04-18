@@ -55,11 +55,6 @@ def _capture(cmd):
     return result.stdout.strip()
 
 
-def _is_worktree_clean():
-    status = _capture(["git", "status", "--short"])
-    return not status
-
-
 def _head_sha(ref):
     return _capture(["git", "rev-parse", ref])
 
@@ -91,10 +86,6 @@ def _start_service_detached(python_exec):
 
 def main():
     python_exec = _python_exec()
-
-    if not _is_worktree_clean():
-        print("worktree is not clean, skip auto update")
-        raise SystemExit(1)
 
     _run(["git", "fetch", "origin", TARGET_BRANCH])
 
