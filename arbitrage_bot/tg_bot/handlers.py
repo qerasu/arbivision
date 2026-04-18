@@ -564,7 +564,7 @@ def _format_admin_stats_text(stats):
         lines.extend(
             [
                 "",
-                "⚙️ Delivery cancellations (since restart):",
+                "⚙️ Delivery cancellations (since restart (хуй)):",
             ]
         )
         for reason, count in runtime_alert_drop_reasons.items():
