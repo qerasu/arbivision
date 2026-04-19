@@ -52,7 +52,11 @@ utilities/
   run_tests.py     запуск тестов
   backup.py        бэкап данных
   bootstrap.py     начальная настройка окружения
-  auto_update.py   автообновление из git
+  auto_update.py   pull-only автообновление из origin/main
+  run_auto_update.ps1
+                   Windows-обёртка для auto_update.py с lock-файлом и логом
+  install_auto_update_task.ps1
+                   установка Windows Scheduled Task для автообновления
 ```
 
 
@@ -123,6 +127,43 @@ python3 utilities/stop.py
 `utilities/stop.py` завершает только сохранённый PID, не пытаясь убивать посторонние `uvicorn`-процессы, а затем делает `docker compose stop`.
 
 Опция `python3 utilities/stop.py --drop` удаляет контейнеры, сеть и volumes для Postgres и Redis. Это разрушительное действие, поэтому скрипт дополнительно спрашивает подтверждение.
+
+## Автообновление на Windows-сервере
+
+`utilities/auto_update.py` рассчитан на серверный ноут, который только подтягивает изменения из `origin/main`. Скрипт:
+
+- делает `git fetch origin main`
+- сравнивает локальный `HEAD` с `origin/main`
+- если коммиты совпадают, завершает работу без изменений
+- если есть новый коммит, выполняет `git pull --ff-only origin main`
+
+`auto_update.py` не вызывает `utilities/stop.py` и `utilities/start.py`. При обычном запуске через `utilities/start.py` код подхватывает `uvicorn --reload`, поэтому отдельный рестарт из автообновления не нужен и может привести к двум экземплярам Telegram polling.
+
+Ручная проверка на Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\utilities\run_auto_update.ps1
+```
+
+Установка задачи планировщика с интервалом 5 минут:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\utilities\install_auto_update_task.ps1
+```
+
+Установка с интервалом 10 минут:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\utilities\install_auto_update_task.ps1 -IntervalMinutes 10
+```
+
+Проверка задачи:
+
+```powershell
+schtasks /Query /TN "Arbivision Auto Update" /V /FO LIST
+```
+
+Лог автообновления пишется в `logs/auto_update.log`. В нём должны быть строки `run auto_update.py`, `local HEAD`, `remote HEAD`, `no updates found` или `update completed`, а также `exit code: 0`.
 
 ## Альтернативные способы запуска
 

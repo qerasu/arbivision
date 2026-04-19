@@ -1,7 +1,4 @@
-import os
 import subprocess
-import sys
-from pathlib import Path
 
 try:
     from bootstrap import repo_root
@@ -10,26 +7,6 @@ except ModuleNotFoundError:
 
 
 TARGET_BRANCH = "main"
-
-
-def _python_exec():
-    root = repo_root()
-    if os.name == "nt":
-        candidates = [
-            root / ".venv" / "Scripts" / "python.exe",
-            root / ".venv" / "Scripts" / "python",
-        ]
-    else:
-        candidates = [
-            root / ".venv" / "bin" / "python3",
-            root / ".venv" / "bin" / "python",
-        ]
-
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-
-    return sys.executable
 
 
 def _run(cmd):
@@ -59,34 +36,7 @@ def _head_sha(ref):
     return _capture(["git", "rev-parse", ref])
 
 
-def _start_service_detached(python_exec):
-    start_script = repo_root() / "utilities" / "start.py"
-    cmd = [python_exec, str(start_script)]
-    creationflags = 0
-    popen_kwargs = {
-        "cwd": str(repo_root()),
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-        "close_fds": True,
-    }
-
-    if os.name == "nt":
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    else:
-        popen_kwargs["start_new_session"] = True
-
-    print(f"running detached: {' '.join(cmd)}")
-    subprocess.Popen(
-        cmd,
-        creationflags=creationflags,
-        **popen_kwargs,
-    )
-
-
 def main():
-    python_exec = _python_exec()
-
     _run(["git", "fetch", "origin", TARGET_BRANCH])
 
     local_head = _head_sha("HEAD")
@@ -99,11 +49,9 @@ def main():
         print("no updates found")
         return
 
-    print("updates found, restarting service")
-    _run([python_exec, "utilities/stop.py"])
+    print("updates found, pulling latest code")
     _run(["git", "pull", "--ff-only", "origin", TARGET_BRANCH])
-    _start_service_detached(python_exec)
-    print("update completed")
+    print("update completed, uvicorn reload should apply code changes")
 
 
 if __name__ == "__main__":
