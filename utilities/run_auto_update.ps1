@@ -28,8 +28,11 @@ try {
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     Add-Content -Path $logPath -Value "[$timestamp] run auto_update.py"
     Push-Location $repoRoot
-    & $pythonExe 'utilities/auto_update.py' *>> $logPath
-    $exitCode = $LASTEXITCODE
+    $outputPath = Join-Path $lockDir 'auto_update.stdout.log'
+    $errorPath = Join-Path $lockDir 'auto_update.stderr.log'
+    $process = Start-Process -FilePath $pythonExe -ArgumentList 'utilities/auto_update.py' -WorkingDirectory $repoRoot -NoNewWindow -Wait -PassThru -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath
+    Get-Content -Path $outputPath, $errorPath -ErrorAction SilentlyContinue | Add-Content -Path $logPath
+    $exitCode = $process.ExitCode
     Pop-Location
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     Add-Content -Path $logPath -Value "[$timestamp] exit code: $exitCode"

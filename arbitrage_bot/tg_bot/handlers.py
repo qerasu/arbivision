@@ -536,7 +536,7 @@ def _format_admin_stats_text(stats):
     lines = [
         "📊 Bot stats",
         "",
-        "👥 Users: test cd",
+        "👥 Users:",
         f"• 🧮 Total: {users['total']}",
         f"• ✅ Active: {users['active']}",
         f"• ⏸ Paused: {users['paused']}",
