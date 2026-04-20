@@ -32,7 +32,7 @@ Arbivision ищет арбитражные возможности между **P
 arbitrage_bot/
   adapters/        интеграции с Polymarket и Predict.Fun
   api/             внутренние HTTP-ручки
-  core/            config, db, redis, logging, observability
+  core/            config, env loading, db, redis, logging, observability
   models/          SQLAlchemy ORM-модели
   services/        ingestion, matcher, orderbook, calculator, fanout
   tg_bot/          Telegram UI, обработчики и настройки пользователей
@@ -242,7 +242,7 @@ python3 -m arbitrage_bot.run_telegram
 
 Сейчас `TELEGRAM_DELIVERY_RETRY_SECONDS` и `TELEGRAM_DELIVERY_MAX_ATTEMPTS` зарезервированы в конфиге, но не участвуют в доставке обычных user-alerts: worker делает одну немедленную попытку отправки, а подавление повторов обеспечивается комбинацией dedupe-state opportunity, per-user event state и delivery-marker в Redis.
 
-По умолчанию cleanup БД запускается раз в 3 часа и удаляет записи старше 3 часов только из runtime-таблиц рынков и пар: пользовательские сущности (`users`, `telegram_chats`, `subscriptions`, `user_preferences`) автоматически не удаляются.
+По умолчанию cleanup БД запускается раз в 3 часа и удаляет записи старше 6 часов только из runtime-таблиц рынков и пар: пользовательские сущности (`users`, `telegram_chats`, `subscriptions`, `user_preferences`) автоматически не удаляются.
 
 ### API и рантайм
 
