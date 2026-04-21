@@ -144,6 +144,8 @@ python3 utilities/stop.py
 
 `auto_update.py` не вызывает `utilities/stop.py` и `utilities/start.py`. При обычном запуске через `utilities/start.py` код подхватывает `uvicorn --reload`, поэтому отдельный рестарт из автообновления не нужен и может привести к двум экземплярам Telegram polling.
 
+`run_auto_update.ps1` защищает запуск lock-файлом `tmp/auto_update.lock`, чтобы две задачи планировщика не тянули git одновременно. Если предыдущий PowerShell-процесс оборвался и оставил lock, новые запуски раньше постоянно писали `skip: updater is already running` и не доходили до `git fetch`. Теперь wrapper записывает в lock PID процесса и автоматически перехватывает stale lock, если процесс уже завершился или lock старше 15 минут.
+
 Ручная проверка на Windows:
 
 ```powershell
