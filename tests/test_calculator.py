@@ -101,5 +101,3 @@ class ArbitrageCalculatorTests(unittest.TestCase):
         self.assertAlmostEqual(result["shares"], 6.0)
         self.assertAlmostEqual(result["avg_price_leg_1"] * result["shares"], 2.4)
         self.assertAlmostEqual(result["avg_price_leg_2"] * result["shares"], 3.0)
-        # test CD
-        

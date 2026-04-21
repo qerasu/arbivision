@@ -534,7 +534,7 @@ def _format_admin_stats_text(stats):
     total_filtered = sum(runtime_opportunity_filter_reasons.values())
 
     lines = [
-        "📊 Bot stats",
+        "📊 Bot stats, cd finally working",
         "",
         "👥 Users:",
         f"• 🧮 Total: {users['total']}",
