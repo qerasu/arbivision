@@ -362,10 +362,6 @@ def _build_stats_keyboard():
                     text="Refresh",
                     callback_data="tg_nav:stats",
                 ),
-                InlineKeyboardButton(
-                    text="← Back",
-                    callback_data="tg_nav:home",
-                ),
             ]
         ]
     )
@@ -588,7 +584,7 @@ def _format_admin_stats_text(stats):
 
     monitor = stats.get("monitor") or {}
     if monitor:
-        lines.extend(["", "🩺 Monitor:"])
+        lines.extend(["", "📡 Monitor:"])
         orderbook = monitor.get("orderbook_coverage") or {}
         active_pairs = int(orderbook.get("active_pairs") or 0)
         pairs_with_books = int(orderbook.get("pairs_with_books") or 0)

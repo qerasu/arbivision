@@ -142,7 +142,7 @@ class TelegramBotCommandsTests(unittest.TestCase):
         self.assertIn("• send_failed: 1", text)
         self.assertIn("🧹 Fanout filter blocks (since restart ", text)
         self.assertIn("• min_roi: 5", text)
-        self.assertIn("🩺 Monitor:", text)
+        self.assertIn("📡 Monitor:", text)
         self.assertIn("• Orderbook coverage: critical, 35.0% (7/20)", text)
         self.assertIn("• Deliverable opportunities: warning, opportunities=1, deliverable=0, streak=5", text)
 
