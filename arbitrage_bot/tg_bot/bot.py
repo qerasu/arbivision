@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import math
+from types import SimpleNamespace
 from urllib.parse import parse_qsl
 from urllib.parse import urlencode
 from urllib.parse import urlparse
@@ -474,7 +475,7 @@ def _clone_opportunity(opportunity):
         "net_roi": getattr(opportunity, "net_roi", 0.0),
         "calculation_json": getattr(opportunity, "calculation_json", None),
     }
-    return type("OpportunitySnapshot", (), payload)()
+    return SimpleNamespace(**payload)
 
 
 def _recalculate_opportunity_from_directions(opportunity, directions, calculator, preferences=None):

@@ -6,7 +6,7 @@ def load_env_file(path):
     try:
         f = open(path, "r", encoding="utf-8")
     except FileNotFoundError:
-        raise FileNotFoundError(f".env file not found: {path}")
+        return
 
     with f:
         for raw_line in f:
