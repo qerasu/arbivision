@@ -11,7 +11,6 @@ from arbitrage_bot.services.ingestion import IngestionService
 
 class IngestionOutcomeNormalizationTests(unittest.TestCase):
     def setUp(self):
-        ingestion_module._source_last_sync_completed_at.clear()
         self.service = IngestionService(db_session=None)
 
 
@@ -117,9 +116,6 @@ class IngestionOutcomeNormalizationTests(unittest.TestCase):
 
 
 class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        ingestion_module._source_last_sync_completed_at.clear()
-        ingestion_module._source_last_full_sync_completed_at.clear()
 
 
     async def test_mark_missing_markets_closed_marks_absent_active_market_as_closed(self):
@@ -563,35 +559,3 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             set(),
         )
 
-
-    def test_apply_market_updates_skips_unchanged_market_payload(self):
-        service = IngestionService(db_session=None)
-        updated_at = datetime(2026, 4, 8, tzinfo=timezone.utc)
-        market = SimpleNamespace(
-            status="active",
-            tradable=True,
-            title="Market",
-            normalized_title="market",
-            description="desc",
-            outcomes_json=[{"id": "1", "label": "Yes"}],
-            raw_payload_json={"id": "1", "title": "Market"},
-            category="sports",
-            slug="market",
-            updated_at=updated_at,
-        )
-        data = {
-            "status": "active",
-            "tradable": True,
-            "title": "Market",
-            "normalized_title": "market",
-            "description": "desc",
-            "outcomes_json": [{"id": "1", "label": "Yes"}],
-            "raw_payload_json": {"id": "1", "title": "Market"},
-            "category": "sports",
-            "slug": "market",
-        }
-
-        changed = service._apply_market_updates(market, data)
-
-        self.assertFalse(changed)
-        self.assertEqual(market.updated_at, updated_at)

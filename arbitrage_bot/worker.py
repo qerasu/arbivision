@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import time
 import traceback
@@ -83,80 +84,89 @@ def _snapshot_pair(pair):
 async def run_sync_loop(state=None):
     # infinite market update loop
     runtime_state = state or WorkerState()
-    while True:
-        try:
-            incr_counter("worker.cycle_started")
-            async with AsyncSessionLocal() as session:
-                await _run_cycle(session, runtime_state)
-            incr_counter("worker.cycle_completed")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            # logging sync error
-            log.error(
-                "sync loop error",
-                error=format_error_details(e),
-                traceback=traceback.format_exc(),
-            )
-            incr_counter("worker.cycle_failed")
-            await send_system_error_notification("worker", "sync loop", e)
-            
-        await asyncio.sleep(settings.MARKET_REFRESH_SECONDS)
-
-
-async def _run_cycle(db, state):
-    ingestion = IngestionService(db)
+    ingestion = IngestionService(db_session=None)
     matcher = MatcherService()
     orderbook_service = OrderbookService()
     calculator = ArbitrageCalculator()
-    alert_manager = AlertManager(db)
-    fanout_manager = FanoutManager(db)
-
     try:
-        sync_result = await ingestion.sync_markets()
-        if _should_run_full_pair_rematch(time.monotonic(), state):
-            _invalidate_candidate_context_cache(state)
-            hot_pair_hashes = await _upsert_market_pairs(db, matcher, None, state)
-            _queue_hot_pairs(state, hot_pair_hashes)
-            _mark_full_pair_rematch_completed(state)
-        else:
-            changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
-            if _has_changed_market_ids(changed_market_ids_by_platform):
-                _invalidate_candidate_context_cache(state)
-                hot_pair_hashes = await _upsert_market_pairs(
-                    db,
-                    matcher,
-                    changed_market_ids_by_platform,
-                    state,
+        while True:
+            try:
+                incr_counter("worker.cycle_started")
+                async with AsyncSessionLocal() as session:
+                    ingestion.db = session
+                    alert_manager = AlertManager(session)
+                    fanout_manager = FanoutManager(session)
+                    await _run_cycle(
+                        session,
+                        runtime_state,
+                        ingestion,
+                        matcher,
+                        orderbook_service,
+                        calculator,
+                        alert_manager,
+                        fanout_manager,
+                    )
+                incr_counter("worker.cycle_completed")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # logging sync error
+                log.error(
+                    "sync loop error",
+                    error=format_error_details(e),
+                    traceback=traceback.format_exc(),
                 )
-                _queue_hot_pairs(state, hot_pair_hashes)
-        cycle_stats = await _process_candidates(
-            db,
-            orderbook_service,
-            calculator,
-            alert_manager,
-            fanout_manager,
-            state,
-        )
-        log.info(
-            "worker cycle summary",
-            approved_pairs=cycle_stats["approved_pairs"],
-            active_pairs=cycle_stats["active_pairs"],
-            pairs_with_books=cycle_stats["pairs_with_books"],
-            skipped_pairs=cycle_stats["skipped_pairs"],
-            opportunities=cycle_stats["opportunities"],
-            deliverable_opportunities=cycle_stats["deliverable_opportunities"],
-        )
-        await record_worker_cycle(
-            active_pairs=cycle_stats["active_pairs"],
-            pairs_with_books=cycle_stats["pairs_with_books"],
-            opportunities=cycle_stats["opportunities"],
-            deliverable_opportunities=cycle_stats["deliverable_opportunities"],
-        )
-        await _run_database_cleanup_if_due(db, state)
+                incr_counter("worker.cycle_failed")
+                await send_system_error_notification("worker", "sync loop", e)
+                
+            await asyncio.sleep(settings.MARKET_REFRESH_SECONDS)
     finally:
         await ingestion.close()
         await orderbook_service.close()
+
+
+async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager):
+    sync_result = await ingestion.sync_markets()
+    if _should_run_full_pair_rematch(time.monotonic(), state):
+        _invalidate_candidate_context_cache(state)
+        hot_pair_hashes = await _upsert_market_pairs(db, matcher, None, state)
+        _queue_hot_pairs(state, hot_pair_hashes)
+        _mark_full_pair_rematch_completed(state)
+    else:
+        changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
+        if _has_changed_market_ids(changed_market_ids_by_platform):
+            _invalidate_candidate_context_cache(state)
+            hot_pair_hashes = await _upsert_market_pairs(
+                db,
+                matcher,
+                changed_market_ids_by_platform,
+                state,
+            )
+            _queue_hot_pairs(state, hot_pair_hashes)
+    cycle_stats = await _process_candidates(
+        db,
+        orderbook_service,
+        calculator,
+        alert_manager,
+        fanout_manager,
+        state,
+    )
+    log.info(
+        "worker cycle summary",
+        approved_pairs=cycle_stats["approved_pairs"],
+        active_pairs=cycle_stats["active_pairs"],
+        pairs_with_books=cycle_stats["pairs_with_books"],
+        skipped_pairs=cycle_stats["skipped_pairs"],
+        opportunities=cycle_stats["opportunities"],
+        deliverable_opportunities=cycle_stats["deliverable_opportunities"],
+    )
+    await record_worker_cycle(
+        active_pairs=cycle_stats["active_pairs"],
+        pairs_with_books=cycle_stats["pairs_with_books"],
+        opportunities=cycle_stats["opportunities"],
+        deliverable_opportunities=cycle_stats["deliverable_opportunities"],
+    )
+    await _run_database_cleanup_if_due(db, state)
 
 
 def _extract_changed_market_ids_by_platform(sync_result):
@@ -636,23 +646,24 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
     delivery_targets = await fanout_manager.get_delivery_targets()
     pair_fetch_concurrency = max(1, int(settings.ORDERBOOK_PREDICT_FUN_CONCURRENCY or 1))
     semaphore = asyncio.Semaphore(pair_fetch_concurrency)
-    rollback_lock = asyncio.Lock()
 
     async def process_pair(pair):
         queued_at = time.monotonic()
         async with semaphore:
             _record_timing("worker.timing.pair_queue_wait", queued_at)
-            return await _process_candidate_pair(
-                db,
-                orderbook_service,
-                calculator,
-                alert_manager,
-                fanout_manager,
-                pair,
-                market_map,
-                delivery_targets,
-                rollback_lock,
-            )
+            async with AsyncSessionLocal() as pair_db:
+                pair_alert_manager = AlertManager(pair_db)
+                pair_fanout_manager = FanoutManager(pair_db)
+                return await _process_candidate_pair(
+                    pair_db,
+                    orderbook_service,
+                    calculator,
+                    pair_alert_manager,
+                    pair_fanout_manager,
+                    pair,
+                    market_map,
+                    delivery_targets,
+                )
 
     pair_results = await asyncio.gather(
         *(process_pair(pair) for pair in active_pairs),
@@ -684,7 +695,6 @@ async def _process_candidate_pair(
     pair,
     market_map,
     delivery_targets,
-    rollback_lock,
 ):
     pair_stats = {
         "pair_hash": pair.pair_hash,
@@ -776,12 +786,11 @@ async def _process_candidate_pair(
                     error=format_error_details(e),
                 )
                 incr_counter("worker.opportunity_failed")
-                async with rollback_lock:
-                    try:
-                        await db.rollback()
-                    except Exception:
-                        pass
-                await send_system_error_notification("worker", f"process opportunity pair {pair.id}", e)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                await send_system_error_notification("worker", "process opportunity", e)
 
     return pair_stats
 
@@ -820,11 +829,17 @@ def _pair_empty_count_key(pair_hash):
 
 
 def _market_signature_fingerprint(market):
+    outcomes_hash = hashlib.md5(
+        json.dumps(getattr(market, "outcomes_json", None), sort_keys=True, ensure_ascii=True).encode()
+    ).hexdigest()
+    payload_hash = hashlib.md5(
+        json.dumps(getattr(market, "raw_payload_json", None), sort_keys=True, ensure_ascii=True).encode()
+    ).hexdigest()
     return (
         getattr(market, "title", None),
         getattr(market, "category", None),
-        json.dumps(getattr(market, "outcomes_json", None), sort_keys=True, ensure_ascii=True),
-        json.dumps(getattr(market, "raw_payload_json", None), sort_keys=True, ensure_ascii=True),
+        outcomes_hash,
+        payload_hash,
         getattr(market, "status", None),
         getattr(market, "updated_at", None),
     )

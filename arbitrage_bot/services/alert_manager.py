@@ -93,7 +93,7 @@ class AlertManager:
             "state": state_to_save,
         }
         encoded = json.dumps(raw_payload, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha1(encoded.encode("utf-8")).hexdigest()
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
     def _attach_dedupe_state(self, opportunity, dedupe_key, state_to_save):

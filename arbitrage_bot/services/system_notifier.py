@@ -143,7 +143,7 @@ def _should_skip_notification(dedupe_key):
 
 
 def _system_error_redis_key(dedupe_key):
-    digest = hashlib.sha1(dedupe_key.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()
     return f"system-error-dedupe:{digest}"
 
 

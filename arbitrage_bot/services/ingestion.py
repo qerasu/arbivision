@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from sqlalchemy import Text, cast, func, or_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.future import select
-from sqlalchemy.exc import IntegrityError
 
 from arbitrage_bot.adapters.polymarket import PolymarketAdapter
 from arbitrage_bot.adapters.predict_fun import PredictFunAdapter
@@ -18,8 +17,6 @@ from arbitrage_bot.services.system_notifier import is_transient_network_error
 from arbitrage_bot.services.operations_monitor import record_duplicate_markets
 
 log = get_logger("ingestion")
-_source_last_sync_completed_at = {}
-_source_last_full_sync_completed_at = {}
 
 
 class IngestionService:
@@ -32,6 +29,8 @@ class IngestionService:
         self.predict_fun = PredictFunAdapter()
         self.normalizer = NormalizerService()
         self._changed_market_ids_by_platform = self._empty_changed_market_ids()
+        self._source_last_sync_completed_at = {}
+        self._source_last_full_sync_completed_at = {}
 
 
     async def close(self):
@@ -266,9 +265,9 @@ class IngestionService:
             )
             if synced:
                 successful_sources.append(source_name)
-                _source_last_sync_completed_at[source_name] = time.monotonic()
+                self._source_last_sync_completed_at[source_name] = time.monotonic()
                 if sync_meta.get("full_sync") and getattr(adapter, "last_fetch_complete", True):
-                    _source_last_full_sync_completed_at[source_name] = time.monotonic()
+                    self._source_last_full_sync_completed_at[source_name] = time.monotonic()
 
         return self._build_sync_result(
             bool(successful_sources),
@@ -314,7 +313,7 @@ class IngestionService:
             float(settings.MARKET_SYNC_INTERVAL_SECONDS),
             float(settings.MARKET_REFRESH_SECONDS),
         )
-        last_completed_at = _source_last_sync_completed_at.get(source_name)
+        last_completed_at = self._source_last_sync_completed_at.get(source_name)
         if last_completed_at is None:
             return True
         return (now - last_completed_at) >= min_interval
@@ -326,7 +325,7 @@ class IngestionService:
             float(settings.MARKET_SYNC_INTERVAL_SECONDS),
             float(settings.MARKET_REFRESH_SECONDS),
         )
-        last_completed_at = _source_last_full_sync_completed_at.get("polymarket")
+        last_completed_at = self._source_last_full_sync_completed_at.get("polymarket")
         if last_completed_at is None:
             return True
         return (now - last_completed_at) >= full_interval
@@ -430,69 +429,7 @@ class IngestionService:
         if not items:
             return set()
 
-        if self._supports_postgresql_upsert():
-            return await self._upsert_markets_postgresql(items)
-
-        platform = items[0]["platform"]
-        market_ids = [
-            item["platform_market_id"]
-            for item in items
-        ]
-        existing_by_key = {}
-        created_markets = []
-        changed_market_ids = set()
-
-        for market_ids_chunk in self._chunked(
-            market_ids,
-            self.UPSERT_LOOKUP_BATCH_SIZE,
-        ):
-            stmt = select(Market).where(
-                Market.platform == platform,
-                Market.platform_market_id.in_(market_ids_chunk),
-            )
-            existing_markets = (await self.db.execute(stmt)).scalars().all()
-
-            for market in existing_markets:
-                existing_by_key[(market.platform, market.platform_market_id)] = market
-
-        for item in items:
-            key = (item["platform"], item["platform_market_id"])
-            market = existing_by_key.get(key)
-            if market is not None:
-                if self._apply_market_updates(market, item):
-                    changed_market_ids.add(market.id)
-            else:
-                market = Market(**item)
-                self.db.add(market)
-                created_markets.append(market)
-
-        try:
-            await self.db.flush()
-        except IntegrityError:
-            await self.db.rollback()
-            for item in items:
-                market_id = await self._upsert_market(item)
-                if market_id is not None:
-                    changed_market_ids.add(market_id)
-            return changed_market_ids
-
-        for market in created_markets:
-            if getattr(market, "id", None) is not None:
-                changed_market_ids.add(market.id)
-
-        return changed_market_ids
-
-
-    def _supports_postgresql_upsert(self):
-        bind = None
-        try:
-            bind = self.db.get_bind()
-        except Exception:
-            bind = getattr(self.db, "bind", None)
-        dialect = getattr(bind, "dialect", None)
-        if dialect is None:
-            dialect = getattr(getattr(bind, "sync_engine", None), "dialect", None)
-        return getattr(dialect, "name", None) == "postgresql"
+        return await self._upsert_markets_postgresql(items)
 
 
     async def _upsert_markets_postgresql(self, items):
@@ -550,66 +487,6 @@ class IngestionService:
             "created_at": now,
             "updated_at": now,
         }
-
-
-    async def _upsert_market(self, data):
-        stmt = select(Market).where(
-            Market.platform == data["platform"],
-            Market.platform_market_id == data["platform_market_id"]
-        )
-        result = await self.db.execute(stmt)
-        market = result.scalars().first()
-
-        if market:
-            if self._apply_market_updates(market, data):
-                return market.id
-            return None
-
-        try:
-            async with self.db.begin_nested():
-                market = Market(**data)
-                self.db.add(market)
-                await self.db.flush()
-                return market.id
-        except IntegrityError:
-            existing = await self.db.execute(stmt)
-            existing_market = existing.scalars().first()
-            if existing_market is not None:
-                if self._apply_market_updates(existing_market, data):
-                    return existing_market.id
-        return None
-
-
-    def _apply_market_updates(self, market, data):
-        if not self._market_fields_changed(market, data):
-            return False
-        market.status = data["status"]
-        market.tradable = data["tradable"]
-        market.title = data["title"]
-        market.normalized_title = data["normalized_title"]
-        market.description = data["description"]
-        market.outcomes_json = data["outcomes_json"]
-        market.raw_payload_json = data["raw_payload_json"]
-        market.category = data["category"]
-        market.slug = data["slug"]
-        market.updated_at = datetime.now(timezone.utc)
-        return True
-
-
-    def _market_fields_changed(self, market, data):
-        return any(
-            (
-                market.status != data["status"],
-                market.tradable != data["tradable"],
-                market.title != data["title"],
-                market.normalized_title != data["normalized_title"],
-                market.description != data["description"],
-                market.outcomes_json != data["outcomes_json"],
-                market.raw_payload_json != data["raw_payload_json"],
-                market.category != data["category"],
-                market.slug != data["slug"],
-            )
-        )
 
 
     async def _mark_missing_markets_closed(self, platform, seen_market_ids):

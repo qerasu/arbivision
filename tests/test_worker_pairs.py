@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import time
 import unittest
 from types import SimpleNamespace
@@ -12,6 +13,12 @@ from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot import worker as worker_module
 from arbitrage_bot.worker import WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_signature, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
 
+
+def _fake_session_context(fake_db):
+    @contextlib.asynccontextmanager
+    async def _session_ctx():
+        yield fake_db
+    return _session_ctx
 
 class WorkerPairLifecycleTests(unittest.TestCase):
     def setUp(self):
@@ -656,28 +663,14 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_cycle_skips_pair_rebuild_when_market_sync_was_not_needed(self):
         fake_db = SimpleNamespace()
-        ingestion = SimpleNamespace(
-            sync_markets=AsyncMock(return_value=False),
-            close=AsyncMock(),
-        )
-        orderbook_service = SimpleNamespace(close=AsyncMock())
+        ingestion = SimpleNamespace(sync_markets=AsyncMock(return_value=False))
+        matcher = SimpleNamespace()
+        orderbook_service = SimpleNamespace()
+        calculator = SimpleNamespace()
+        alert_manager = SimpleNamespace()
+        fanout_manager = SimpleNamespace()
 
-        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
-            "arbitrage_bot.worker.MatcherService",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.OrderbookService",
-            return_value=orderbook_service,
-        ), patch(
-            "arbitrage_bot.worker.ArbitrageCalculator",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.AlertManager",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.FanoutManager",
-            return_value=SimpleNamespace(),
-        ), patch(
+        with patch(
             "arbitrage_bot.worker._upsert_market_pairs",
             new=AsyncMock(),
         ) as upsert_mock, patch(
@@ -696,38 +689,22 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.worker._should_run_full_pair_rematch",
             return_value=False,
         ):
-            await _run_cycle(fake_db, self.state)
+            await _run_cycle(fake_db, self.state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager)
 
         upsert_mock.assert_not_awaited()
         process_mock.assert_awaited_once()
-        ingestion.close.assert_awaited_once()
-        orderbook_service.close.assert_awaited_once()
 
 
     async def test_run_cycle_performs_full_pair_rematch_even_without_market_changes(self):
         fake_db = SimpleNamespace()
-        ingestion = SimpleNamespace(
-            sync_markets=AsyncMock(return_value=False),
-            close=AsyncMock(),
-        )
-        orderbook_service = SimpleNamespace(close=AsyncMock())
+        ingestion = SimpleNamespace(sync_markets=AsyncMock(return_value=False))
+        matcher = SimpleNamespace()
+        orderbook_service = SimpleNamespace()
+        calculator = SimpleNamespace()
+        alert_manager = SimpleNamespace()
+        fanout_manager = SimpleNamespace()
 
-        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
-            "arbitrage_bot.worker.MatcherService",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.OrderbookService",
-            return_value=orderbook_service,
-        ), patch(
-            "arbitrage_bot.worker.ArbitrageCalculator",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.AlertManager",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.FanoutManager",
-            return_value=SimpleNamespace(),
-        ), patch(
+        with patch(
             "arbitrage_bot.worker._upsert_market_pairs",
             new=AsyncMock(),
         ) as upsert_mock, patch(
@@ -746,12 +723,10 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.worker._should_run_full_pair_rematch",
             return_value=True,
         ):
-            await _run_cycle(fake_db, self.state)
+            await _run_cycle(fake_db, self.state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager)
 
         upsert_mock.assert_awaited_once()
         self.assertIsNone(upsert_mock.await_args.args[2])
-        ingestion.close.assert_awaited_once()
-        orderbook_service.close.assert_awaited_once()
 
 
     async def test_run_cycle_uses_incremental_pair_rebuild_for_changed_market_ids(self):
@@ -768,26 +743,14 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
                     },
                 }
             ),
-            close=AsyncMock(),
         )
-        orderbook_service = SimpleNamespace(close=AsyncMock())
+        matcher = SimpleNamespace()
+        orderbook_service = SimpleNamespace()
+        calculator = SimpleNamespace()
+        alert_manager = SimpleNamespace()
+        fanout_manager = SimpleNamespace()
 
-        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
-            "arbitrage_bot.worker.MatcherService",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.OrderbookService",
-            return_value=orderbook_service,
-        ), patch(
-            "arbitrage_bot.worker.ArbitrageCalculator",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.AlertManager",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.FanoutManager",
-            return_value=SimpleNamespace(),
-        ), patch(
+        with patch(
             "arbitrage_bot.worker._upsert_market_pairs",
             new=AsyncMock(),
         ) as upsert_mock, patch(
@@ -806,7 +769,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.worker._should_run_full_pair_rematch",
             return_value=False,
         ):
-            await _run_cycle(fake_db, self.state)
+            await _run_cycle(fake_db, self.state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager)
 
         self.assertEqual(
             upsert_mock.await_args.args[2],
@@ -815,8 +778,6 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
                 "predict_fun": set(),
             },
         )
-        ingestion.close.assert_awaited_once()
-        orderbook_service.close.assert_awaited_once()
 
 
     async def test_run_cycle_skips_pair_rebuild_when_sync_had_no_market_changes(self):
@@ -833,26 +794,14 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
                     },
                 }
             ),
-            close=AsyncMock(),
         )
-        orderbook_service = SimpleNamespace(close=AsyncMock())
+        matcher = SimpleNamespace()
+        orderbook_service = SimpleNamespace()
+        calculator = SimpleNamespace()
+        alert_manager = SimpleNamespace()
+        fanout_manager = SimpleNamespace()
 
-        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
-            "arbitrage_bot.worker.MatcherService",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.OrderbookService",
-            return_value=orderbook_service,
-        ), patch(
-            "arbitrage_bot.worker.ArbitrageCalculator",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.AlertManager",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.FanoutManager",
-            return_value=SimpleNamespace(),
-        ), patch(
+        with patch(
             "arbitrage_bot.worker._upsert_market_pairs",
             new=AsyncMock(),
         ) as upsert_mock, patch(
@@ -871,37 +820,21 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.worker._should_run_full_pair_rematch",
             return_value=False,
         ):
-            await _run_cycle(fake_db, self.state)
+            await _run_cycle(fake_db, self.state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager)
 
         upsert_mock.assert_not_awaited()
-        ingestion.close.assert_awaited_once()
-        orderbook_service.close.assert_awaited_once()
 
 
     async def test_run_cycle_runs_database_cleanup_when_due(self):
         fake_db = SimpleNamespace()
-        ingestion = SimpleNamespace(
-            sync_markets=AsyncMock(return_value=False),
-            close=AsyncMock(),
-        )
-        orderbook_service = SimpleNamespace(close=AsyncMock())
+        ingestion = SimpleNamespace(sync_markets=AsyncMock(return_value=False))
+        matcher = SimpleNamespace()
+        orderbook_service = SimpleNamespace()
+        calculator = SimpleNamespace()
+        alert_manager = SimpleNamespace()
+        fanout_manager = SimpleNamespace()
 
-        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
-            "arbitrage_bot.worker.MatcherService",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.OrderbookService",
-            return_value=orderbook_service,
-        ), patch(
-            "arbitrage_bot.worker.ArbitrageCalculator",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.AlertManager",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.FanoutManager",
-            return_value=SimpleNamespace(),
-        ), patch(
+        with patch(
             "arbitrage_bot.worker._process_candidates",
             new=AsyncMock(
                 return_value={
@@ -923,7 +856,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.worker.send_system_error_notification",
             new=AsyncMock(return_value=False),
         ) as system_error_mock:
-            await _run_cycle(fake_db, self.state)
+            await _run_cycle(fake_db, self.state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager)
 
         cleanup_mock.assert_awaited_once_with(fake_db, self.state)
         system_error_mock.assert_not_awaited()
@@ -932,29 +865,15 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_cycle_skips_database_cleanup_when_not_due(self):
         fake_db = SimpleNamespace()
-        ingestion = SimpleNamespace(
-            sync_markets=AsyncMock(return_value=False),
-            close=AsyncMock(),
-        )
-        orderbook_service = SimpleNamespace(close=AsyncMock())
+        ingestion = SimpleNamespace(sync_markets=AsyncMock(return_value=False))
+        matcher = SimpleNamespace()
+        orderbook_service = SimpleNamespace()
+        calculator = SimpleNamespace()
+        alert_manager = SimpleNamespace()
+        fanout_manager = SimpleNamespace()
         self.state.last_db_cleanup_completed_at = time.monotonic()
 
-        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
-            "arbitrage_bot.worker.MatcherService",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.OrderbookService",
-            return_value=orderbook_service,
-        ), patch(
-            "arbitrage_bot.worker.ArbitrageCalculator",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.AlertManager",
-            return_value=SimpleNamespace(),
-        ), patch(
-            "arbitrage_bot.worker.FanoutManager",
-            return_value=SimpleNamespace(),
-        ), patch(
+        with patch(
             "arbitrage_bot.worker._process_candidates",
             new=AsyncMock(
                 return_value={
@@ -977,7 +896,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.worker._cleanup_database_records",
             new=AsyncMock(return_value=(2, 3)),
         ) as cleanup_mock:
-            await _run_cycle(fake_db, self.state)
+            await _run_cycle(fake_db, self.state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager)
 
         cleanup_mock.assert_not_awaited()
 
@@ -1135,6 +1054,15 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
+        ), patch(
+            "arbitrage_bot.worker.AsyncSessionLocal",
+            new=_fake_session_context(fake_db),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=alert_manager,
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=fanout_manager,
         ):
             result = await _process_candidates(fake_db, orderbook_service, calculator, alert_manager, fanout_manager, self.state)
 
@@ -1228,7 +1156,16 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
-        ) as send_mock:
+        ) as send_mock, patch(
+            "arbitrage_bot.worker.AsyncSessionLocal",
+            new=_fake_session_context(fake_db),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=alert_manager,
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=fanout_manager,
+        ):
             result = await _process_candidates(
                 fake_db,
                 orderbook_service,
@@ -1331,7 +1268,16 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
-        ) as send_mock:
+        ) as send_mock, patch(
+            "arbitrage_bot.worker.AsyncSessionLocal",
+            new=_fake_session_context(fake_db),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=alert_manager,
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=fanout_manager,
+        ):
             result = await _process_candidates(
                 fake_db,
                 orderbook_service,
@@ -1449,7 +1395,16 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
-        ) as send_mock:
+        ) as send_mock, patch(
+            "arbitrage_bot.worker.AsyncSessionLocal",
+            new=_fake_session_context(fake_db),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=alert_manager,
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=fanout_manager,
+        ):
             result = await _process_candidates(
                 fake_db,
                 orderbook_service,
@@ -1564,7 +1519,16 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),
-        ) as send_mock:
+        ) as send_mock, patch(
+            "arbitrage_bot.worker.AsyncSessionLocal",
+            new=_fake_session_context(fake_db),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=alert_manager,
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=fanout_manager,
+        ):
             result = await _process_candidates(
                 fake_db,
                 orderbook_service,
@@ -1669,7 +1633,16 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(return_value=True),
-        ) as send_mock:
+        ) as send_mock, patch(
+            "arbitrage_bot.worker.AsyncSessionLocal",
+            new=_fake_session_context(fake_db),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=alert_manager,
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=fanout_manager,
+        ):
             await _process_candidates(
                 fake_db,
                 orderbook_service,
@@ -1745,6 +1718,15 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker._update_empty_counts",
             new=AsyncMock(),
+        ), patch(
+            "arbitrage_bot.worker.AsyncSessionLocal",
+            new=_fake_session_context(fake_db),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=alert_manager,
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=fanout_manager,
         ):
             await _process_candidates(fake_db, orderbook_service, calculator, alert_manager, fanout_manager, self.state)
 

@@ -29,8 +29,6 @@ class FakeDbSession:
 
 class OrderbookServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        orderbook_module._predict_fun_orderbook_cache.clear()
-        orderbook_module._polymarket_book_cache.clear()
         reset_counters()
 
 
