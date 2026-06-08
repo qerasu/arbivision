@@ -5,6 +5,7 @@ import subprocess
 
 import httpx
 from arbitrage_bot.adapters.base import BaseAdapter
+from arbitrage_bot.core.rate_limiter import TokenBucketRateLimiter
 
 
 class PredictFunAdapter(BaseAdapter):
@@ -41,6 +42,7 @@ class PredictFunAdapter(BaseAdapter):
             headers=headers,
             limits=limits,
         )
+        self.rate_limiter = TokenBucketRateLimiter(tokens_per_second=15.0, max_tokens=30)
 
 
     async def close(self):
@@ -94,6 +96,7 @@ class PredictFunAdapter(BaseAdapter):
 
 
     async def _get_json(self, path, params=None, timeout=None, curl_max_attempts=None, curl_max_time_seconds=None, curl_connect_timeout_seconds=None):
+        await self.rate_limiter.acquire()
         try:
             request_kwargs = {"params": params}
             if timeout is not None:
@@ -127,26 +130,24 @@ class PredictFunAdapter(BaseAdapter):
             else float(curl_connect_timeout_seconds)
         )
 
-        config_lines = [
-            "silent",
-            "show-error",
-            "fail",
-            "location",
-            f"connect-timeout = {connect_timeout_seconds}",
-            f"max-time = {max_time_seconds}",
+        curl_args = [
+            "curl",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--connect-timeout", str(connect_timeout_seconds),
+            "--max-time", str(max_time_seconds),
         ]
+
         for key, value in self.headers.items():
-            escaped_value = str(value).replace("\\", "\\\\").replace('"', '\\"')
-            config_lines.append(f'header = "{key}: {escaped_value}"')
-        config_lines.append(f'url = "{url}"')
-        config_payload = "\n".join(config_lines).encode("utf-8")
+            curl_args.extend(["-H", f"{key}: {value}"])
+
+        curl_args.append(url)
 
         last_detail = None
         for attempt in range(1, max_attempts + 1):
-            returncode, stdout, stderr = await self._run_curl_process(
-                ["curl", "--config", "-"],
-                stdin_payload=config_payload,
-            )
+            returncode, stdout, stderr = await self._run_curl_process(curl_args)
 
             if returncode == 0:
                 return json.loads(stdout)

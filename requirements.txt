@@ -10,3 +10,4 @@ structlog>=24.1.0
 aiogram>=3.3.0
 alembic[tz]
 greenlet
+cachetools>=5.3.0

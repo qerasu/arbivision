@@ -456,9 +456,7 @@ class IngestionService:
             Market.normalized_title.is_distinct_from(excluded.normalized_title),
             Market.description.is_distinct_from(excluded.description),
             cast(Market.outcomes_json, Text).is_distinct_from(cast(excluded.outcomes_json, Text)),
-            func.md5(cast(Market.raw_payload_json, Text)).is_distinct_from(
-                func.md5(cast(excluded.raw_payload_json, Text))
-            ),
+            Market.raw_payload_json.astext.is_distinct_from(excluded.raw_payload_json.astext),
             Market.category.is_distinct_from(excluded.category),
             Market.slug.is_distinct_from(excluded.slug),
         )
@@ -493,7 +491,6 @@ class IngestionService:
         if not platform:
             return set()
 
-        # fetch only id and platform_market_id — skip full ORM objects
         stmt = select(Market.id, Market.platform_market_id).where(
             Market.platform == platform,
             Market.status == "active",

@@ -3,6 +3,7 @@ import hashlib
 import json
 import time
 import traceback
+from cachetools import TTLCache
 from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -37,8 +38,8 @@ _EMPTY_COUNT_TTL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 20, 3600)
 
 @dataclass
 class WorkerState:
-    pair_empty_counts: dict = field(default_factory=dict)
-    market_signature_cache: dict = field(default_factory=dict)
+    pair_empty_counts: TTLCache = field(default_factory=lambda: TTLCache(maxsize=_EMPTY_COUNTS_MAX_SIZE, ttl=_EMPTY_COUNT_TTL_SECONDS))
+    market_signature_cache: TTLCache = field(default_factory=lambda: TTLCache(maxsize=_SIGNATURE_CACHE_MAX_SIZE, ttl=_EMPTY_COUNT_TTL_SECONDS))
     hot_pair_hashes: list = field(default_factory=list)
     candidate_context_loaded: bool = False
     candidate_pairs: list = field(default_factory=list)
@@ -82,7 +83,6 @@ def _snapshot_pair(pair):
 
 
 async def run_sync_loop(state=None):
-    # infinite market update loop
     runtime_state = state or WorkerState()
     ingestion = IngestionService(db_session=None)
     matcher = MatcherService()
@@ -110,7 +110,6 @@ async def run_sync_loop(state=None):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                # logging sync error
                 log.error(
                     "sync loop error",
                     error=format_error_details(e),
@@ -271,7 +270,6 @@ async def _cleanup_database_records(db, state):
         for pair_hash in stale_pair_hashes:
             await _clear_empty_count(pair_hash, state)
 
-    # use subquery instead of loading all referenced ids into memory
     referenced_subquery = select(MarketPair.market_id_a).union(
         select(MarketPair.market_id_b)
     )
@@ -435,8 +433,6 @@ async def _load_pairs_for_market_ids(db, market_ids):
     if not market_ids:
         return []
 
-    # postgresql caps query parameters at 32767;
-    # two IN-clauses double the count, so batch by 10000
     batch_size = 10000
     market_id_list = list(market_ids)
     all_pairs = []
@@ -651,19 +647,13 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         queued_at = time.monotonic()
         async with semaphore:
             _record_timing("worker.timing.pair_queue_wait", queued_at)
-            async with AsyncSessionLocal() as pair_db:
-                pair_alert_manager = AlertManager(pair_db)
-                pair_fanout_manager = FanoutManager(pair_db)
-                return await _process_candidate_pair(
-                    pair_db,
-                    orderbook_service,
-                    calculator,
-                    pair_alert_manager,
-                    pair_fanout_manager,
-                    pair,
-                    market_map,
-                    delivery_targets,
-                )
+            return await _process_candidate_pair(
+                orderbook_service,
+                calculator,
+                pair,
+                market_map,
+                delivery_targets,
+            )
 
     pair_results = await asyncio.gather(
         *(process_pair(pair) for pair in active_pairs),
@@ -676,6 +666,11 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
     }
     await _update_empty_counts(active_pairs, pairs_with_data, state)
 
+    if _should_send_immediately():
+        telegram_started_at = time.monotonic()
+        await _send_all_deliveries(pair_results, calculator)
+        _record_timing("worker.timing.telegram_send", telegram_started_at)
+
     return {
         "approved_pairs": len(pairs),
         "active_pairs": len(active_pairs),
@@ -687,11 +682,8 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
 
 
 async def _process_candidate_pair(
-    db,
     orderbook_service,
     calculator,
-    alert_manager,
-    fanout_manager,
     pair,
     market_map,
     delivery_targets,
@@ -701,14 +693,16 @@ async def _process_candidate_pair(
         "has_orderbooks": False,
         "opportunities": 0,
         "deliverable_opportunities": 0,
+        "deliveries": [],
     }
     try:
         orderbook_started_at = time.monotonic()
-        orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs(
-            [pair],
-            db,
-            market_map=market_map,
-        )
+        async with AsyncSessionLocal() as db:
+            orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs(
+                [pair],
+                db,
+                market_map=market_map,
+            )
         _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
     except Exception as e:
         _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
@@ -745,40 +739,39 @@ async def _process_candidate_pair(
 
         for calc_result in calc_results:
             try:
-                opportunity = await alert_manager.process_opportunity(item_pair, calc_result)
-                if not opportunity:
-                    continue
-                incr_counter("worker.opportunities_created")
-                fanout_started_at = time.monotonic()
-                deliveries = await fanout_manager.create_alert_deliveries(
-                    opportunity,
-                    market_a,
-                    market_b,
-                    delivery_targets=delivery_targets,
-                    skip_existing_lookup=True,
-                    directions=directions,
-                    calculator=calculator,
-                )
-                _record_timing("worker.timing.fanout", fanout_started_at)
-                if deliveries:
-                    pair_stats["deliverable_opportunities"] += 1
-                sent_count = 0
-                if deliveries and _should_send_immediately():
-                    telegram_started_at = time.monotonic()
-                    sent_count = await _send_delivery_alerts(
-                        deliveries,
+                async with AsyncSessionLocal() as db:
+                    alert_manager = AlertManager(db)
+                    opportunity = await alert_manager.process_opportunity(item_pair, calc_result)
+                    if not opportunity:
+                        continue
+                    incr_counter("worker.opportunities_created")
+
+                    fanout_manager = FanoutManager(db)
+                    fanout_started_at = time.monotonic()
+                    deliveries = await fanout_manager.create_alert_deliveries(
                         opportunity,
-                        item_pair,
                         market_a,
                         market_b,
-                        directions,
-                        calculator,
+                        delivery_targets=delivery_targets,
+                        skip_existing_lookup=True,
+                        directions=directions,
+                        calculator=calculator,
                     )
-                    _record_timing("worker.timing.telegram_send", telegram_started_at)
-                if sent_count > 0:
-                    await alert_manager.finalize_opportunity(opportunity)
-                incr_counter("worker.opportunity_processed")
-                pair_stats["opportunities"] += 1
+                    _record_timing("worker.timing.fanout", fanout_started_at)
+
+                    if deliveries:
+                        pair_stats["deliverable_opportunities"] += 1
+                        pair_stats["deliveries"].append({
+                            "deliveries": deliveries,
+                            "opportunity": opportunity,
+                            "pair": item_pair,
+                            "market_a": market_a,
+                            "market_b": market_b,
+                            "directions": directions,
+                        })
+
+                    incr_counter("worker.opportunity_processed")
+                    pair_stats["opportunities"] += 1
             except Exception as e:
                 log.error(
                     "failed to process opportunity",
@@ -786,21 +779,64 @@ async def _process_candidate_pair(
                     error=format_error_details(e),
                 )
                 incr_counter("worker.opportunity_failed")
-                try:
-                    await db.rollback()
-                except Exception:
-                    pass
                 await send_system_error_notification("worker", "process opportunity", e)
 
     return pair_stats
 
 
-async def _send_delivery_alerts(deliveries, opportunity, pair, market_a, market_b, directions, calculator):
+async def _send_all_deliveries(pair_results, calculator):
+    all_delivery_batches = [
+        delivery_batch
+        for result in pair_results
+        for delivery_batch in result.get("deliveries", [])
+    ]
+
+    if not all_delivery_batches:
+        return
+
     send_concurrency = max(1, int(settings.TELEGRAM_SEND_CONCURRENCY or 1))
     semaphore = asyncio.Semaphore(send_concurrency)
+    successful_opportunities = []
 
-    async def send_delivery(delivery):
+    async def send_batch(delivery_batch):
         async with semaphore:
+            sent_count = await _send_delivery_alerts(
+                delivery_batch["deliveries"],
+                delivery_batch["opportunity"],
+                delivery_batch["pair"],
+                delivery_batch["market_a"],
+                delivery_batch["market_b"],
+                delivery_batch["directions"],
+                calculator,
+            )
+            if sent_count > 0:
+                successful_opportunities.append(delivery_batch["opportunity"])
+            return sent_count
+
+    results = await asyncio.gather(
+        *(send_batch(batch) for batch in all_delivery_batches),
+        return_exceptions=True,
+    )
+
+    for idx, result in enumerate(results):
+        if isinstance(result, Exception):
+            log.error("delivery batch failed", batch_index=idx, error=format_error_details(result))
+
+    if successful_opportunities:
+        try:
+            async with AsyncSessionLocal() as db:
+                alert_manager = AlertManager(db)
+                for opportunity in successful_opportunities:
+                    await alert_manager.finalize_opportunity(opportunity)
+        except Exception as e:
+            log.error("failed to finalize opportunities", error=format_error_details(e))
+
+
+async def _send_delivery_alerts(deliveries, opportunity, pair, market_a, market_b, directions, calculator):
+    send_results = []
+
+    for delivery in deliveries:
+        try:
             sent = await send_alert_immediately(
                 delivery["alert"],
                 opportunity,
@@ -814,13 +850,15 @@ async def _send_delivery_alerts(deliveries, opportunity, pair, market_a, market_
             )
             if sent:
                 incr_counter("worker.immediate_send_success")
-                return 1
+                send_results.append(1)
+            else:
+                incr_counter("worker.immediate_send_failed")
+                send_results.append(0)
+        except Exception as e:
+            log.error("delivery send failed", error=format_error_details(e))
             incr_counter("worker.immediate_send_failed")
-            return 0
+            send_results.append(0)
 
-    send_results = await asyncio.gather(
-        *(send_delivery(delivery) for delivery in deliveries),
-    )
     return sum(send_results)
 
 
@@ -854,8 +892,6 @@ def _build_cached_market_signatures(markets, matcher, state):
         cached_entry = state.market_signature_cache.get(market.id)
         if cached_entry is not None and cached_entry["fingerprint"] == fingerprint:
             cached_entry["last_seen_at"] = time.monotonic()
-            # mutating market snapshot in the cached entry is safe because
-            # the fingerprint covers all content-bearing fields (title, outcomes, raw_payload, etc.)
             cached_entry["signature"]["market"] = market_snapshot
             signatures[market.id] = cached_entry["signature"]
             continue
@@ -904,16 +940,6 @@ def _prune_market_signature_cache(state, *market_groups):
         if market_id not in active_market_ids
     ]
     for market_id in stale_market_ids:
-        state.market_signature_cache.pop(market_id, None)
-
-    if len(state.market_signature_cache) <= _SIGNATURE_CACHE_MAX_SIZE:
-        return
-
-    oldest_market_ids = sorted(
-        state.market_signature_cache,
-        key=lambda market_id: state.market_signature_cache[market_id]["last_seen_at"],
-    )
-    for market_id in oldest_market_ids[: max(1, len(oldest_market_ids) // 4)]:
         state.market_signature_cache.pop(market_id, None)
 
 
@@ -1082,15 +1108,6 @@ async def _update_empty_counts(checked_pairs, pairs_with_data, state):
             await _clear_empty_count(pair.pair_hash, state)
         else:
             await _increment_empty_count(pair.pair_hash, state)
-
-    # evict oldest entries when dict grows too large
-    if len(state.pair_empty_counts) > _EMPTY_COUNTS_MAX_SIZE:
-        sorted_keys = sorted(
-            state.pair_empty_counts,
-            key=lambda k: state.pair_empty_counts[k][1],
-        )
-        for key in sorted_keys[:len(sorted_keys) // 2]:
-            state.pair_empty_counts.pop(key, None)
 
 
 def _candidate_markets_for_signature(source_signature, matcher, candidate_index):

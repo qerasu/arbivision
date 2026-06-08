@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 
 import httpx
 from arbitrage_bot.adapters.base import BaseAdapter
+from arbitrage_bot.core.rate_limiter import TokenBucketRateLimiter
 
 _log = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class PolymarketAdapter(BaseAdapter):
         self.clob_client = httpx.AsyncClient(base_url=self.clob_base_url, timeout=10.0)
         self.last_fetch_partial = False
         self.last_fetch_complete = True
+        self.rate_limiter = TokenBucketRateLimiter(tokens_per_second=10.0, max_tokens=20)
 
 
     async def close(self):
@@ -102,6 +104,7 @@ class PolymarketAdapter(BaseAdapter):
 
 
     async def fetch_books(self, token_ids):
+        await self.rate_limiter.acquire()
         payload = [{"token_id": str(token_id)} for token_id in token_ids]
         try:
             response = await self.clob_client.post("/books", json=payload)
@@ -128,6 +131,7 @@ class PolymarketAdapter(BaseAdapter):
 
 
     async def _get_json(self, path, params=None):
+        await self.rate_limiter.acquire()
         try:
             response = await self.client.get(path, params=params)
             response.raise_for_status()
