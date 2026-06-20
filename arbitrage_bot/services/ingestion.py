@@ -456,7 +456,7 @@ class IngestionService:
             Market.normalized_title.is_distinct_from(excluded.normalized_title),
             Market.description.is_distinct_from(excluded.description),
             cast(Market.outcomes_json, Text).is_distinct_from(cast(excluded.outcomes_json, Text)),
-            Market.raw_payload_json.astext.is_distinct_from(excluded.raw_payload_json.astext),
+            cast(Market.raw_payload_json, Text).is_distinct_from(cast(excluded.raw_payload_json, Text)),
             Market.category.is_distinct_from(excluded.category),
             Market.slug.is_distinct_from(excluded.slug),
         )

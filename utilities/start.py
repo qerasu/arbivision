@@ -20,10 +20,11 @@ ENV_FILE_PATH = env_file_path()
 
 
 def run_cmd(cmd):
-    print(f"running: {cmd}")
-    result = subprocess.run(cmd, shell=True, cwd=repo_root())
+    display_cmd = " ".join(cmd)
+    print(f"running: {display_cmd}")
+    result = subprocess.run(cmd, cwd=repo_root())
     if result.returncode != 0:
-        print(f"error while running: {cmd}")
+        print(f"error while running: {display_cmd}")
         sys.exit(result.returncode)
 
 
@@ -60,7 +61,7 @@ def _run_alembic_upgrade(python_exec):
         except ModuleNotFoundError:
             print('Alembic is not installed for this Python interpreter.')
             print(f'Install project dependencies for: {{sys.executable}}')
-            print('Example: python3 -m pip install -r requirements.txt')
+            print('Example: python -m pip install -r requirements.txt')
             raise SystemExit(1)
 
         sys.path.insert(0, str(repo_root))
@@ -189,8 +190,10 @@ def _is_port_in_use(host, port):
 
 def _show_port_owners(port):
     # try to show who uses the port (if lsof exists)
-    cmd = f"lsof -nP -iTCP:{port} -sTCP:LISTEN 2>/dev/null || true"
-    subprocess.run(cmd, shell=True)
+    try:
+        subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"])
+    except FileNotFoundError:
+        pass
 
 
 def main():
@@ -200,7 +203,7 @@ def main():
     print('=== starting arbitrage alert bot ===')
 
     # start databases in docker
-    run_cmd('docker compose up -d')
+    run_cmd(["docker", "compose", "up", "-d"])
 
     # apply db migrations
     python_exec = _python_exec()
@@ -221,7 +224,7 @@ def main():
     if _is_port_in_use(host, port):
         print(f'ERROR: TCP port {host}:{port} is already in use')
         _show_port_owners(port)
-        print('Stop the existing process first by using: `python3 utilities/stop.py`')
+        print('Stop the existing process first by using: `python utilities/stop.py`')
         print(f'Or change APP_PORT in {ENV_FILE_PATH}')
 
         return

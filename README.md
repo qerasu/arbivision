@@ -2,6 +2,8 @@
 
 Arbivision ищет арбитражные возможности между **Polymarket** и **Predict.Fun**, сохраняет найденные пары рынков в PostgreSQL и отправляет Telegram-алерты по подходящим возможностям.
 
+Репозиторий и локальная папка проекта называются `arbivision`.
+
 ## Что умеет сервис
 
 - синхронизирует рынки с обеих площадок
@@ -99,17 +101,39 @@ utilities/
 
 ## Быстрый старт для разработки
 
-1. Подготовьте файл окружения в `~/.config/arbivision/.env`.
-2. Установите зависимости:
+1. Перейдите в папку проекта:
 
 ```bash
-python3 -m pip install -r requirements.txt
+cd arbivision
 ```
 
-3. Запустите проект:
+2. Создайте виртуальное окружение:
 
 ```bash
-python3 utilities/start.py
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+3. Подготовьте файл окружения:
+
+```bash
+mkdir -p ~/.config/arbivision
+cp .env.example ~/.config/arbivision/.env
+```
+
+После копирования заполните в `~/.config/arbivision/.env` реальные значения `PREDICT_FUN_API_KEY`, `TELEGRAM_BOT_TOKEN` и нужные chat ids. Реальный `.env` не хранится в репозитории.
+
+4. Установите зависимости:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+5. Запустите проект:
+
+```bash
+python utilities/start.py
 ```
 
 Что делает `utilities/start.py`:
@@ -124,12 +148,12 @@ python3 utilities/start.py
 Остановка:
 
 ```bash
-python3 utilities/stop.py
+python utilities/stop.py
 ```
 
 `utilities/stop.py` завершает только сохранённый PID, не пытаясь убивать посторонние `uvicorn`-процессы, а затем делает `docker compose stop`.
 
-Опция `python3 utilities/stop.py --drop` удаляет контейнеры, сеть и volumes для Postgres и Redis. Это разрушительное действие, поэтому скрипт дополнительно спрашивает подтверждение.
+Опция `python utilities/stop.py --drop` удаляет контейнеры, сеть и volumes для Postgres и Redis. Это разрушительное действие, поэтому скрипт дополнительно спрашивает подтверждение.
 
 ## Автообновление на Windows-сервере
 
@@ -177,19 +201,26 @@ schtasks /Query /TN "Arbivision Auto Update" /V /FO LIST
 Только API без фоновых циклов:
 
 ```bash
-uvicorn arbitrage_bot.api_app:app --reload
+python -m uvicorn arbitrage_bot.api_app:app --reload
 ```
 
 Только worker:
 
 ```bash
-python3 -m arbitrage_bot.run_worker
+python -m arbitrage_bot.run_worker
 ```
 
 Только Telegram:
 
 ```bash
-python3 -m arbitrage_bot.run_telegram
+python -m arbitrage_bot.run_telegram
+```
+
+Полезно для локальной проверки:
+
+```bash
+python utilities/run_tests.py
+python utilities/backup.py
 ```
 
 ## Основные переменные окружения
@@ -299,18 +330,19 @@ python3 -m arbitrage_bot.run_telegram
 Запуск:
 
 ```bash
-python3 utilities/run_tests.py
+python utilities/run_tests.py
 ```
 
 Для полного запуска тестов нужны переменные окружения (работает только при локально запущенном проекте)
 
 ```bash
-RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python3 utilities/run_tests.py
+RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python utilities/run_tests.py
 ```
 
 ## Примечания
 
-- `.env` загружается из `~/.config/arbivision/.env`; если файл не найден, выбрасывается `FileNotFoundError` с указанием пути
+- `.env.example` лежит в корне репозитория и подходит как стартовый шаблон для `~/.config/arbivision/.env`
+- `.env` загружается из `~/.config/arbivision/.env`; если файл не найден, приложение продолжает работу с дефолтами и пустыми секретами
 - `main.py` поднимает API и фоновые рантаймы через FastAPI lifespan
 - `api_app.py` нужен, когда хочется запустить только HTTP API без worker и Telegram
 - Redis используется для dedupe и служебных кешей; `get_redis()` — синхронная функция, возвращающая глобальный пул соединений

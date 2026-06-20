@@ -524,6 +524,40 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+    async def test_upsert_markets_builds_json_diff_condition_without_astext(self):
+        class FakeResult:
+            def all(self):
+                return []
+
+
+        class FakeDbSession:
+            async def execute(self, stmt):
+                return FakeResult()
+
+
+        service = IngestionService(db_session=FakeDbSession())
+
+        changed_ids = await service._upsert_markets_postgresql(
+            [
+                {
+                    "platform": "polymarket",
+                    "platform_market_id": "100",
+                    "status": "active",
+                    "tradable": True,
+                    "title": "title",
+                    "normalized_title": "title",
+                    "description": "",
+                    "outcomes_json": [],
+                    "raw_payload_json": {"id": "100"},
+                    "category": "",
+                    "slug": "",
+                }
+            ]
+        )
+
+        self.assertEqual(changed_ids, set())
+
+
     async def test_sync_source_partial_empty_payload_does_not_count_as_success(self):
         class FakeDbSession:
             def __init__(self):
@@ -558,4 +592,3 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             service._changed_market_ids_by_platform["polymarket"],
             set(),
         )
-
