@@ -753,7 +753,6 @@ async def _process_candidate_pair(
                         market_a,
                         market_b,
                         delivery_targets=delivery_targets,
-                        skip_existing_lookup=True,
                         directions=directions,
                         calculator=calculator,
                     )

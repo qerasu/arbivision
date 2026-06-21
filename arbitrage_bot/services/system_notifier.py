@@ -49,15 +49,6 @@ def _format_system_error_message(source, operation, error):
     )
 
 
-def _format_system_notification_message(source, operation, message, level):
-    return (
-        f"system {level}\n"
-        f"source: {source}\n"
-        f"operation: {operation}\n"
-        f"details: {message}"
-    )
-
-
 def format_error_details(error):
     details = _extract_error_details(error)
     noise_marker = "For more information check:"
@@ -205,35 +196,4 @@ async def send_system_error_notification(source, operation, error):
         raise
     except Exception as exc:
         log.error("failed to send system error notification", error=str(exc))
-        return False
-
-
-async def send_system_notification(source, operation, message, level="warning"):
-    bot = _get_shared_bot()
-    chat_ids = _get_system_error_chat_ids()
-
-    if not bot or not chat_ids:
-        return False
-
-    normalized_level = str(level or "warning").strip().lower()
-    details = " ".join(str(message or "").split())
-    dedupe_key = f"{source}:{operation}:{normalized_level}:{details}"
-
-    if await _should_skip_notification_async(dedupe_key):
-        return False
-
-    payload = _format_system_notification_message(
-        source,
-        operation,
-        details,
-        normalized_level,
-    )
-    try:
-        for chat_id in chat_ids:
-            await bot.send_message(chat_id=chat_id, text=payload)
-        return True
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        log.error("failed to send system notification", error=str(exc))
         return False

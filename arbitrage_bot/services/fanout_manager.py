@@ -43,22 +43,7 @@ class FanoutManager:
         self.db = db_session
 
 
-    async def process_pending_opportunities(self, limit=50):
-        # in-memory mode (single process): pending queue is not used
-        return 0
-
-
-    async def _fanout_opportunity(self, opportunity, market_a, market_b, delivery_targets=None):
-        deliveries = await self._create_alert_deliveries(
-            opportunity,
-            market_a,
-            market_b,
-            delivery_targets=delivery_targets,
-        )
-        return len(deliveries)
-
-
-    async def create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, skip_existing_lookup=False, directions=None, calculator=None):
+    async def create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, directions=None, calculator=None):
         return await self._create_alert_deliveries(
             opportunity,
             market_a,

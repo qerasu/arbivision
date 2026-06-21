@@ -18,11 +18,5 @@ def snapshot_counters():
     return dict(_counters)
 
 
-def snapshot_and_reset_counters():
-    snapshot = dict(_counters)
-    _counters.clear()
-    return snapshot
-
-
 def reset_counters():
     _counters.clear()

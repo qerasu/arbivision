@@ -47,29 +47,3 @@ class TokenBucketRateLimiter:
             return True
 
         return False
-
-
-class SlidingWindowRateLimiter:
-    def __init__(self, max_requests, window_seconds):
-        self.max_requests = max_requests
-        self.window_seconds = float(window_seconds)
-        self.requests = []
-        self._lock = asyncio.Lock()
-
-
-    async def acquire(self):
-        async with self._lock:
-            while True:
-                now = time.monotonic()
-                cutoff = now - self.window_seconds
-
-                self.requests = [ts for ts in self.requests if ts > cutoff]
-
-                if len(self.requests) < self.max_requests:
-                    self.requests.append(now)
-                    return
-
-                oldest = self.requests[0]
-                wait_time = oldest + self.window_seconds - now
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)

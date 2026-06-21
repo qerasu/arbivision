@@ -43,8 +43,8 @@ class MainRuntimeModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(coroutines, ["worker"])
 
 
-    async def test_lifespan_starts_nothing_in_fanout_mode(self):
-        coroutines = await self._collect_runtime_targets("fanout")
+    async def test_lifespan_starts_nothing_in_api_mode(self):
+        coroutines = await self._collect_runtime_targets("api")
 
         self.assertEqual(coroutines, [])
 

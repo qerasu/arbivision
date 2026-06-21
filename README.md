@@ -43,11 +43,8 @@ arbitrage_bot/
     localization.py функция translate(language, en, ru)
     preferences.py  CRUD пользовательских настроек и UI-state
   main.py          FastAPI app c lifespan-рантаймом
-  api_app.py       FastAPI app только с API, без фоновых рантаймов
   runtime.py       общий запуск worker / telegram
   worker.py        основной цикл обработки рынков
-  run_worker.py    запуск только worker
-  run_telegram.py  запуск только telegram polling
 utilities/
   start.py         локальный dev-запуск проекта
   stop.py          безопасная остановка процесса и контейнеров
@@ -77,8 +74,9 @@ utilities/
 Параметр `APP_RUNTIME_MODE` определяет, какие фоновые процессы поднимаются внутри `arbitrage_bot.main:app`.
 
 - `all` — worker + telegram
-- `worker` — только worker
-- `telegram` — только Telegram polling
+- `worker` — worker без Telegram polling
+- `telegram` — Telegram polling без worker
+- `api` — только HTTP API, без фоновых процессов
 
 `all` рассчитан на основной сценарий, где worker пытается быстро доставить свежий alert, а Telegram loop обслуживает пользовательский интерфейс бота.
 
@@ -201,19 +199,19 @@ schtasks /Query /TN "Arbivision Auto Update" /V /FO LIST
 Только API без фоновых циклов:
 
 ```bash
-python -m uvicorn arbitrage_bot.api_app:app --reload
+APP_RUNTIME_MODE=api python -m uvicorn arbitrage_bot.main:app --reload
 ```
 
-Только worker:
+API + worker:
 
 ```bash
-python -m arbitrage_bot.run_worker
+APP_RUNTIME_MODE=worker python -m uvicorn arbitrage_bot.main:app --reload
 ```
 
-Только Telegram:
+API + Telegram:
 
 ```bash
-python -m arbitrage_bot.run_telegram
+APP_RUNTIME_MODE=telegram python -m uvicorn arbitrage_bot.main:app --reload
 ```
 
 Полезно для локальной проверки:
@@ -271,14 +269,11 @@ python utilities/backup.py
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_DEFAULT_CHAT_IDS`
 - `TELEGRAM_SYSTEM_ERROR_CHAT_IDS`
-- `TELEGRAM_ALERTS_POLL_SECONDS`
 - `TELEGRAM_SEND_CONCURRENCY`
-- `TELEGRAM_DELIVERY_RETRY_SECONDS`
-- `TELEGRAM_DELIVERY_MAX_ATTEMPTS`
 - `FANOUT_TARGET_CACHE_TTL_SECONDS`
 - `TELEGRAM_SYSTEM_ERROR_COOLDOWN_SECONDS`
 
-Сейчас `TELEGRAM_DELIVERY_RETRY_SECONDS` и `TELEGRAM_DELIVERY_MAX_ATTEMPTS` зарезервированы в конфиге, но не участвуют в доставке обычных user-alerts: worker делает одну немедленную попытку отправки, а подавление повторов обеспечивается комбинацией dedupe-state opportunity, per-user event state и delivery-marker в Redis. `TELEGRAM_SEND_CONCURRENCY` управляет только параллельностью этой немедленной отправки.
+Worker делает одну немедленную попытку отправки обычных user-alerts. Подавление повторов обеспечивается комбинацией dedupe-state opportunity, per-user event state и delivery-marker в Redis. `TELEGRAM_SEND_CONCURRENCY` управляет параллельностью этой отправки.
 
 По умолчанию cleanup БД запускается раз в 3 часа и удаляет записи старше 6 часов только из runtime-таблиц рынков и пар: пользовательские сущности (`users`, `telegram_chats`, `subscriptions`, `user_preferences`) автоматически не удаляются.
 
@@ -344,7 +339,6 @@ RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python utilities/run_tests.py
 - `.env.example` лежит в корне репозитория и подходит как стартовый шаблон для `~/.config/arbivision/.env`
 - `.env` загружается из `~/.config/arbivision/.env`; если файл не найден, приложение продолжает работу с дефолтами и пустыми секретами
 - `main.py` поднимает API и фоновые рантаймы через FastAPI lifespan
-- `api_app.py` нужен, когда хочется запустить только HTTP API без worker и Telegram
 - Redis используется для dedupe и служебных кешей; `get_redis()` — синхронная функция, возвращающая глобальный пул соединений
 - при недоступном Redis часть dedupe/cache логики деградирует мягко, без обязательного падения всего сервиса
 - `TELEGRAM_DEFAULT_CHAT_IDS` и `TELEGRAM_SYSTEM_ERROR_CHAT_IDS` хранятся как `frozenset` для O(1) membership check

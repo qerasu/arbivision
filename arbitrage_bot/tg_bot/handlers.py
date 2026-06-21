@@ -11,7 +11,6 @@ from arbitrage_bot.core.database import AsyncSessionLocal
 from arbitrage_bot.core.observability import get_started_at
 from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.services.operations_monitor import snapshot_monitor_state
-from arbitrage_bot.models.orm import Subscription
 from arbitrage_bot.models.orm import TelegramChat
 from arbitrage_bot.models.orm import User
 from arbitrage_bot.models.orm import UserPreference

@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from sqlalchemy.exc import IntegrityError
 
-from arbitrage_bot.core.config import settings
 from arbitrage_bot.tg_bot.preferences import default_preferences
 from arbitrage_bot.tg_bot.preferences import ensure_telegram_user
 from arbitrage_bot.tg_bot.preferences import effective_min_roi

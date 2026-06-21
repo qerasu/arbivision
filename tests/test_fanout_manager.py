@@ -124,14 +124,6 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot_counters()["fanout.drop.muted"], 1)
 
 
-    async def test_process_pending_opportunities_is_noop_for_in_memory_runtime(self):
-        manager = FanoutManager(FakeDbSession())
-
-        processed_count = await manager.process_pending_opportunities(limit=10)
-
-        self.assertEqual(processed_count, 0)
-
-
     async def test_get_delivery_targets_reuses_short_ttl_cache(self):
         manager = FanoutManager(FakeDbSession())
         targets = [

@@ -376,17 +376,6 @@ async def get_ui_state(db_session, chat_id):
     return setting.value_json
 
 
-async def set_global_preference(db_session, field_name, field_value):
-    preferences = await get_global_preferences(db_session)
-    preferences[field_name] = field_value
-    return await _save_global_preferences(db_session, preferences)
-
-
-async def reset_global_preferences(db_session):
-    preferences = default_preferences()
-    return await _save_global_preferences(db_session, preferences)
-
-
 async def set_ui_state(db_session, chat_id, state):
     key = _ui_state_key(chat_id)
     stmt = select(SettingsRecord).where(SettingsRecord.key == key)
@@ -409,24 +398,6 @@ async def set_ui_state(db_session, chat_id, state):
 
 async def clear_ui_state(db_session, chat_id):
     return await set_ui_state(db_session, chat_id, {})
-
-
-async def _save_global_preferences(db_session, preferences):
-    stmt = select(SettingsRecord).where(SettingsRecord.key == GLOBAL_SETTINGS_KEY)
-    result = await db_session.execute(stmt)
-    setting = result.scalars().first()
-    if setting is None:
-        setting = SettingsRecord(
-            key=GLOBAL_SETTINGS_KEY,
-            value_json=preferences,
-        )
-        db_session.add(setting)
-    else:
-        setting.value_json = preferences
-        setting.updated_at = datetime.now(timezone.utc)
-
-    await db_session.commit()
-    return preferences
 
 
 def format_preferences_text(preferences, language=None):
@@ -608,12 +579,6 @@ def _format_money(value, fallback):
     if rounded.is_integer():
         return f"${int(rounded)}"
     return f"${rounded:.2f}"
-
-
-def _format_percent(value, fallback):
-    if value is None:
-        return fallback
-    return f"{float(value):.2f}%"
 
 
 def _format_days(value, language=None):

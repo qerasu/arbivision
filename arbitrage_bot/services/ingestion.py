@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 from datetime import datetime, timezone
-from sqlalchemy import Text, cast, func, or_, update
+from sqlalchemy import Text, cast, or_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.future import select
 

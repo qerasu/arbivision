@@ -1,7 +1,6 @@
 from time import monotonic
 
 from arbitrage_bot.core.logging import get_logger
-from arbitrage_bot.services.system_notifier import send_system_notification
 
 _DUPLICATE_WARNING_ROWS = 50
 _DUPLICATE_CRITICAL_ROWS = 200

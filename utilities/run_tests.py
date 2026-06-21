@@ -1,7 +1,6 @@
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 try:
     from bootstrap import ensure_repo_on_path

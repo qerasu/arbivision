@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
-from arbitrage_bot.services import orderbook as orderbook_module
 from arbitrage_bot.services.orderbook import OrderbookService
 
 
