@@ -21,8 +21,10 @@ ENV_FILE_PATH = env_file_path()
 
 def run_cmd(cmd):
     display_cmd = " ".join(cmd)
-    print(f"running: {display_cmd}")
-    result = subprocess.run(cmd, cwd=repo_root())
+    env = os.environ.copy()
+    env["DOCKER_CLI_HINTS"] = "false"
+
+    result = subprocess.run(cmd, cwd=repo_root(), env=env)
     if result.returncode != 0:
         print(f"error while running: {display_cmd}")
         sys.exit(result.returncode)
