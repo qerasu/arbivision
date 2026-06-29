@@ -17,7 +17,7 @@ Arbivision ищет арбитражные возможности между **P
 
 ## Стек
 
-- Python 3
+- Python 3.11+
 - FastAPI
 - SQLAlchemy + asyncpg
 - Alembic
@@ -65,7 +65,7 @@ utilities/
 4. `ArbitrageCalculator` считает объём, profit и ROI.
 5. `AlertManager` проверяет dedupe в Redis по `pair_hash + direction` и создаёт snapshot opportunity только если изменение прошло пороги по `net_profit` или `net_roi`.
 6. `FanoutManager` подбирает Telegram-получателей по пользовательским фильтрам и собирает delivery.
-7. Worker не делает отдельную ревалидацию перед отправкой: если по текущим стаканам найден спред, он собирает delivery и сразу делает одну попытку отправки. Dedupe-state opportunity фиксируется в Redis только после хотя бы одной успешной доставки. Telegram layer хранит per-user state по `chat_id + pair_hash + direction`: первый alert отправляется как новый, повторный alert по тому же событию уходит только при заметном улучшении `net_profit` или `net_roi` и явно помечается как update в тексте сообщения. Отдельной retry-очереди для обычных alert delivery сейчас нет, а после успешной доставки также пишется delivery-marker в Redis по `chat_id + message_hash`, чтобы не отправлять тот же текст повторно после рестарта. Постоянная запись opportunities/alerts в PostgreSQL не используется.
+7. Worker не делает отдельную ревалидацию перед отправкой: если по текущим стаканам найден спред, он собирает delivery и сразу делает первую попытку отправки. Неудачные delivery со статусом `failed` попадают в ограниченную in-memory retry-очередь и повторяются с экспоненциальной задержкой до лимита `TELEGRAM_ALERT_RETRY_MAX_ATTEMPTS`; базовую задержку и размер очереди задают `TELEGRAM_ALERT_RETRY_BASE_DELAY_SECONDS` и `TELEGRAM_ALERT_RETRY_QUEUE_MAX_SIZE`. Очередь не сохраняется между перезапусками worker. Dedupe-state opportunity фиксируется в Redis после хотя бы одной успешной доставки, включая retry. Telegram layer хранит per-user state по `chat_id + pair_hash + direction`: первый alert отправляется как новый, повторный alert по тому же событию уходит только при заметном улучшении `net_profit` или `net_roi` и явно помечается как update в тексте сообщения. После успешной доставки также пишется delivery-marker в Redis по `chat_id + message_hash`, чтобы не отправлять тот же текст повторно после рестарта.
 
 ## Режимы запуска
 
@@ -77,6 +77,36 @@ utilities/
 - `api` — только HTTP API, без фоновых процессов
 
 `all` рассчитан на основной сценарий, где worker пытается быстро доставить свежий alert, а Telegram loop обслуживает пользовательский интерфейс бота.
+
+## Основные настройки
+
+Приложение загружает переменные из `~/.config/arbivision/.env`. Основные параметры:
+
+| Переменная | По умолчанию | Назначение |
+|---|---:|---|
+| `PREDICT_FUN_API_KEY` | — | API-ключ Predict.Fun для worker |
+| `TELEGRAM_BOT_TOKEN` | — | токен Telegram-бота |
+| `TELEGRAM_DEFAULT_CHAT_IDS` | пусто | резервный список получателей через запятую |
+| `TELEGRAM_SYSTEM_ERROR_CHAT_IDS` | пусто | chat ids с доступом к `/stats` |
+| `APP_RUNTIME_MODE` | `all` | `all`, `worker`, `telegram` или `api` |
+| `APP_HOST` / `APP_PORT` | `127.0.0.1` / `8000` | адрес HTTP-сервера при запуске через `utilities/start.py` |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `arb_user` / `arb_pass` / `arbitrage_db` | учётные данные PostgreSQL |
+| `POSTGRES_HOST` / `POSTGRES_PORT` | `localhost` / `5432` | подключение к PostgreSQL |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | `localhost` / `6379` / `0` | подключение к Redis |
+| `FEE_POLYMARKET_BPS` / `FEE_PREDICT_FUN_BPS` | `90` / `100` | комиссии площадок в базисных пунктах |
+| `ALERTS_DEDUPE_TTL_SECONDS` | `600` | TTL dedupe-state opportunity |
+| `ALERTS_DELTA_PROFIT_THRESHOLD_USD` | `3` | минимальное улучшение profit для update-alert |
+| `ALERTS_DELTA_ROI_THRESHOLD_PERCENT` | `0.5` | минимальное улучшение ROI для update-alert |
+| `MARKET_REFRESH_SECONDS` / `MARKET_SYNC_INTERVAL_SECONDS` | `5` / `60` | частота worker-цикла и синхронизации рынков |
+| `MAX_ACTIVE_PAIRS_PER_CYCLE` | `450` | максимум проверяемых пар за цикл |
+| `ORDERBOOK_PREDICT_FUN_CONCURRENCY` | `12` | параллельность запросов Predict.Fun orderbook |
+| `TELEGRAM_SEND_CONCURRENCY` | `8` | параллельность отправки Telegram-alerts |
+| `TELEGRAM_ALERT_RETRY_MAX_ATTEMPTS` | `3` | максимум попыток отправки одного alert |
+| `TELEGRAM_ALERT_RETRY_BASE_DELAY_SECONDS` | `5` | базовая задержка retry |
+| `TELEGRAM_ALERT_RETRY_QUEUE_MAX_SIZE` | `1000` | максимальный размер in-memory retry-очереди |
+| `DB_CLEANUP_INTERVAL_SECONDS` / `DB_CLEANUP_RETENTION_SECONDS` | `10800` / `21600` | период cleanup и срок хранения runtime-записей |
+
+Полный список параметров и их дефолты находится в `arbitrage_bot/core/config.py`.
 
 ## Особенности worker
 
@@ -97,7 +127,7 @@ utilities/
 - ошибки Redis в счётчиках пустых ордербуков (`empty count` трекинг) логируются на уровне DEBUG; при недоступном Redis функция деградирует в in-memory fallback
 - сетевые сбои `predict.fun` по orderbook логируются агрегированно на батч, чтобы не зашумлять логи warning-ами по каждому market id
 
-## Старт для разработки
+## Старт для разработки (macos/linux)
 
 1. Перейдите в папку проекта:
 
@@ -109,9 +139,7 @@ cd arbivision
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate # macos/linux
-
-venv\Scripts\activate.bat # windows
+source .venv/bin/activate
 ```
 
 3. Подготовьте файл окружения:
@@ -152,7 +180,13 @@ python utilities/stop.py
 
 `utilities/stop.py` завершает только сохранённый PID, не пытаясь убивать посторонние `uvicorn`-процессы, а затем делает `docker compose stop`.
 
-Опция `python utilities/stop.py --drop` удаляет контейнеры, сеть и volumes для Postgres и Redis.
+Опция `python utilities/stop.py --drop` безвозвратно удаляет контейнеры, сеть и volumes для Postgres и Redis. Перед удалением данных можно создать PostgreSQL-бэкап:
+
+```bash
+python utilities/backup.py
+```
+
+Бэкап сохраняется в `backups/`. Redis этой командой не резервируется.
 
 ## Автообновление на Windows-сервере
 
@@ -165,7 +199,7 @@ python utilities/stop.py
 - все git-команды выполняются с `timeout=60s`; при зависании сети процесс не блокируется навсегда
 - при ошибке выбрасывается `RuntimeError`, а не `SystemExit`, что безопасно при вызове из другого модуля
 
-`auto_update.py` не вызывает `utilities/stop.py` и `utilities/start.py`. При обычном запуске через `utilities/start.py` код подхватывает `uvicorn --reload`, поэтому отдельный рестарт из автообновления не нужен и может привести к двум экземплярам Telegram polling.
+`auto_update.py` не вызывает `utilities/stop.py` и `utilities/start.py`. Если сервис уже запущен отдельно через `uvicorn --reload`, изменения Python-кода подхватываются автоматически.
 
 `run_auto_update.ps1` защищает запуск lock-файлом `tmp/auto_update.lock`, чтобы две задачи планировщика не тянули git одновременно. Wrapper записывает в lock PID процесса и автоматически перехватывает stale lock, если процесс уже завершился или lock старше 15 минут.
 
@@ -252,6 +286,8 @@ APP_RUNTIME_MODE=telegram python -m uvicorn arbitrage_bot.main:app --reload
 
 `GET /api/status` возвращает агрегаты по рынкам, парам и runtime-метрикам в полях `opportunity_counts.total`, `opportunity_counts.filtered_runtime` и `alert_counts.sent_runtime`.
 
+HTTP API не использует авторизацию. По умолчанию `utilities/start.py` привязывает его к `127.0.0.1`; не публикуйте эти ручки напрямую.
+
 ## Тесты
 
 Тесты лежат в директории `tests/`.
@@ -262,14 +298,13 @@ APP_RUNTIME_MODE=telegram python -m uvicorn arbitrage_bot.main:app --reload
 python utilities/run_tests.py
 ```
 
-Для полного запуска тестов нужны переменные окружения (работает только при локально запущенном проекте)
+Для полного запуска тестов нужны переменные окружения (работает только при локально запущенном проекте и наличии хотя бы 1 записи в базе данных)
 
 ```bash
 RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python utilities/run_tests.py
 ```
 
 ## Примечания
--  Worker делает одну немедленную попытку отправки обычных user-alerts. Подавление повторов обеспечивается комбинацией dedupe-state opportunity, per-user event state и delivery-marker в Redis. `TELEGRAM_SEND_CONCURRENCY` управляет параллельностью этой отправки.
 - По умолчанию cleanup БД запускается раз в 3 часа и удаляет записи старше 6 часов только из runtime-таблиц рынков и пар: пользовательские сущности (`users`, `telegram_chats`, `subscriptions`, `user_preferences`) автоматически не удаляются.
 - `.env` загружается из `~/.config/arbivision/.env`; если файл не найден, приложение продолжает работу с дефолтами и пустыми секретами
 - `main.py` поднимает API и фоновые рантаймы через FastAPI lifespan

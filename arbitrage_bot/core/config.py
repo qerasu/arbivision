@@ -34,7 +34,6 @@ def _get_set_setting(name, default):
 
 
 class Settings:
-
     def __init__(self):
         self.POSTGRES_USER = os.getenv("POSTGRES_USER", "arb_user")
         self.POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "arb_pass")
