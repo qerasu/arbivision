@@ -49,6 +49,77 @@ class WorkerState:
     pair_cycle_offsets: dict = field(default_factory=dict)
 
 
+class AlertRetryQueue:
+    def __init__(self, calculator):
+        max_size = max(1, int(settings.TELEGRAM_ALERT_RETRY_QUEUE_MAX_SIZE or 1))
+        self._calculator = calculator
+        self._queue = asyncio.PriorityQueue(maxsize=max_size)
+        self._wake_event = asyncio.Event()
+        self._sequence = 0
+
+
+    def enqueue(self, item):
+        alert = item["delivery"]["alert"]
+        attempt_count = int(getattr(alert, "attempt_count", 0) or 0)
+        max_attempts = max(1, int(settings.TELEGRAM_ALERT_RETRY_MAX_ATTEMPTS or 1))
+        if attempt_count >= max_attempts:
+            alert.next_retry_at = None
+            incr_counter("worker.retry_exhausted")
+            return False
+
+        base_delay = max(0.0, float(settings.TELEGRAM_ALERT_RETRY_BASE_DELAY_SECONDS or 0.0))
+        delay = base_delay * (2 ** max(0, attempt_count - 1))
+        due_at = time.monotonic() + delay
+        self._sequence += 1
+
+        try:
+            self._queue.put_nowait((due_at, self._sequence, item))
+        except asyncio.QueueFull:
+            alert.next_retry_at = None
+            incr_counter("worker.retry_queue_full")
+            return False
+
+        alert.status = "retry_queued"
+        alert.next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        self._wake_event.set()
+        incr_counter("worker.retry_queued")
+        return True
+
+
+    async def run(self):
+        while True:
+            if self._queue.empty():
+                self._wake_event.clear()
+                if self._queue.empty():
+                    await self._wake_event.wait()
+                continue
+
+            due_at, sequence, item = self._queue.get_nowait()
+            delay = due_at - time.monotonic()
+            if delay > 0:
+                self._queue.put_nowait((due_at, sequence, item))
+                self._queue.task_done()
+                self._wake_event.clear()
+                try:
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            try:
+                sent = await _retry_alert_delivery(item, self._calculator)
+                alert = item["delivery"]["alert"]
+                if not sent and getattr(alert, "status", None) == "failed":
+                    self.enqueue(item)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.error("retry delivery failed", error=format_error_details(e))
+                incr_counter("worker.retry_send_failed")
+            finally:
+                self._queue.task_done()
+
+
 def _snapshot_market(market):
     return SimpleNamespace(
         id=getattr(market, "id", None),
@@ -88,6 +159,8 @@ async def run_sync_loop(state=None):
     matcher = MatcherService()
     orderbook_service = OrderbookService()
     calculator = ArbitrageCalculator()
+    retry_queue = AlertRetryQueue(calculator)
+    retry_task = asyncio.create_task(retry_queue.run())
     try:
         while True:
             try:
@@ -105,6 +178,7 @@ async def run_sync_loop(state=None):
                         calculator,
                         alert_manager,
                         fanout_manager,
+                        retry_queue,
                     )
                 incr_counter("worker.cycle_completed")
             except asyncio.CancelledError:
@@ -120,11 +194,13 @@ async def run_sync_loop(state=None):
                 
             await asyncio.sleep(settings.MARKET_REFRESH_SECONDS)
     finally:
+        retry_task.cancel()
+        await asyncio.gather(retry_task, return_exceptions=True)
         await ingestion.close()
         await orderbook_service.close()
 
 
-async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager):
+async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager, retry_queue=None):
     sync_result = await ingestion.sync_markets()
     if _should_run_full_pair_rematch(time.monotonic(), state):
         _invalidate_candidate_context_cache(state)
@@ -149,6 +225,7 @@ async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculato
         alert_manager,
         fanout_manager,
         state,
+        retry_queue,
     )
     log.info(
         "worker cycle summary",
@@ -620,7 +697,7 @@ def _record_timing(metric_name, started_at):
     incr_counter(f"{metric_name}_count")
 
 
-async def _process_candidates(db, orderbook_service, calculator, alert_manager, fanout_manager, state):
+async def _process_candidates(db, orderbook_service, calculator, alert_manager, fanout_manager, state, retry_queue=None):
     pairs, market_map = await _load_candidate_context(db, state)
     if not pairs:
         return {
@@ -674,7 +751,7 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
 
     if _should_send_immediately():
         telegram_started_at = time.monotonic()
-        await _send_all_deliveries(pair_results, calculator)
+        await _send_all_deliveries(pair_results, calculator, retry_queue)
         _record_timing("worker.timing.telegram_send", telegram_started_at)
 
     return {
@@ -789,7 +866,7 @@ async def _process_candidate_pair(
     return pair_stats
 
 
-async def _send_all_deliveries(pair_results, calculator):
+async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
     all_delivery_batches = [
         delivery_batch
         for result in pair_results
@@ -813,6 +890,7 @@ async def _send_all_deliveries(pair_results, calculator):
                 delivery_batch["market_b"],
                 delivery_batch["directions"],
                 calculator,
+                retry_queue,
             )
             if sent_count > 0:
                 successful_opportunities.append(delivery_batch["opportunity"])
@@ -837,7 +915,16 @@ async def _send_all_deliveries(pair_results, calculator):
             log.error("failed to finalize opportunities", error=format_error_details(e))
 
 
-async def _send_delivery_alerts(deliveries, opportunity, pair, market_a, market_b, directions, calculator):
+async def _send_delivery_alerts(
+    deliveries,
+    opportunity,
+    pair,
+    market_a,
+    market_b,
+    directions,
+    calculator,
+    retry_queue=None,
+):
     send_results = []
 
     for delivery in deliveries:
@@ -859,12 +946,48 @@ async def _send_delivery_alerts(deliveries, opportunity, pair, market_a, market_
             else:
                 incr_counter("worker.immediate_send_failed")
                 send_results.append(0)
+                if retry_queue is not None and getattr(delivery["alert"], "status", None) == "failed":
+                    retry_queue.enqueue({
+                        "delivery": delivery,
+                        "opportunity": opportunity,
+                        "pair": pair,
+                        "market_a": market_a,
+                        "market_b": market_b,
+                        "directions": directions,
+                    })
         except Exception as e:
             log.error("delivery send failed", error=format_error_details(e))
             incr_counter("worker.immediate_send_failed")
             send_results.append(0)
 
     return sum(send_results)
+
+
+async def _retry_alert_delivery(item, calculator):
+    delivery = item["delivery"]
+    sent = await send_alert_immediately(
+        delivery["alert"],
+        item["opportunity"],
+        item["pair"],
+        item["market_a"],
+        item["market_b"],
+        delivery["preferences"],
+        item["directions"],
+        calculator,
+        prepared_opportunity=delivery.get("opportunity"),
+    )
+    if not sent:
+        incr_counter("worker.retry_send_failed")
+        return False
+
+    incr_counter("worker.retry_send_success")
+    try:
+        async with AsyncSessionLocal() as db:
+            await AlertManager(db).finalize_opportunity(item["opportunity"])
+    except Exception as e:
+        log.error("failed to finalize retried opportunity", error=format_error_details(e))
+
+    return True
 
 
 def _pair_empty_count_key(pair_hash):

@@ -1,18 +1,16 @@
 # Arbivision
 
-Arbivision ищет арбитражные возможности между **Polymarket** и **Predict.Fun**, сохраняет найденные пары рынков в PostgreSQL и отправляет Telegram-алерты по подходящим возможностям.
-
-Репозиторий и локальная папка проекта называются `arbivision`.
+Arbivision ищет арбитражные возможности между **Polymarket** и **Predict.Fun** и отправляет Telegram-алерты по подходящим возможностям.
 
 ## Что умеет сервис
 
-- синхронизирует рынки с обеих площадок, не закрывая их по неполной выдаче API
+- синхронизирует рынки с обеих площадок
 - убирает дубли market rows перед upsert в PostgreSQL
-- обновляет только реально изменившиеся `markets`, без лишних `UPDATE`
-- матчингует похожие рынки и строит `outcome_mapping`
-- пересчитывает `market_pairs` инкрементально, только для изменившихся рынков
+- обновляет только изменившиеся `markets`
+- сопоставляет похожие рынки и строит `outcome_mapping`
+- пересчитывает `market_pairs` инкрементально
 - проверяет ордербуки асинхронно по парам и считает profitable directions
-- дедуплицирует возможности через Redis
+- дедуплицирует неэффективности через Redis
 - создаёт и доставляет Telegram-алерты
 - поддерживает пользовательские лимиты по общему объёму и по отдельному балансу на `Polymarket` и `Predict.Fun`
 - даёт внутренние API-ручки для health и status, а админ-статистику показывает в Telegram
@@ -32,42 +30,42 @@ Arbivision ищет арбитражные возможности между **P
 
 ```text
 arbitrage_bot/
-  adapters/        интеграции с Polymarket и Predict.Fun
-  api/             внутренние HTTP-ручки
-  core/            config, env loading, db, redis, logging, observability
-  models/          SQLAlchemy ORM-модели
-  services/        ingestion, matcher, orderbook, calculator, fanout
-  tg_bot/          Telegram UI, обработчики и настройки пользователей
-    bot.py         доставка алертов и форматирование сообщений
-    handlers.py    обработчики команд и callback-ов
+  adapters/         интеграции с Polymarket и Predict.Fun
+  api/              внутренние HTTP-ручки
+  core/             config, env loading, db, redis, logging, observability
+  models/           SQLAlchemy ORM-модели
+  services/         ingestion, matcher, orderbook, calculator, fanout
+  tg_bot/           Telegram UI, обработчики и настройки пользователей
+    bot.py          доставка алертов и форматирование сообщений
+    handlers.py     обработчики команд и callback-ов
     localization.py функция translate(language, en, ru)
     preferences.py  CRUD пользовательских настроек и UI-state
-  main.py          FastAPI app c lifespan-рантаймом
-  runtime.py       общий запуск worker / telegram
-  worker.py        основной цикл обработки рынков
+  main.py           FastAPI app c lifespan-рантаймом
+  runtime.py        общий запуск worker / telegram
+  worker.py         основной цикл обработки рынков
 utilities/
-  start.py         локальный dev-запуск проекта
-  stop.py          безопасная остановка процесса и контейнеров
-  run_tests.py     запуск тестов
-  backup.py        бэкап данных
-  bootstrap.py     начальная настройка окружения
-  auto_update.py   pull-only автообновление из origin/main
+  start.py          локальный dev-запуск сервиса
+  stop.py           безопасная остановка процесса и контейнеров
+  run_tests.py      запуск тестов
+  backup.py         бэкап данных
+  bootstrap.py      начальная настройка окружения
+  auto_update.py    pull-only автообновление из origin/main
   run_auto_update.ps1
-                   Windows-обёртка для auto_update.py с lock-файлом и логом
+                    Windows-обёртка для auto_update.py с lock-файлом и логом
   install_auto_update_task.ps1
-                   установка Windows Scheduled Task для автообновления
+                    установка Windows Scheduled Task для автообновления
 ```
 
 
 ## Как работает пайплайн
 
 1. `IngestionService` загружает рынки, дедуплицирует входные market rows, делает upsert в БД и возвращает ids реально изменившихся рынков. Отсутствующие рынки помечаются закрытыми только после подтверждённо полной пагинации источника.
-2. `MatcherService` строит или обновляет `MarketPair` между площадками только для затронутых рынков, а не пересчитывает весь граф без необходимости.
+2. `MatcherService` строит или обновляет `MarketPair` между площадками только для затронутых рынков. Итоговый `match_score` равен меньшему из `title_score` и `participant_score`, похожий заголовок не компенсирует слабое совпадение участников или исходов.
 3. `OrderbookService` получает ордербуки через `fetch_orderbooks_for_pairs(...)`; для single-pair проверки Predict.Fun и Polymarket запрашиваются параллельно, после чего готовятся направления `A_yes_B_no` и `A_no_B_yes`.
 4. `ArbitrageCalculator` считает объём, profit и ROI.
-5. `AlertManager` проверяет dedupe в Redis по `pair_hash + direction` и создаёт in-memory snapshot opportunity только если изменение прошло пороги по `net_profit` или `net_roi`.
-6. `FanoutManager` подбирает Telegram-получателей по пользовательским фильтрам и собирает in-memory delivery.
-7. Worker не делает отдельную ревалидацию перед отправкой: если по текущим стаканам найден спред, он собирает delivery и сразу делает одну попытку отправки. Dedupe-state opportunity фиксируется в Redis только после хотя бы одной успешной доставки. Telegram layer хранит per-user state по `chat_id + pair_hash + direction`: первый alert отправляется как новый, повторный alert по тому же событию уходит только при заметном улучшении `net_profit` или `net_roi` и явно помечается как update в тексте сообщения. Отдельной retry-очереди для обычных alert delivery сейчас нет, а после успешной доставки также пишется delivery-marker в Redis по `chat_id + message_hash`, чтобы не отправлять тот же текст повторно после рестарта. Постоянная запись opportunities/alerts в PostgreSQL не используется.
+5. `AlertManager` проверяет dedupe в Redis по `pair_hash + direction` и создаёт snapshot opportunity только если изменение прошло пороги по `net_profit` или `net_roi`.
+6. `FanoutManager` подбирает Telegram-получателей по пользовательским фильтрам и собирает delivery.
+7. Worker не делает отдельную ревалидацию перед отправкой: если по текущим стаканам найден спред, он собирает delivery и сразу делает попытку отправки. Неуспешные доставки со статусом `failed` попадают в ограниченную in-memory retry-очередь с exponential backoff. Перед каждой повторной отправкой Telegram layer заново проверяет пользовательские настройки, mute, per-user repeat state и delivery-marker. Dedupe-state opportunity фиксируется в Redis только после хотя бы одной успешной доставки. Telegram layer хранит per-user state по `chat_id + pair_hash + direction`: первый alert отправляется как новый, повторный alert по тому же событию уходит только при заметном улучшении `net_profit` или `net_roi` и явно помечается как update в тексте сообщения. После успешной доставки также пишется delivery-marker в Redis по `chat_id + message_hash`, чтобы не отправлять тот же текст повторно после рестарта. Постоянная запись opportunities/alerts в PostgreSQL не используется, поэтому ожидающие retry теряются при перезапуске worker.
 
 ## Режимы запуска
 
@@ -82,22 +80,22 @@ utilities/
 
 ## Особенности worker
 
-- worker не использует warmup-режим: после запуска opportunities обрабатываются так же, как и в любом следующем цикле
+- worker не использует warmup режим: после запуска opportunities обрабатываются так же, как и в любом следующем цикле
 - ордербуки активных пар обрабатываются как асинхронные pair-задачи с лимитом `ORDERBOOK_PREDICT_FUN_CONCURRENCY`
 - для одной пары `OrderbookService` параллельно запрашивает Predict.Fun orderbook и Polymarket books; если Predict.Fun быстро возвращает отсутствие рынка или ошибку, лишний Polymarket-запрос отменяется
 - некорректные уровни стакана со значениями `NaN` или `Infinity` отбрасываются до расчёта
 - частота самого worker-цикла задаётся через `MARKET_REFRESH_SECONDS`
-- за один worker-цикл проверяется не больше `MAX_ACTIVE_PAIRS_PER_CYCLE` пар; новые или обновлённые matched pairs попадают в hot queue и проверяются первыми, остальные пары с ближайшим временем закрытия получают приоритет, а внутри переполненных очередей используется ротация между циклами, чтобы хвост не голодал
+- за один worker-цикл проверяется не больше `MAX_ACTIVE_PAIRS_PER_CYCLE` пар; новые или обновлённые matched pairs попадают в hot queue и проверяются первыми, остальные пары с ближайшим временем закрытия получают приоритет, внутри переполненных очередей используется ротация между циклами
 - полная синхронизация источников дополнительно ограничивается `MARKET_SYNC_INTERVAL_SECONDS`
 - если API упёрся в лимит страниц, повторил страницу или вернул частичный результат, ingestion сохраняет существующие активные рынки вместо stale detection
-- после обычного sync worker rematch-ит только рынки, которые реально изменились в ingestion; полный rematch всех активных рынков идёт отдельно по `MATCHER_FULL_REMATCH_INTERVAL_SECONDS`; при достижении `MAX_MARKET_PAIRS_PER_LOOP` непроверенные пары не переводятся в `stale`
+- после обычного sync worker заново сопоставляет только рынки, которые реально изменились в ingestion; полный rematch всех активных рынков идёт отдельно по `MATCHER_FULL_REMATCH_INTERVAL_SECONDS`; при достижении `MAX_MARKET_PAIRS_PER_LOOP` непроверенные пары не переводятся в `stale`
 - список approved pair и `market_map` кешируется между циклами, чтобы не читать их из PostgreSQL без необходимости
 - worker пишет timing-счётчики стадий `worker.timing.*_ms_total/count` для queue wait, orderbook fetch, calculation, fanout и Telegram send
 - Telegram delivery по нескольким получателям отправляется параллельно с лимитом `TELEGRAM_SEND_CONCURRENCY`
-- в `worker cycle summary` теперь отдельно логируется `deliverable_opportunities`, чтобы не путать найденные opportunities и те, которые прошли fanout-фильтры
-- worker раз в `DB_CLEANUP_INTERVAL_SECONDS` чистит старые `stale/failed market_pairs` и давно закрытые `markets`, которые больше не используются никакими парами; cleanup-запрос использует SQL subquery вместо загрузки всех `market_id` в память
-- ошибки Redis в счётчиках пустых ордербуков (`empty count` трекинг) логируются на уровне DEBUG вместо молчаливого игнорирования; при недоступном Redis функция деградирует в in-memory fallback
-- сетевые сбои `predict.fun` по orderbook теперь логируются агрегированно на батч, чтобы не зашумлять логи warning-ами по каждому market id
+- в `worker cycle summary` отдельно логируется `deliverable_opportunities`, чтобы не путать найденные opportunities и те, которые прошли fanout-фильтры
+- worker раз в `DB_CLEANUP_INTERVAL_SECONDS` чистит старые `stale/failed market_pairs` и давно закрытые `markets`, которые больше не используются никакими парами; cleanup запрос использует SQL subquery вместо загрузки всех `market_id` в память
+- ошибки Redis в счётчиках пустых ордербуков (`empty count` трекинг) логируются на уровне DEBUG; при недоступном Redis функция деградирует в in-memory fallback
+- сетевые сбои `predict.fun` по orderbook логируются агрегированно на батч, чтобы не зашумлять логи warning-ами по каждому market id
 
 ## Быстрый старт для разработки
 
@@ -272,10 +270,13 @@ python utilities/backup.py
 - `TELEGRAM_DEFAULT_CHAT_IDS`
 - `TELEGRAM_SYSTEM_ERROR_CHAT_IDS`
 - `TELEGRAM_SEND_CONCURRENCY`
+- `TELEGRAM_ALERT_RETRY_MAX_ATTEMPTS`
+- `TELEGRAM_ALERT_RETRY_BASE_DELAY_SECONDS`
+- `TELEGRAM_ALERT_RETRY_QUEUE_MAX_SIZE`
 - `FANOUT_TARGET_CACHE_TTL_SECONDS`
 - `TELEGRAM_SYSTEM_ERROR_COOLDOWN_SECONDS`
 
-Worker делает одну немедленную попытку отправки обычных user-alerts. Подавление повторов обеспечивается комбинацией dedupe-state opportunity, per-user event state и delivery-marker в Redis. `TELEGRAM_SEND_CONCURRENCY` управляет параллельностью этой отправки.
+Worker делает немедленную попытку отправки обычных user-alerts и выполняет всего до `TELEGRAM_ALERT_RETRY_MAX_ATTEMPTS` попыток для ошибок со статусом `failed`. Задержка перед повтором равна `TELEGRAM_ALERT_RETRY_BASE_DELAY_SECONDS * 2^(attempt - 1)`. Размер in-memory очереди ограничен `TELEGRAM_ALERT_RETRY_QUEUE_MAX_SIZE`; при shutdown ожидающие retry отменяются. Подавление повторов обеспечивается комбинацией dedupe-state opportunity, per-user event state и delivery-marker в Redis. `TELEGRAM_SEND_CONCURRENCY` управляет параллельностью первичной отправки.
 
 По умолчанию cleanup БД запускается раз в 3 часа и удаляет записи старше 6 часов только из runtime-таблиц рынков и пар: пользовательские сущности (`users`, `telegram_chats`, `subscriptions`, `user_preferences`) автоматически не удаляются.
 

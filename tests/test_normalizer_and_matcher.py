@@ -39,7 +39,7 @@ class MatcherServiceTests(unittest.TestCase):
         self.matcher = MatcherService()
 
 
-    def test_auto_approves_close_match(self):
+    def test_rejects_close_match_without_full_confidence(self):
         poly_market = SimpleNamespace(
             id=10,
             title="Will Bitcoin price exceed 100k in 2026",
@@ -55,19 +55,7 @@ class MatcherServiceTests(unittest.TestCase):
 
         pair = self.matcher.match_candidates(poly_market, pf_market)
 
-        self.assertIsNotNone(pair)
-        self.assertEqual(pair.status, "auto_approved")
-        self.assertGreaterEqual(pair.match_score, 0.85)
-        self.assertEqual(
-            pair.outcome_mapping_json,
-            {
-                "market_a": {"yes": "poly-y", "no": "poly-n"},
-                "market_a": {"yes": "poly-y", "no": "poly-n", "yes_label": "Yes", "no_label": "No"},
-                "market_b": {"yes": "pf-y", "no": "pf-n", "yes_label": "Yes", "no_label": "No"},
-                "is_inverted": False,
-                "confidence": "high",
-            },
-        )
+        self.assertIsNone(pair)
 
 
     def test_auto_approves_direct_condition_match_with_non_binary_labels(self):
@@ -196,7 +184,7 @@ class MatcherServiceTests(unittest.TestCase):
 
         self.assertIsNotNone(pair)
         self.assertEqual(pair.status, "auto_approved")
-        self.assertGreaterEqual(pair.match_score, 0.8)
+        self.assertEqual(pair.match_score, 0.6)
         self.assertEqual(
             pair.outcome_mapping_json,
             {

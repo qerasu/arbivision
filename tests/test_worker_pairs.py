@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from unittest.mock import Mock
@@ -11,7 +12,7 @@ from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot import worker as worker_module
-from arbitrage_bot.worker import WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_signature, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
+from arbitrage_bot.worker import AlertRetryQueue, WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_signature, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _send_delivery_alerts, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
 
 
 def _fake_session_context(fake_db):
@@ -1807,3 +1808,117 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             ],
             ["pair-1", "pair-2"],
         )
+
+
+class AlertRetryQueueTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        reset_counters()
+
+
+    def test_retry_queue_applies_backoff_and_size_limit(self):
+        first_alert = SimpleNamespace(status="failed", attempt_count=2, next_retry_at=None)
+        second_alert = SimpleNamespace(status="failed", attempt_count=1, next_retry_at=None)
+        before_enqueue = datetime.now(timezone.utc)
+
+        with patch.object(
+            worker_module.settings,
+            "TELEGRAM_ALERT_RETRY_BASE_DELAY_SECONDS",
+            5,
+        ), patch.object(
+            worker_module.settings,
+            "TELEGRAM_ALERT_RETRY_QUEUE_MAX_SIZE",
+            1,
+        ):
+            retry_queue = AlertRetryQueue(SimpleNamespace())
+            first_queued = retry_queue.enqueue({"delivery": {"alert": first_alert}})
+            after_enqueue = datetime.now(timezone.utc)
+            second_queued = retry_queue.enqueue({"delivery": {"alert": second_alert}})
+
+        self.assertTrue(first_queued)
+        self.assertFalse(second_queued)
+        self.assertGreaterEqual(first_alert.next_retry_at, before_enqueue + timedelta(seconds=10))
+        self.assertLessEqual(first_alert.next_retry_at, after_enqueue + timedelta(seconds=10))
+        self.assertEqual(snapshot_counters().get("worker.retry_queue_full"), 1)
+
+
+    async def test_failed_delivery_is_queued(self):
+        alert = SimpleNamespace(status="failed", attempt_count=1, next_retry_at=None)
+        delivery = {
+            "alert": alert,
+            "preferences": SimpleNamespace(),
+            "opportunity": SimpleNamespace(),
+        }
+        retry_queue = MagicMock()
+
+        with patch(
+            "arbitrage_bot.worker.send_alert_immediately",
+            new=AsyncMock(return_value=False),
+        ):
+            sent_count = await _send_delivery_alerts(
+                [delivery],
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                {},
+                SimpleNamespace(),
+                retry_queue,
+            )
+
+        self.assertEqual(sent_count, 0)
+        retry_queue.enqueue.assert_called_once()
+
+
+    async def test_retry_queue_stops_after_max_attempts(self):
+        alert = SimpleNamespace(status="failed", attempt_count=1, next_retry_at=None)
+        item = {"delivery": {"alert": alert}}
+        exhausted = asyncio.Event()
+
+        async def fail_delivery(_item, _calculator):
+            alert.attempt_count += 1
+            alert.status = "failed"
+            if alert.attempt_count == 3:
+                exhausted.set()
+            return False
+
+        with patch.object(worker_module.settings, "TELEGRAM_ALERT_RETRY_MAX_ATTEMPTS", 3), patch.object(
+            worker_module.settings,
+            "TELEGRAM_ALERT_RETRY_BASE_DELAY_SECONDS",
+            0,
+        ), patch.object(
+            worker_module,
+            "_retry_alert_delivery",
+            new=fail_delivery,
+        ):
+            retry_queue = AlertRetryQueue(SimpleNamespace())
+            retry_queue.enqueue(item)
+            retry_task = asyncio.create_task(retry_queue.run())
+            try:
+                await asyncio.wait_for(exhausted.wait(), timeout=1)
+                await asyncio.sleep(0)
+            finally:
+                retry_task.cancel()
+                await asyncio.gather(retry_task, return_exceptions=True)
+
+        self.assertEqual(alert.attempt_count, 3)
+        self.assertIsNone(alert.next_retry_at)
+        self.assertEqual(snapshot_counters().get("worker.retry_exhausted"), 1)
+
+
+    async def test_retry_queue_task_can_be_cancelled_during_backoff(self):
+        alert = SimpleNamespace(status="failed", attempt_count=1, next_retry_at=None)
+        item = {"delivery": {"alert": alert}}
+
+        with patch.object(
+            worker_module.settings,
+            "TELEGRAM_ALERT_RETRY_BASE_DELAY_SECONDS",
+            60,
+        ):
+            retry_queue = AlertRetryQueue(SimpleNamespace())
+            retry_queue.enqueue(item)
+            retry_task = asyncio.create_task(retry_queue.run())
+            await asyncio.sleep(0)
+            retry_task.cancel()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await retry_task

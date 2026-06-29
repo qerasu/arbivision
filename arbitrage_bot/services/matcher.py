@@ -241,11 +241,7 @@ class MatcherService:
             pf_signature["participants"],
         )
         outcome_mapping = self._build_outcome_mapping(poly_market, pf_market)
-        score = max(
-            title_score,
-            (title_score * 0.45) + (participant_score * 0.55),
-            participant_score,
-        )
+        score = min(title_score, participant_score)
 
         if not self._should_auto_approve(
             poly_words,
@@ -409,7 +405,7 @@ class MatcherService:
     ):
         return {
             "matched": False,
-            "score": max(title_score, participant_score),
+            "score": min(title_score, participant_score),
             "outcome_mapping": outcome_mapping,
             "reason": {
                 "poly_title": poly_market.title,
