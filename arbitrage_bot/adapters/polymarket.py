@@ -82,6 +82,7 @@ class PolymarketAdapter(BaseAdapter):
             batch_ids = tuple(str(item.get("id")) for item in items if isinstance(item, dict))
 
             if previous_batch_ids is not None and batch_ids == previous_batch_ids:
+                reached_page_limit = True
                 break
 
             all_items.extend(items)

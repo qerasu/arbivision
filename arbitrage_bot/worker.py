@@ -374,7 +374,7 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         pf_signatures = _build_cached_market_signatures(pf_changed, matcher, state)
         poly_signatures = _build_cached_market_signatures(poly_markets, matcher, state)
         poly_index = _build_candidate_index_from_signatures(poly_signatures)
-        _match_changed_markets(
+        reached_limit = _match_changed_markets(
             pf_changed,
             pf_signatures,
             poly_index,
@@ -388,6 +388,12 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         existing_pairs = await _load_active_pairs(db)
     else:
         existing_pairs = await _load_pairs_for_market_ids(db, changed_market_ids)
+    if reached_limit:
+        existing_pairs = [
+            pair
+            for pair in existing_pairs
+            if pair.pair_hash in matched_pairs
+        ]
     new_pairs, has_updates, hot_pair_hashes = _reconcile_market_pairs(existing_pairs, matched_pairs)
     if has_updates:
         stale_pairs = [pair for pair in existing_pairs if pair.status == "stale"]

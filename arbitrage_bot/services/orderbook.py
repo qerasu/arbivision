@@ -1,5 +1,6 @@
 import asyncio
 import time
+from math import isfinite
 
 import httpx
 from arbitrage_bot.adapters.polymarket import PolymarketAdapter
@@ -651,16 +652,18 @@ class OrderbookService:
 
             if price is None or size is None:
                 return None
+        elif isinstance(level, (list, tuple)) and len(level) >= 2:
+            price, size = level[:2]
+        else:
+            return None
 
-            try:
-                return float(price), float(size)
-            except (TypeError, ValueError):
-                return None
+        try:
+            price = float(price)
+            size = float(size)
+        except (TypeError, ValueError):
+            return None
 
-        if isinstance(level, (list, tuple)) and len(level) >= 2:
-            try:
-                return float(level[0]), float(level[1])
-            except (TypeError, ValueError):
-                return None
+        if not isfinite(price) or not isfinite(size):
+            return None
 
-        return None
+        return price, size

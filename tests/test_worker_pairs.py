@@ -412,6 +412,76 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.assertEqual(fake_db.commit_calls, 1)
 
 
+    def test_upsert_market_pairs_keeps_unvisited_pairs_active_when_limit_is_hit(self):
+        poly_market = SimpleNamespace(
+            id=1,
+            title="poly",
+            category="sports",
+            outcomes_json=[],
+            raw_payload_json={},
+            status="active",
+            updated_at="v1",
+        )
+        pf_markets = [
+            SimpleNamespace(
+                id=market_id,
+                title=f"pf {market_id}",
+                category="sports",
+                outcomes_json=[],
+                raw_payload_json={},
+                status="active",
+                updated_at="v1",
+            )
+            for market_id in (10, 11)
+        ]
+        existing_pairs = [
+            SimpleNamespace(
+                pair_hash=f"1-{market.id}",
+                status="auto_approved",
+                match_score=0.9,
+                match_reason_json={"ok": True},
+                outcome_mapping_json={"market_a": {}},
+            )
+            for market in pf_markets
+        ]
+        matcher = Mock()
+        matcher.max_ranked_candidates = 25
+        matcher.build_market_signature.side_effect = lambda market: {
+            "market": market,
+            "tokens": {"shared"},
+            "condition_ids": [],
+        }
+        matcher.candidate_rank_score.return_value = 1.0
+        matcher.match_candidates.side_effect = lambda poly, pf, **kwargs: SimpleNamespace(
+            pair_hash=f"{poly.id}-{pf.id}",
+            status="auto_approved",
+            match_score=0.9,
+            match_reason_json={"ok": True},
+            outcome_mapping_json={"market_a": {}},
+        )
+
+        with patch.object(worker_module.settings, "MAX_MARKET_PAIRS_PER_LOOP", 1), patch(
+            "arbitrage_bot.worker._load_active_markets_by_platform",
+            new=AsyncMock(return_value=([poly_market], pf_markets)),
+        ), patch(
+            "arbitrage_bot.worker._load_pairs_for_market_ids",
+            new=AsyncMock(return_value=existing_pairs),
+        ):
+            asyncio.run(
+                _upsert_market_pairs(
+                    Mock(),
+                    matcher,
+                    {
+                        "polymarket": {1},
+                        "predict_fun": set(),
+                    },
+                    self.state,
+                )
+            )
+
+        self.assertEqual([pair.status for pair in existing_pairs], ["auto_approved", "auto_approved"])
+
+
 class WorkerDatabaseCleanupTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.state = WorkerState()

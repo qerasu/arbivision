@@ -31,6 +31,14 @@ class OrderbookServiceTests(unittest.IsolatedAsyncioTestCase):
         reset_counters()
 
 
+    def test_extract_level_rejects_non_finite_values(self):
+        service = OrderbookService.__new__(OrderbookService)
+
+        self.assertIsNone(service._extract_level({"price": "NaN", "size": "1"}))
+        self.assertIsNone(service._extract_level(["0.5", "Infinity"]))
+        self.assertEqual(service._extract_level(["0.5", "2"]), (0.5, 2.0))
+
+
     async def test_fetches_orderbooks_when_pair_market_sides_are_reversed(self):
         service = OrderbookService()
         service.predict_fun.fetch_orderbook = AsyncMock(

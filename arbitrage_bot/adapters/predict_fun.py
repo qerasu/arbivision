@@ -42,6 +42,8 @@ class PredictFunAdapter(BaseAdapter):
             headers=headers,
             limits=limits,
         )
+        self.last_fetch_partial = False
+        self.last_fetch_complete = True
         self.rate_limiter = TokenBucketRateLimiter(tokens_per_second=15.0, max_tokens=30)
 
 
@@ -53,6 +55,8 @@ class PredictFunAdapter(BaseAdapter):
         all_items = []
         cursor = self._encode_cursor(self.recent_start_id) if self.recent_start_id else None
         previous_batch_ids = None
+        self.last_fetch_partial = False
+        self.last_fetch_complete = False
 
         for _ in range(self.max_pages):
             params = {
@@ -66,6 +70,7 @@ class PredictFunAdapter(BaseAdapter):
             if items is None:
                 return payload
             if not items:
+                self.last_fetch_complete = True
                 break
 
             batch_ids = tuple(str(item.get("id")) for item in items if isinstance(item, dict))
@@ -75,6 +80,7 @@ class PredictFunAdapter(BaseAdapter):
             all_items.extend(item for item in items if self._is_open_market(item))
             cursor = self._extract_cursor(payload)
             if len(items) < self.page_limit or not cursor:
+                self.last_fetch_complete = True
                 break
 
             previous_batch_ids = batch_ids
@@ -140,14 +146,22 @@ class PredictFunAdapter(BaseAdapter):
             "--max-time", str(max_time_seconds),
         ]
 
-        for key, value in self.headers.items():
-            curl_args.extend(["-H", f"{key}: {value}"])
+        header_payload = None
+        if self.headers:
+            curl_args.extend(["--header", "@-"])
+            header_payload = "\n".join(
+                f"{key}: {value}"
+                for key, value in self.headers.items()
+            ).encode()
 
         curl_args.append(url)
 
         last_detail = None
         for attempt in range(1, max_attempts + 1):
-            returncode, stdout, stderr = await self._run_curl_process(curl_args)
+            returncode, stdout, stderr = await self._run_curl_process(
+                curl_args,
+                stdin_payload=header_payload,
+            )
 
             if returncode == 0:
                 return json.loads(stdout)

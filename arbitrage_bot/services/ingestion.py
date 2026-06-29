@@ -340,7 +340,7 @@ class IngestionService:
             mapped_items = [mapper(item) for item in raw_items if isinstance(item, dict)]
             platform = mapped_items[0]["platform"] if mapped_items else self._source_platform_name(source_name)
             is_partial = getattr(adapter, "last_fetch_partial", False)
-            is_complete = getattr(adapter, "last_fetch_complete", True)
+            is_complete = adapter is None or getattr(adapter, "last_fetch_complete", False)
             mapped_items, duplicate_count, duplicate_metadata = self._dedupe_market_items(mapped_items)
             if duplicate_count:
                 log.info(

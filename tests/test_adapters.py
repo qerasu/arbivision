@@ -42,6 +42,7 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
         result = await adapter.fetch_markets()
 
         self.assertEqual(result, [{"id": "1"}, {"id": "2"}])
+        self.assertFalse(adapter.last_fetch_complete)
         self.assertEqual(adapter._get_json.await_count, 2)
 
 
@@ -155,6 +156,7 @@ class PredictFunAdapterTests(unittest.IsolatedAsyncioTestCase):
                 {"id": "30", "status": "REGISTERED", "tradingStatus": "OPEN", "isVisible": True},
             ],
         )
+        self.assertTrue(adapter.last_fetch_complete)
         self.assertEqual(adapter._get_json.await_count, 2)
 
         first_call = adapter._get_json.await_args_list[0]
@@ -164,6 +166,43 @@ class PredictFunAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         second_call = adapter._get_json.await_args_list[1]
         self.assertEqual(second_call.kwargs["params"]["after"], "next-page")
+
+
+    async def test_fetch_markets_marks_incomplete_when_page_budget_is_hit(self):
+        adapter = PredictFunAdapter()
+        adapter._get_json = AsyncMock(
+            return_value={
+                "data": [
+                    {"id": "10", "status": "REGISTERED", "tradingStatus": "OPEN"},
+                ],
+                "cursor": "next-page",
+            }
+        )
+        adapter.page_limit = 1
+        adapter.max_pages = 1
+
+        result = await adapter.fetch_markets()
+
+        self.assertEqual(len(result), 1)
+        self.assertFalse(adapter.last_fetch_complete)
+
+
+    async def test_fetch_markets_marks_incomplete_when_page_repeats(self):
+        repeated_page = {
+            "data": [
+                {"id": "10", "status": "REGISTERED", "tradingStatus": "OPEN"},
+            ],
+            "cursor": "next-page",
+        }
+        adapter = PredictFunAdapter()
+        adapter._get_json = AsyncMock(side_effect=[repeated_page, repeated_page])
+        adapter.page_limit = 1
+        adapter.max_pages = 3
+
+        result = await adapter.fetch_markets()
+
+        self.assertEqual(len(result), 1)
+        self.assertFalse(adapter.last_fetch_complete)
 
 
     async def test_fetch_markets_starts_from_recent_cursor_by_default(self):
@@ -190,6 +229,21 @@ class PredictFunAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"data": []})
         adapter._curl_get_json.assert_awaited_once()
+
+
+    async def test_curl_fallback_passes_api_key_through_stdin(self):
+        adapter = PredictFunAdapter()
+        adapter.headers = {"x-api-key": "secret-value"}
+        adapter._run_curl_process = AsyncMock(
+            return_value=(0, b'{"data":[]}', b"")
+        )
+
+        result = await adapter._curl_get_json("/markets")
+
+        self.assertEqual(result, {"data": []})
+        args, kwargs = adapter._run_curl_process.await_args
+        self.assertNotIn("secret-value", " ".join(args[0]))
+        self.assertEqual(kwargs["stdin_payload"], b"x-api-key: secret-value")
 
 
     async def test_fetch_orderbook_uses_fast_timeout_profile(self):
