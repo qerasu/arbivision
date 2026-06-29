@@ -130,7 +130,7 @@ def main():
     if args.drop:
         _confirm_drop(args.yes)
 
-    # load environment only from the shared config path
+    # keep all utility scripts on the same environment file
     load_env_file(str(ENV_FILE_PATH))
 
     if args.drop:

@@ -39,7 +39,7 @@ def setup_bot():
     token = settings.TELEGRAM_BOT_TOKEN
 
     if not token:
-        # stub for tests without token
+        # allow tests to initialize without a real bot token
         return None, None
 
     bot = Bot(token=token)
@@ -184,7 +184,7 @@ def _build_market_url(market):
         if value:
             return _append_referral_params(_normalize_market_url(str(value), platform), platform)
 
-    # slug is already a full url in some cases
+    # some adapters already supply a complete market url as the slug
     if slug.startswith("http://") or slug.startswith("https://"):
         return _append_referral_params(slug, platform)
 

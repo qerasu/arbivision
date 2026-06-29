@@ -21,17 +21,13 @@ class MatcherService:
             "season", "round", "today", "tomorrow"
         }
         self.semantic_qualifiers = {
-            # ordinals
             "first", "second", "third", "fourth", "fifth",
             "sixth", "seventh", "eighth", "ninth", "tenth",
             "1st", "2nd", "3rd", "4th", "5th",
-            # rankings
             "largest", "biggest", "smallest", "highest", "lowest",
             "top", "bottom", "most", "least", "best", "worst",
-            # gender
             "men", "women", "mens", "womens", "male", "female",
             "boys", "girls",
-            # competition structure
             "team", "individual", "singles", "doubles",
             "junior", "senior", "amateur", "professional",
             "open", "pro",
@@ -196,7 +192,6 @@ class MatcherService:
                 "participant_mismatch",
             )
 
-        # strict date heuristic
         if poly_signature["entities"]["dates"] and pf_signature["entities"]["dates"]:
             if set(poly_signature["entities"]["dates"]) != set(pf_signature["entities"]["dates"]):
                 return self._build_rejection(
@@ -226,7 +221,6 @@ class MatcherService:
                 "market_context_mismatch",
             )
 
-        # jaccard index for basic text comparison
         poly_words = poly_signature["title_tokens"]
         pf_words = pf_signature["title_tokens"]
 
@@ -307,7 +301,7 @@ class MatcherService:
         ):
             return True
 
-        # non-matchup: require minimum title overlap alongside participant score
+        # participant similarity alone is too weak for non-matchup markets
         if title_score is not None:
             title_jaccard = title_score
         else:
@@ -394,7 +388,7 @@ class MatcherService:
             if word in self.semantic_qualifiers:
                 return True
 
-            # catch compound ordinals like 'thirdlargest' after normalization
+            # normalization may merge words, such as 'thirdlargest'
             for qualifier in self.semantic_qualifiers:
                 if qualifier in word and word != qualifier:
                     return True

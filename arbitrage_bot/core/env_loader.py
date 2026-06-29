@@ -2,7 +2,7 @@ import os
 
 
 def load_env_file(path):
-    # loads key=value pairs from a .env file without overriding existing env vars
+    # preserve values explicitly supplied by the process environment
     try:
         f = open(path, "r", encoding="utf-8")
     except FileNotFoundError:
@@ -18,7 +18,7 @@ def load_env_file(path):
                 continue
 
             key, val = line.split("=", 1)
-            key = key.strip().removeprefix("export ").strip() # for bash scripts
+            key = key.strip().removeprefix("export ").strip()  # accept shell-compatible export syntax
             val = val.strip()
             if not key:
                 continue

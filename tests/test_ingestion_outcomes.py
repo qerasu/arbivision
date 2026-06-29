@@ -118,8 +118,8 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mark_missing_markets_closed_marks_absent_active_market_as_closed(self):
         rows = [
-            (1, "9212"),  # missing — должен быть закрыт
-            (2, "9213"),  # present — должен остаться active
+            (1, "9212"),
+            (2, "9213"),
         ]
 
         executed_stmts = []
@@ -143,9 +143,7 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         closed_ids = await service._mark_missing_markets_closed("predict_fun", {"9213"})
 
-        # id=1 (platform_market_id="9212") отсутствует в seen → должен быть закрыт
         self.assertEqual(closed_ids, {1})
-        # SELECT + UPDATE должны быть вызваны
         self.assertEqual(len(executed_stmts), 2)
 
 

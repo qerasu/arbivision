@@ -6,7 +6,7 @@ Arbivision ищет арбитражные возможности между **P
 
 ## Что умеет сервис
 
-- синхронизирует рынки с обеих площадок
+- синхронизирует рынки с обеих площадок, не закрывая их по неполной выдаче API
 - убирает дубли market rows перед upsert в PostgreSQL
 - обновляет только реально изменившиеся `markets`, без лишних `UPDATE`
 - матчингует похожие рынки и строит `outcome_mapping`
@@ -61,7 +61,7 @@ utilities/
 
 ## Как работает пайплайн
 
-1. `IngestionService` загружает рынки, дедуплицирует входные market rows, делает upsert в БД и возвращает ids реально изменившихся рынков.
+1. `IngestionService` загружает рынки, дедуплицирует входные market rows, делает upsert в БД и возвращает ids реально изменившихся рынков. Отсутствующие рынки помечаются закрытыми только после подтверждённо полной пагинации источника.
 2. `MatcherService` строит или обновляет `MarketPair` между площадками только для затронутых рынков, а не пересчитывает весь граф без необходимости.
 3. `OrderbookService` получает ордербуки через `fetch_orderbooks_for_pairs(...)`; для single-pair проверки Predict.Fun и Polymarket запрашиваются параллельно, после чего готовятся направления `A_yes_B_no` и `A_no_B_yes`.
 4. `ArbitrageCalculator` считает объём, profit и ROI.
@@ -85,10 +85,12 @@ utilities/
 - worker не использует warmup-режим: после запуска opportunities обрабатываются так же, как и в любом следующем цикле
 - ордербуки активных пар обрабатываются как асинхронные pair-задачи с лимитом `ORDERBOOK_PREDICT_FUN_CONCURRENCY`
 - для одной пары `OrderbookService` параллельно запрашивает Predict.Fun orderbook и Polymarket books; если Predict.Fun быстро возвращает отсутствие рынка или ошибку, лишний Polymarket-запрос отменяется
+- некорректные уровни стакана со значениями `NaN` или `Infinity` отбрасываются до расчёта
 - частота самого worker-цикла задаётся через `MARKET_REFRESH_SECONDS`
 - за один worker-цикл проверяется не больше `MAX_ACTIVE_PAIRS_PER_CYCLE` пар; новые или обновлённые matched pairs попадают в hot queue и проверяются первыми, остальные пары с ближайшим временем закрытия получают приоритет, а внутри переполненных очередей используется ротация между циклами, чтобы хвост не голодал
 - полная синхронизация источников дополнительно ограничивается `MARKET_SYNC_INTERVAL_SECONDS`
-- после обычного sync worker rematch-ит только рынки, которые реально изменились в ingestion; полный rematch всех активных рынков идёт отдельно по `MATCHER_FULL_REMATCH_INTERVAL_SECONDS`
+- если API упёрся в лимит страниц, повторил страницу или вернул частичный результат, ingestion сохраняет существующие активные рынки вместо stale detection
+- после обычного sync worker rematch-ит только рынки, которые реально изменились в ingestion; полный rematch всех активных рынков идёт отдельно по `MATCHER_FULL_REMATCH_INTERVAL_SECONDS`; при достижении `MAX_MARKET_PAIRS_PER_LOOP` непроверенные пары не переводятся в `stale`
 - список approved pair и `market_map` кешируется между циклами, чтобы не читать их из PostgreSQL без необходимости
 - worker пишет timing-счётчики стадий `worker.timing.*_ms_total/count` для queue wait, orderbook fetch, calculation, fanout и Telegram send
 - Telegram delivery по нескольким получателям отправляется параллельно с лимитом `TELEGRAM_SEND_CONCURRENCY`
@@ -340,7 +342,8 @@ RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python utilities/run_tests.py
 - `.env` загружается из `~/.config/arbivision/.env`; если файл не найден, приложение продолжает работу с дефолтами и пустыми секретами
 - `main.py` поднимает API и фоновые рантаймы через FastAPI lifespan
 - Redis используется для dedupe и служебных кешей; `get_redis()` — синхронная функция, возвращающая глобальный пул соединений
-- при недоступном Redis часть dedupe/cache логики деградирует мягко, без обязательного падения всего сервиса
+- при недоступном Redis часть dedupe/cache логики деградирует мягко, без обязательного падения всего сервиса; подключение автоматически повторяется каждые 5 секунд
+- при curl fallback ключ `PREDICT_FUN_API_KEY` передаётся через stdin и не попадает в аргументы процесса
 - `TELEGRAM_DEFAULT_CHAT_IDS` и `TELEGRAM_SYSTEM_ERROR_CHAT_IDS` хранятся как `frozenset` для O(1) membership check
 - язык пользователя хранится в `user_preferences.language` и применяется ко всем текстам и кнопкам бота
 - `MatcherService.build_market_signature` вычисляет context haystack один раз и передаёт его во все внутренние `_detect_*` методы, чтобы избежать повторной нормализации одного и того же текста; аналогично `title_score` вычисляется один раз в `explain_match` и передаётся в `_should_auto_approve`

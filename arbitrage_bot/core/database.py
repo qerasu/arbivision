@@ -1,4 +1,3 @@
-# setting SQLalchemy with asyncpg
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from arbitrage_bot.core.config import settings

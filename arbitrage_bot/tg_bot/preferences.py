@@ -421,7 +421,6 @@ def format_home_text(preferences, language=None):
     status_icon = "🔴" if muted else "🟢"
     status_label = translate(lang, "Paused", "На паузе") if muted else translate(lang, "Active", "Активен")
 
-    # собираем только включённые фильтры (значение != None)
     filter_lines = []
     for field in SETTINGS_FIELDS:
         field_name = field["name"]

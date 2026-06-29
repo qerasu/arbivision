@@ -23,7 +23,6 @@ class ArbitrageCalculator:
         poly_idx = 0
         pf_idx = 0
 
-        # bypassing the order books on both exchanges until the sum of prices < 1
         while poly_idx < len(poly_levels) and pf_idx < len(pf_levels):
             p_price, p_size = poly_levels[poly_idx]
             f_price, f_size = pf_levels[pf_idx]

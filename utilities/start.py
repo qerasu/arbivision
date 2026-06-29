@@ -191,7 +191,6 @@ def _is_port_in_use(host, port):
 
 
 def _show_port_owners(port):
-    # try to show who uses the port (if lsof exists)
     try:
         subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"])
     except FileNotFoundError:
@@ -199,21 +198,18 @@ def _show_port_owners(port):
 
 
 def main():
-    # load environment only from the shared config path
+    # keep all utility scripts on the same environment file
     load_env_file(str(ENV_FILE_PATH))
 
     print('=== starting arbitrage alert bot ===')
 
-    # start databases in docker
     run_cmd(["docker", "compose", "up", "-d"])
 
-    # apply db migrations
     python_exec = _python_exec()
     db_host = os.environ.get("POSTGRES_HOST", "localhost")
     db_port = _read_int_env("POSTGRES_PORT", 5432)
     _run_alembic_upgrade_with_retry(python_exec, db_host, db_port)
 
-    # start uvicorn server in current terminal with reload for dev
     print('starting main server... (press ctrl+c to stop or use utilities/stop.py in another terminal)')
 
     env = os.environ.copy()
