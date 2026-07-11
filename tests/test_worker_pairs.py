@@ -1869,6 +1869,78 @@ class AlertRetryQueueTests(unittest.IsolatedAsyncioTestCase):
         retry_queue.enqueue.assert_called_once()
 
 
+    async def test_delivery_exception_is_queued(self):
+        alert = SimpleNamespace(status="queued", attempt_count=0, next_retry_at=None)
+        delivery = {
+            "alert": alert,
+            "preferences": SimpleNamespace(),
+            "opportunity": SimpleNamespace(),
+        }
+        retry_queue = MagicMock()
+        retry_queue.enqueue.return_value = True
+
+        with patch(
+            "arbitrage_bot.worker.send_alert_immediately",
+            new=AsyncMock(side_effect=RuntimeError("telegram unavailable")),
+        ):
+            sent_count = await _send_delivery_alerts(
+                [delivery],
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                {},
+                SimpleNamespace(),
+                retry_queue,
+            )
+
+        self.assertEqual(sent_count, 0)
+        self.assertEqual(alert.status, "failed")
+        self.assertEqual(alert.attempt_count, 1)
+        retry_queue.enqueue.assert_called_once()
+
+
+    async def test_successful_batch_waits_for_queued_delivery_before_finalizing(self):
+        opportunity = SimpleNamespace()
+        deliveries = [
+            {
+                "alert": SimpleNamespace(status="queued", attempt_count=0, next_retry_at=None),
+                "preferences": {},
+                "opportunity": SimpleNamespace(),
+            },
+            {
+                "alert": SimpleNamespace(status="queued", attempt_count=0, next_retry_at=None),
+                "preferences": {},
+                "opportunity": SimpleNamespace(),
+            },
+        ]
+        pair_results = [{
+            "deliveries": [{
+                "deliveries": deliveries,
+                "opportunity": opportunity,
+                "pair": SimpleNamespace(),
+                "market_a": SimpleNamespace(),
+                "market_b": SimpleNamespace(),
+                "directions": {},
+            }],
+        }]
+        retry_queue = MagicMock()
+        retry_queue.enqueue.return_value = True
+
+        with patch(
+            "arbitrage_bot.worker.send_alert_immediately",
+            new=AsyncMock(side_effect=[True, False]),
+        ), patch("arbitrage_bot.worker.AsyncSessionLocal") as session_factory:
+            await worker_module._send_all_deliveries(
+                pair_results,
+                SimpleNamespace(),
+                retry_queue,
+            )
+
+        session_factory.assert_not_called()
+        retry_queue.enqueue.assert_called_once()
+
+
     async def test_retry_queue_stops_after_max_attempts(self):
         alert = SimpleNamespace(status="failed", attempt_count=1, next_retry_at=None)
         item = {"delivery": {"alert": alert}}
