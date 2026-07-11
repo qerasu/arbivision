@@ -116,6 +116,8 @@ class AlertRetryQueue:
             except Exception as e:
                 log.error("retry delivery failed", error=format_error_details(e))
                 incr_counter("worker.retry_send_failed")
+                _mark_delivery_failed(item["delivery"]["alert"], e)
+                self.enqueue(item)
             finally:
                 self._queue.task_done()
 
@@ -892,7 +894,7 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
                 calculator,
                 retry_queue,
             )
-            if sent_count > 0:
+            if _deliveries_completed(delivery_batch["deliveries"]):
                 successful_opportunities.append(delivery_batch["opportunity"])
             return sent_count
 
@@ -928,6 +930,14 @@ async def _send_delivery_alerts(
     send_results = []
 
     for delivery in deliveries:
+        retry_item = {
+            "delivery": delivery,
+            "opportunity": opportunity,
+            "pair": pair,
+            "market_a": market_a,
+            "market_b": market_b,
+            "directions": directions,
+        }
         try:
             sent = await send_alert_immediately(
                 delivery["alert"],
@@ -941,26 +951,38 @@ async def _send_delivery_alerts(
                 prepared_opportunity=delivery.get("opportunity"),
             )
             if sent:
+                delivery["alert"].status = "sent"
                 incr_counter("worker.immediate_send_success")
                 send_results.append(1)
             else:
                 incr_counter("worker.immediate_send_failed")
                 send_results.append(0)
-                if retry_queue is not None and getattr(delivery["alert"], "status", None) == "failed":
-                    retry_queue.enqueue({
-                        "delivery": delivery,
-                        "opportunity": opportunity,
-                        "pair": pair,
-                        "market_a": market_a,
-                        "market_b": market_b,
-                        "directions": directions,
-                    })
+                if getattr(delivery["alert"], "status", None) not in {"cancelled", "suppressed"}:
+                    if getattr(delivery["alert"], "status", None) != "failed":
+                        _mark_delivery_failed(delivery["alert"], "delivery returned false")
+                    if retry_queue is not None:
+                        retry_queue.enqueue(retry_item)
         except Exception as e:
             log.error("delivery send failed", error=format_error_details(e))
             incr_counter("worker.immediate_send_failed")
             send_results.append(0)
+            _mark_delivery_failed(delivery["alert"], e)
+            if retry_queue is not None:
+                retry_queue.enqueue(retry_item)
 
     return sum(send_results)
+
+
+def _deliveries_completed(deliveries):
+    terminal_statuses = {"sent", "cancelled", "suppressed"}
+    return all(getattr(delivery["alert"], "status", None) in terminal_statuses for delivery in deliveries)
+
+
+def _mark_delivery_failed(alert, error):
+    alert.attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
+    alert.status = "failed"
+    alert.next_retry_at = None
+    alert.error_message = str(error)
 
 
 async def _retry_alert_delivery(item, calculator):
@@ -981,12 +1003,6 @@ async def _retry_alert_delivery(item, calculator):
         return False
 
     incr_counter("worker.retry_send_success")
-    try:
-        async with AsyncSessionLocal() as db:
-            await AlertManager(db).finalize_opportunity(item["opportunity"])
-    except Exception as e:
-        log.error("failed to finalize retried opportunity", error=format_error_details(e))
-
     return True
 
 
