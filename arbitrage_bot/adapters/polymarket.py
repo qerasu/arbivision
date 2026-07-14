@@ -14,7 +14,7 @@ _log = logging.getLogger(__name__)
 class PolymarketAdapter(BaseAdapter):
     base_url = "https://gamma-api.polymarket.com"
     clob_base_url = "https://clob.polymarket.com"
-    page_limit = 500
+    page_limit = 100
     max_pages = 200
     curl_max_attempts = 2
     curl_max_time_seconds = 8
@@ -42,7 +42,7 @@ class PolymarketAdapter(BaseAdapter):
 
     async def fetch_markets(self, max_pages=None):
         all_items = []
-        offset = 0
+        cursor = None
         previous_batch_ids = None
         had_failures = False
         reached_page_limit = False
@@ -51,23 +51,25 @@ class PolymarketAdapter(BaseAdapter):
         for page_index in range(page_budget):
             params = {
                 "limit": self.page_limit,
-                "offset": offset,
                 "active": "true",
                 "closed": "false",
             }
+            if cursor:
+                params["after_cursor"] = cursor
 
             try:
-                payload = await self._get_json("/markets", params=params)
+                payload = await self._get_json("/markets/keyset", params=params)
             except Exception as exc:
                 had_failures = True
                 _log.warning(
-                    "polymarket page fetch failed (offset=%d), stopping pagination: %s",
-                    offset,
+                    "polymarket page fetch failed (page=%d), stopping pagination: %s",
+                    page_index,
                     exc,
                 )
                 break
 
             items = self._extract_items(payload)
+            next_cursor = payload.get("next_cursor") if isinstance(payload, dict) else None
 
             if items is None:
                 if all_items:
@@ -86,14 +88,14 @@ class PolymarketAdapter(BaseAdapter):
                 break
 
             all_items.extend(items)
-            if len(items) < self.page_limit:
+            if len(items) < self.page_limit or not next_cursor:
                 break
             if page_index + 1 >= page_budget:
                 reached_page_limit = True
                 break
 
             previous_batch_ids = batch_ids
-            offset += self.page_limit
+            cursor = next_cursor
 
         self.last_fetch_partial = had_failures
         self.last_fetch_complete = not had_failures and not reached_page_limit
@@ -200,7 +202,7 @@ class PolymarketAdapter(BaseAdapter):
 
     def _extract_items(self, payload):
         if isinstance(payload, dict):
-            data = payload.get("data", payload)
+            data = payload.get("markets", payload.get("data", payload))
             return data if isinstance(data, list) else None
 
         if isinstance(payload, list):

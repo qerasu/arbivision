@@ -9,12 +9,35 @@ from arbitrage_bot.adapters.predict_fun import PredictFunAdapter
 
 
 class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_markets_continues_after_full_gamma_page(self):
+        adapter = PolymarketAdapter()
+        adapter._get_json = AsyncMock(
+            side_effect=[
+                {
+                    "markets": [{"id": str(index)} for index in range(100)],
+                    "next_cursor": "cursor-100",
+                },
+                {"markets": [{"id": "100"}]},
+            ]
+        )
+        adapter.close = AsyncMock()
+
+        result = await adapter.fetch_markets()
+
+        self.assertEqual(len(result), 101)
+        self.assertEqual(adapter._get_json.await_count, 2)
+        self.assertEqual(
+            adapter._get_json.await_args_list[1].kwargs["params"]["after_cursor"],
+            "cursor-100",
+        )
+
+
     async def test_fetch_markets_collects_all_pages(self):
         adapter = PolymarketAdapter()
         adapter._get_json = AsyncMock(
             side_effect=[
-                [{"id": "1"}, {"id": "2"}],
-                [{"id": "3"}],
+                {"markets": [{"id": "1"}, {"id": "2"}], "next_cursor": "cursor-2"},
+                {"markets": [{"id": "3"}]},
             ]
         )
         adapter.page_limit = 2
@@ -31,8 +54,8 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
         adapter = PolymarketAdapter()
         adapter._get_json = AsyncMock(
             side_effect=[
-                [{"id": "1"}, {"id": "2"}],
-                [{"id": "1"}, {"id": "2"}],
+                {"markets": [{"id": "1"}, {"id": "2"}], "next_cursor": "cursor-2"},
+                {"markets": [{"id": "1"}, {"id": "2"}], "next_cursor": "cursor-4"},
             ]
         )
         adapter.page_limit = 2
@@ -50,7 +73,7 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
         adapter = PolymarketAdapter()
         adapter._get_json = AsyncMock(
             side_effect=[
-                [{"id": "1"}, {"id": "2"}],
+                {"markets": [{"id": "1"}, {"id": "2"}], "next_cursor": "cursor-2"},
                 RuntimeError("timeout"),
             ]
         )
@@ -65,15 +88,15 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(adapter.last_fetch_partial)
         self.assertEqual(adapter._get_json.await_count, 2)
         self.assertEqual(len(log_context.output), 1)
-        self.assertIn("polymarket page fetch failed (offset=2), stopping pagination: timeout", log_context.output[0])
+        self.assertIn("polymarket page fetch failed (page=1), stopping pagination: timeout", log_context.output[0])
 
 
     async def test_fetch_markets_marks_incomplete_when_page_budget_is_hit(self):
         adapter = PolymarketAdapter()
         adapter._get_json = AsyncMock(
             side_effect=[
-                [{"id": "1"}, {"id": "2"}],
-                [{"id": "3"}, {"id": "4"}],
+                {"markets": [{"id": "1"}, {"id": "2"}], "next_cursor": "cursor-2"},
+                {"markets": [{"id": "3"}, {"id": "4"}], "next_cursor": "cursor-4"},
             ]
         )
         adapter.page_limit = 2
