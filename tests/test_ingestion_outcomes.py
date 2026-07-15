@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 from arbitrage_bot.services import ingestion as ingestion_module
@@ -163,8 +164,9 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
         service = IngestionService(db_session=FakeDbSession())
-        service.polymarket.fetch_markets = AsyncMock(return_value=[])
+        service.polymarket.iter_market_pages = MagicMock(return_value=object())
         service.predict_fun.fetch_markets = AsyncMock(return_value=[])
+        service._sync_source_pages = AsyncMock(return_value=True)
         service._sync_source = AsyncMock(return_value=True)
 
         with patch.object(ingestion_module.settings, "MARKET_SYNC_INTERVAL_SECONDS", 300.0), patch.object(
@@ -181,7 +183,7 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second["synced"])
         self.assertFalse(second["attempted"])
         self.assertEqual(second["successful_sources"], [])
-        self.assertEqual(service.polymarket.fetch_markets.await_count, 1)
+        self.assertEqual(service.polymarket.iter_market_pages.call_count, 1)
         self.assertEqual(service.predict_fun.fetch_markets.await_count, 1)
 
 
@@ -201,9 +203,10 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
         service = IngestionService(db_session=FakeDbSession())
-        service.polymarket.fetch_markets = AsyncMock(return_value=[])
+        service.polymarket.iter_market_pages = MagicMock(return_value=object())
         service.predict_fun.fetch_markets = AsyncMock(return_value=[])
-        service._sync_source = AsyncMock(side_effect=[False, True, False])
+        service._sync_source_pages = AsyncMock(side_effect=[False, False])
+        service._sync_source = AsyncMock(return_value=True)
 
         with patch.object(ingestion_module.settings, "MARKET_SYNC_INTERVAL_SECONDS", 300.0), patch.object(
             ingestion_module.settings,
@@ -217,7 +220,7 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second["synced"])
         self.assertEqual(set(first["successful_sources"]), {"predict.fun"})
         self.assertEqual(second["successful_sources"], [])
-        self.assertEqual(service.polymarket.fetch_markets.await_count, 2)
+        self.assertEqual(service.polymarket.iter_market_pages.call_count, 2)
         self.assertEqual(service.predict_fun.fetch_markets.await_count, 1)
 
 
@@ -237,8 +240,9 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
         service = IngestionService(db_session=FakeDbSession())
-        service.polymarket.fetch_markets = AsyncMock(return_value=[])
+        service.polymarket.iter_market_pages = MagicMock(return_value=object())
         service.predict_fun.fetch_markets = AsyncMock(return_value=[])
+        service._sync_source_pages = AsyncMock(return_value=False)
         service._sync_source = AsyncMock(return_value=False)
 
         with patch.object(ingestion_module.settings, "MARKET_SYNC_INTERVAL_SECONDS", 0.0), patch.object(
@@ -269,8 +273,9 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
         service = IngestionService(db_session=FakeDbSession())
-        service.polymarket.fetch_markets = AsyncMock(return_value=[])
+        service.polymarket.iter_market_pages = MagicMock(return_value=object())
         service.predict_fun.fetch_markets = AsyncMock(return_value=[])
+        service._sync_source_pages = AsyncMock(return_value=True)
         service._sync_source = AsyncMock(return_value=True)
         service.polymarket.last_fetch_complete = True
 
@@ -290,8 +295,8 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await service.sync_markets()
             await service.sync_markets()
 
-        first_call = service.polymarket.fetch_markets.await_args_list[0]
-        second_call = service.polymarket.fetch_markets.await_args_list[1]
+        first_call = service.polymarket.iter_market_pages.call_args_list[0]
+        second_call = service.polymarket.iter_market_pages.call_args_list[1]
         self.assertIsNone(first_call.kwargs["max_pages"])
         self.assertEqual(second_call.kwargs["max_pages"], 7)
 
@@ -312,8 +317,9 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
         service = IngestionService(db_session=FakeDbSession())
-        service.polymarket.fetch_markets = AsyncMock(return_value=[])
+        service.polymarket.iter_market_pages = MagicMock(return_value=object())
         service.predict_fun.fetch_markets = AsyncMock(return_value=[])
+        service._sync_source_pages = AsyncMock(return_value=True)
         service._sync_source = AsyncMock(return_value=True)
 
         with patch.object(ingestion_module.settings, "MARKET_SYNC_INTERVAL_SECONDS", 0.0), patch.object(
@@ -334,8 +340,8 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             service.polymarket.last_fetch_complete = True
             await service.sync_markets()
 
-        first_call = service.polymarket.fetch_markets.await_args_list[0]
-        second_call = service.polymarket.fetch_markets.await_args_list[1]
+        first_call = service.polymarket.iter_market_pages.call_args_list[0]
+        second_call = service.polymarket.iter_market_pages.call_args_list[1]
         self.assertIsNone(first_call.kwargs["max_pages"])
         self.assertIsNone(second_call.kwargs["max_pages"])
 
@@ -394,6 +400,97 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             "polymarket",
             {"100", "101"},
         )
+
+
+    async def test_sync_source_pages_upserts_bounded_batches(self):
+        class FakeDbSession:
+            def __init__(self):
+                self.commit_calls = 0
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+            async def rollback(self):
+                pass
+
+
+        async def pages():
+            yield [{"id": str(index), "title": f"market {index}"} for index in range(2500)]
+
+
+        def mapper(item):
+            return {
+                "platform": "polymarket",
+                "platform_market_id": item["id"],
+                "status": "active",
+                "tradable": True,
+                "title": item["title"],
+                "normalized_title": item["title"],
+                "description": "",
+                "outcomes_json": [],
+                "raw_payload_json": item,
+                "category": "",
+                "slug": "",
+            }
+
+
+        db = FakeDbSession()
+        service = IngestionService(db_session=db)
+        service._upsert_markets = AsyncMock(return_value=set())
+        service._mark_missing_markets_closed = AsyncMock(return_value=set())
+        adapter = SimpleNamespace(last_fetch_partial=False, last_fetch_complete=True)
+
+        synced = await service._sync_source_pages("polymarket", pages(), mapper, adapter)
+
+        self.assertTrue(synced)
+        self.assertEqual(
+            [len(call.args[0]) for call in service._upsert_markets.await_args_list],
+            [1000, 1000, 500],
+        )
+        self.assertEqual(db.commit_calls, 4)
+        service._mark_missing_markets_closed.assert_awaited_once()
+
+
+    async def test_sync_source_pages_keeps_changes_from_committed_batches_on_later_failure(self):
+        class FakeDbSession:
+            def __init__(self):
+                self.commit_calls = 0
+                self.rollback_calls = 0
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+            async def rollback(self):
+                self.rollback_calls += 1
+
+
+        async def pages():
+            yield [{"id": str(index)} for index in range(1001)]
+
+
+        def mapper(item):
+            return {
+                "platform": "polymarket",
+                "platform_market_id": item["id"],
+            }
+
+
+        db = FakeDbSession()
+        service = IngestionService(db_session=db)
+        service._upsert_markets = AsyncMock(
+            side_effect=[{101}, RuntimeError("connection is closed")]
+        )
+
+        synced = await service._sync_source_pages("polymarket", pages(), mapper)
+
+        self.assertFalse(synced)
+        self.assertEqual(db.commit_calls, 1)
+        self.assertEqual(db.rollback_calls, 1)
+        self.assertEqual(service._changed_market_ids_by_platform["polymarket"], {101})
 
 
     async def test_sync_source_partial_payload_skips_stale_detection_and_returns_incomplete(self):

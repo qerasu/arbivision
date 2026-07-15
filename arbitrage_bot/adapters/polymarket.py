@@ -42,64 +42,72 @@ class PolymarketAdapter(BaseAdapter):
 
     async def fetch_markets(self, max_pages=None):
         all_items = []
+
+        async for items in self.iter_market_pages(max_pages=max_pages):
+            all_items.extend(items)
+
+        return all_items
+
+
+    async def iter_market_pages(self, max_pages=None):
         cursor = None
         previous_batch_ids = None
         had_failures = False
         reached_page_limit = False
+        yielded_items = False
         page_budget = self.max_pages if max_pages is None else max(0, int(max_pages))
+        self.last_fetch_partial = False
+        self.last_fetch_complete = False
 
-        for page_index in range(page_budget):
-            params = {
-                "limit": self.page_limit,
-                "active": "true",
-                "closed": "false",
-            }
-            if cursor:
-                params["after_cursor"] = cursor
+        try:
+            for page_index in range(page_budget):
+                params = {
+                    "limit": self.page_limit,
+                    "active": "true",
+                    "closed": "false",
+                }
+                if cursor:
+                    params["after_cursor"] = cursor
 
-            try:
-                payload = await self._get_json("/markets/keyset", params=params)
-            except Exception as exc:
-                had_failures = True
-                _log.warning(
-                    "polymarket page fetch failed (page=%d), stopping pagination: %s",
-                    page_index,
-                    exc,
-                )
-                break
-
-            items = self._extract_items(payload)
-            next_cursor = payload.get("next_cursor") if isinstance(payload, dict) else None
-
-            if items is None:
-                if all_items:
+                try:
+                    payload = await self._get_json("/markets/keyset", params=params)
+                except Exception as exc:
                     had_failures = True
+                    _log.warning(
+                        "polymarket page fetch failed (page=%d), stopping pagination: %s",
+                        page_index,
+                        exc,
+                    )
                     break
-                self.last_fetch_partial = False
-                self.last_fetch_complete = True
-                return payload
-            if not items:
-                break
 
-            batch_ids = tuple(str(item.get("id")) for item in items if isinstance(item, dict))
+                items = self._extract_items(payload)
+                next_cursor = payload.get("next_cursor") if isinstance(payload, dict) else None
 
-            if previous_batch_ids is not None and batch_ids == previous_batch_ids:
-                reached_page_limit = True
-                break
+                if items is None:
+                    had_failures = yielded_items
+                    break
+                if not items:
+                    break
 
-            all_items.extend(items)
-            if len(items) < self.page_limit or not next_cursor:
-                break
-            if page_index + 1 >= page_budget:
-                reached_page_limit = True
-                break
+                batch_ids = tuple(str(item.get("id")) for item in items if isinstance(item, dict))
 
-            previous_batch_ids = batch_ids
-            cursor = next_cursor
+                if previous_batch_ids is not None and batch_ids == previous_batch_ids:
+                    reached_page_limit = True
+                    break
 
-        self.last_fetch_partial = had_failures
-        self.last_fetch_complete = not had_failures and not reached_page_limit
-        return all_items
+                yielded_items = True
+                yield items
+                if len(items) < self.page_limit or not next_cursor:
+                    break
+                if page_index + 1 >= page_budget:
+                    reached_page_limit = True
+                    break
+
+                previous_batch_ids = batch_ids
+                cursor = next_cursor
+        finally:
+            self.last_fetch_partial = had_failures
+            self.last_fetch_complete = not had_failures and not reached_page_limit
 
 
     async def fetch_orderbook(self, market_id):

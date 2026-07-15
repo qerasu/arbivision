@@ -182,7 +182,12 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
     async def test_ingestion_reports_source_error_to_telegram(self):
         db = FakeDbSession()
         service = IngestionService(db)
-        service.polymarket.fetch_markets = AsyncMock(side_effect=RuntimeError("gamma down"))
+
+        async def failing_pages():
+            raise RuntimeError("gamma down")
+            yield
+
+        service.polymarket.iter_market_pages = MagicMock(return_value=failing_pages())
         service.predict_fun.fetch_markets = AsyncMock(return_value=[])
         service.polymarket.close = AsyncMock()
         service.predict_fun.close = AsyncMock()
@@ -204,11 +209,14 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
     async def test_ingestion_skips_system_notification_for_transient_network_error(self):
         db = FakeDbSession()
         service = IngestionService(db)
-        service.polymarket.fetch_markets = AsyncMock(
-            side_effect=RuntimeError(
+
+        async def failing_pages():
+            raise RuntimeError(
                 "SSLError: [SSL: RECORD_LAYER_FAILURE] record layer failure (_ssl.c:2710)"
             )
-        )
+            yield
+
+        service.polymarket.iter_market_pages = MagicMock(return_value=failing_pages())
         service.predict_fun.fetch_markets = AsyncMock(return_value=[])
         service.polymarket.close = AsyncMock()
         service.predict_fun.close = AsyncMock()
