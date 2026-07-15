@@ -761,6 +761,7 @@ class TelegramBotSettingsUpdateTests(unittest.IsolatedAsyncioTestCase):
 class FakeTelegramAlertRedis:
     def __init__(self, initial_data=None):
         self.data = dict(initial_data or {})
+        self.mget_calls = []
         self.set_calls = []
         self.setex_calls = []
 
@@ -770,6 +771,7 @@ class FakeTelegramAlertRedis:
 
 
     async def mget(self, keys):
+        self.mget_calls.append(list(keys))
         return [self.data.get(key) for key in keys]
 
 
@@ -896,6 +898,51 @@ class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "hash-1",
         )
         self.assertEqual(redis.setex_calls[0][1], 12345)
+
+
+    async def test_send_alert_digest_sends_one_message_and_stores_each_event(self):
+        redis = FakeTelegramAlertRedis()
+        bot = SimpleNamespace(send_message=AsyncMock())
+        market_a, market_b = self._build_markets()
+        items = []
+        for index in (1, 2):
+            opportunity = self._build_runtime_opportunity(
+                net_profit=5.0 + index,
+                net_roi=0.10 + index / 100,
+                pair_hash=f"pair-{index}",
+            )
+            items.append({
+                "delivery": {
+                    "alert": self._build_alert(message_hash=f"hash-{index}"),
+                    "preferences": {},
+                    "opportunity": opportunity,
+                    "event_state": None,
+                },
+                "opportunity": opportunity,
+                "pair": SimpleNamespace(pair_hash=f"pair-{index}"),
+                "market_a": SimpleNamespace(**{**vars(market_a), "title": f"Market {index}"}),
+                "market_b": market_b,
+                "directions": {},
+            })
+
+        with patch("arbitrage_bot.tg_bot.bot._get_delivery_bot", return_value=bot), patch(
+            "arbitrage_bot.tg_bot.bot.get_redis",
+            return_value=redis,
+        ):
+            sent_opportunities = await bot_module.send_alert_digest(
+                items,
+                SimpleNamespace(),
+            )
+
+        bot.send_message.assert_awaited_once()
+        text = bot.send_message.await_args.kwargs["text"]
+        self.assertIn("2 arbitrage opportunities", text)
+        self.assertIn("Market 1", text)
+        self.assertIn("Market 2", text)
+        self.assertEqual(len(sent_opportunities), 2)
+        self.assertEqual(redis.mget_calls, [])
+        self.assertIn("telegram-alert-event:1001:pair-1:A_yes_B_no", redis.data)
+        self.assertIn("telegram-alert-event:1001:pair-2:A_yes_B_no", redis.data)
 
 
     async def test_send_alert_immediately_dedupes_in_memory_without_redis(self):

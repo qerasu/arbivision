@@ -180,19 +180,16 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         market_a, market_b = self._build_markets()
         calculator = SimpleNamespace(
-            calculate_opportunities=lambda directions, max_capital=None, max_polymarket_capital=None, max_predict_fun_capital=None: [
-                {
-                    "direction": "A_yes_B_no",
-                    "avg_price_leg_1": 0.41,
-                    "avg_price_leg_2": 0.52,
-                    "shares": 5.0,
-                    "capital_required": 4.65,
-                    "gross_profit": 0.35,
-                    "net_profit": 0.35,
-                    "gross_roi": 0.075,
-                    "net_roi": 0.075,
-                }
-            ]
+            calculate_opportunity=Mock(return_value={
+                "avg_price_leg_1": 0.41,
+                "avg_price_leg_2": 0.52,
+                "shares": 5.0,
+                "capital_required": 4.65,
+                "gross_profit": 0.35,
+                "net_profit": 0.35,
+                "gross_roi": 0.075,
+                "net_roi": 0.075,
+            })
         )
 
         deliveries = await manager.create_alert_deliveries(
@@ -212,6 +209,13 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(deliveries), 1)
+        calculator.calculate_opportunity.assert_called_once_with(
+            poly_asks=[(0.41, 12)],
+            pf_asks=[(0.52, 12)],
+            max_capital=4.65,
+            max_polymarket_capital=None,
+            max_predict_fun_capital=None,
+        )
         self.assertAlmostEqual(deliveries[0]["opportunity"].capital_required, 4.65)
         self.assertAlmostEqual(deliveries[0]["opportunity"].shares, 5.0)
 
@@ -246,7 +250,7 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
                 ),
             }
         )
-        calculator = SimpleNamespace(calculate_opportunities=Mock())
+        calculator = SimpleNamespace(calculate_opportunity=Mock())
         market_a, market_b = self._build_markets()
 
         with patch("arbitrage_bot.tg_bot.bot.get_redis", return_value=redis):
@@ -271,7 +275,7 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deliveries, [])
         self.assertEqual(len(redis.mget_calls), 1)
         self.assertEqual(len(redis.mget_calls[0]), 2)
-        calculator.calculate_opportunities.assert_not_called()
+        calculator.calculate_opportunity.assert_not_called()
         self.assertEqual(snapshot_counters()["fanout.drop.repeat_suppressed"], 1)
 
 
@@ -285,7 +289,7 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
             capital_required=10.0,
             net_profit=5.0,
         )
-        calculator = SimpleNamespace(calculate_opportunities=Mock())
+        calculator = SimpleNamespace(calculate_opportunity=Mock())
         market_a, market_b = self._build_markets()
 
         deliveries = await manager.create_alert_deliveries(
@@ -303,4 +307,4 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(deliveries), 1)
-        calculator.calculate_opportunities.assert_not_called()
+        calculator.calculate_opportunity.assert_not_called()

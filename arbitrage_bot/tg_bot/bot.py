@@ -114,6 +114,52 @@ def _format_alert_message(opportunity, pair, market_a, market_b, language=None, 
     )
 
 
+def _format_alert_digest_message(items, language=None):
+    sorted_items = sorted(
+        items,
+        key=lambda item: (
+            float(getattr(item["prepared_opportunity"], "net_roi", 0.0) or 0.0),
+            float(getattr(item["prepared_opportunity"], "net_profit", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    header = translate(
+        language,
+        f"📋 {len(sorted_items)} arbitrage opportunities",
+        f"📋 Арбитражные возможности: {len(sorted_items)}",
+    )
+    lines = [header]
+    text_length = len(header)
+    shown_count = 0
+    for index, item in enumerate(sorted_items, start=1):
+        opportunity = item["prepared_opportunity"]
+        market_a = item["market_a"]
+        market_b = item["market_b"]
+        title = str(getattr(market_a, "title", "") or getattr(market_b, "title", "") or "Arbitrage")
+        if len(title) > 60:
+            title = f"{title[:57]}..."
+        repeat_marker = "🔄 " if item["is_repeat"] else ""
+        line = (
+            f"\n<b>{index}. {repeat_marker}{html.escape(title)}</b>\n"
+            f"📈 {float(getattr(opportunity, 'net_roi', 0.0) or 0.0) * 100:.2f}% · "
+            f"💰 {_format_money(getattr(opportunity, 'net_profit', 0.0))} · "
+            f"💵 {_format_money(getattr(opportunity, 'capital_required', 0.0))}"
+        )
+        if text_length + len(line) > 3600:
+            break
+        lines.append(line)
+        text_length += len(line)
+        shown_count += 1
+    remaining_count = len(sorted_items) - shown_count
+    if remaining_count:
+        lines.append(translate(
+            language,
+            f"\n\n…and {remaining_count} more",
+            f"\n\n…и ещё {remaining_count}",
+        ))
+    return "".join(lines)
+
+
 def _format_repeat_alert_notice(language=None):
     return translate(
         language,
@@ -568,57 +614,39 @@ def _recalculate_opportunity_from_directions(opportunity, directions, calculator
     return snapshot
 
 
-async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, preferences, directions, calculator, prepared_opportunity=None):
+async def send_alert_immediately(
+    alert,
+    opportunity,
+    pair,
+    market_a,
+    market_b,
+    preferences,
+    directions,
+    calculator,
+    prepared_opportunity=None,
+    event_state_loaded=False,
+    event_state=None,
+):
     bot = _get_delivery_bot()
     if bot is None:
         return False
 
-    current_preferences = _build_runtime_preferences(preferences)
-    if bool(current_preferences.get("muted")):
-        alert.status = "cancelled"
-        alert.next_retry_at = None
-        alert.error_message = "filtered by updated preferences"
-        incr_counter("telegram.alert_cancelled_preferences")
+    prepared = await _prepare_alert_delivery(
+        alert,
+        opportunity,
+        pair,
+        market_a,
+        market_b,
+        preferences,
+        directions,
+        calculator,
+        prepared_opportunity=prepared_opportunity,
+        event_state_loaded=event_state_loaded,
+        event_state=event_state,
+    )
+    if prepared is None:
         return False
-
-    if prepared_opportunity is None:
-        prepared_opportunity = _recalculate_opportunity_from_directions(
-            opportunity,
-            directions,
-            calculator,
-            preferences=current_preferences,
-        )
-    if prepared_opportunity is None:
-        alert.status = "cancelled"
-        alert.next_retry_at = None
-        alert.error_message = "opportunity is no longer available"
-        incr_counter("telegram.alert_cancelled_revalidation")
-        return False
-
-    if prepared_opportunity is opportunity:
-        filter_reason = filter_reason_for_preferences(
-            prepared_opportunity,
-            market_a,
-            market_b,
-            current_preferences,
-        )
-        if filter_reason:
-            alert.status = "cancelled"
-            alert.next_retry_at = None
-            alert.error_message = f"filtered by updated preferences: {filter_reason}"
-            incr_counter("telegram.alert_cancelled_preferences")
-            return False
-
-    last_state = await _load_alert_event_state(alert, opportunity, pair=pair)
-    is_repeat = last_state is not None
-    if last_state is not None:
-        should_send_repeat, suppress_reason = should_send_repeat_alert(last_state, alert, prepared_opportunity)
-        if not should_send_repeat:
-            alert.status = "suppressed"
-            alert.next_retry_at = None
-            alert.error_message = suppress_reason
-            incr_counter("telegram.alert_repeat_suppressed")
-            return False
+    prepared_opportunity, current_preferences, is_repeat = prepared
 
     try:
         await _send_alert(
@@ -650,6 +678,166 @@ async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, p
         incr_counter("telegram.alert_failed")
         incr_counter("telegram.alert_send_failed")
         return False
+
+
+async def send_alert_digest(items, calculator):
+    bot = _get_delivery_bot()
+    if bot is None:
+        return []
+
+    prepared_items = []
+    successful_opportunities = []
+    for item in items:
+        delivery = item["delivery"]
+        alert = delivery["alert"]
+        prepared = await _prepare_alert_delivery(
+            alert,
+            item["opportunity"],
+            item["pair"],
+            item["market_a"],
+            item["market_b"],
+            delivery["preferences"],
+            item["directions"],
+            calculator,
+            prepared_opportunity=delivery.get("opportunity"),
+            event_state_loaded="event_state" in delivery,
+            event_state=delivery.get("event_state"),
+        )
+        if prepared is None:
+            continue
+        prepared_opportunity, current_preferences, is_repeat = prepared
+        if await _is_duplicate_delivery(alert):
+            alert.status = "sent"
+            alert.next_retry_at = None
+            alert.sent_at = datetime.now(timezone.utc)
+            alert.error_message = "delivery deduped after restart"
+            await _store_alert_event_state(
+                alert,
+                item["opportunity"],
+                prepared_opportunity,
+                pair=item["pair"],
+                market_a=item["market_a"],
+                market_b=item["market_b"],
+            )
+            successful_opportunities.append(item["opportunity"])
+            continue
+        prepared_items.append({
+            **item,
+            "alert": alert,
+            "prepared_opportunity": prepared_opportunity,
+            "current_preferences": current_preferences,
+            "is_repeat": is_repeat,
+        })
+
+    if not prepared_items:
+        return successful_opportunities
+
+    language = _extract_language_from_preferences(prepared_items[0]["current_preferences"])
+    try:
+        await bot.send_message(
+            chat_id=prepared_items[0]["alert"].telegram_chat_id,
+            text=_format_alert_digest_message(prepared_items, language=language),
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+        now = datetime.now(timezone.utc)
+        for item in prepared_items:
+            alert = item["alert"]
+            await _store_delivery_marker(alert)
+            alert.status = "sent"
+            alert.attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
+            alert.next_retry_at = None
+            alert.sent_at = now
+            alert.error_message = None
+            await _store_alert_event_state(
+                alert,
+                item["opportunity"],
+                item["prepared_opportunity"],
+                pair=item["pair"],
+                market_a=item["market_a"],
+                market_b=item["market_b"],
+            )
+            if item["is_repeat"]:
+                incr_counter("telegram.alert_repeat_sent")
+            incr_counter("telegram.alert_sent")
+            incr_counter("telegram.alert_send_success")
+            successful_opportunities.append(item["opportunity"])
+        incr_counter("telegram.digest_sent")
+        return successful_opportunities
+    except Exception as exc:
+        for item in prepared_items:
+            alert = item["alert"]
+            alert.attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
+            alert.status = "failed"
+            alert.next_retry_at = None
+            alert.error_message = str(exc)
+        incr_counter("telegram.digest_failed")
+        return successful_opportunities
+
+
+async def _prepare_alert_delivery(
+    alert,
+    opportunity,
+    pair,
+    market_a,
+    market_b,
+    preferences,
+    directions,
+    calculator,
+    prepared_opportunity=None,
+    event_state_loaded=False,
+    event_state=None,
+):
+    current_preferences = _build_runtime_preferences(preferences)
+    if bool(current_preferences.get("muted")):
+        alert.status = "cancelled"
+        alert.next_retry_at = None
+        alert.error_message = "filtered by updated preferences"
+        incr_counter("telegram.alert_cancelled_preferences")
+        return None
+
+    if prepared_opportunity is None:
+        prepared_opportunity = _recalculate_opportunity_from_directions(
+            opportunity,
+            directions,
+            calculator,
+            preferences=current_preferences,
+        )
+    if prepared_opportunity is None:
+        alert.status = "cancelled"
+        alert.next_retry_at = None
+        alert.error_message = "opportunity is no longer available"
+        incr_counter("telegram.alert_cancelled_revalidation")
+        return None
+
+    if prepared_opportunity is opportunity:
+        filter_reason = filter_reason_for_preferences(
+            prepared_opportunity,
+            market_a,
+            market_b,
+            current_preferences,
+        )
+        if filter_reason:
+            alert.status = "cancelled"
+            alert.next_retry_at = None
+            alert.error_message = f"filtered by updated preferences: {filter_reason}"
+            incr_counter("telegram.alert_cancelled_preferences")
+            return None
+
+    last_state = event_state
+    if not event_state_loaded:
+        last_state = await _load_alert_event_state(alert, opportunity, pair=pair)
+    is_repeat = last_state is not None
+    if last_state is not None:
+        should_send_repeat, suppress_reason = should_send_repeat_alert(last_state, alert, prepared_opportunity)
+        if not should_send_repeat:
+            alert.status = "suppressed"
+            alert.next_retry_at = None
+            alert.error_message = suppress_reason
+            incr_counter("telegram.alert_repeat_suppressed")
+            return None
+
+    return prepared_opportunity, current_preferences, is_repeat
 
 
 def _apply_calc_result_to_opportunity(opportunity, calc_result):

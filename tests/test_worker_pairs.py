@@ -2000,6 +2000,45 @@ class AlertRetryQueueTests(unittest.IsolatedAsyncioTestCase):
         retry_queue.enqueue.assert_called_once()
 
 
+    async def test_multiple_opportunities_for_same_chat_use_digest(self):
+        opportunities = [SimpleNamespace(name="one"), SimpleNamespace(name="two")]
+        pair_results = [{
+            "deliveries": [{
+                "deliveries": [{
+                    "alert": SimpleNamespace(telegram_chat_id="1001"),
+                    "preferences": {},
+                    "opportunity": opportunity,
+                }],
+                "opportunity": opportunity,
+                "pair": SimpleNamespace(),
+                "market_a": SimpleNamespace(),
+                "market_b": SimpleNamespace(),
+                "directions": {},
+            }],
+        } for opportunity in opportunities]
+        alert_manager = SimpleNamespace(finalize_opportunity=AsyncMock())
+
+        with patch(
+            "arbitrage_bot.worker.send_alert_digest",
+            new=AsyncMock(return_value=opportunities),
+        ) as digest_mock, patch(
+            "arbitrage_bot.worker.send_alert_immediately",
+            new=AsyncMock(),
+        ) as immediate_mock, patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=alert_manager,
+        ):
+            had_deliveries = await worker_module._send_all_deliveries(
+                pair_results,
+                SimpleNamespace(),
+            )
+
+        self.assertTrue(had_deliveries)
+        digest_mock.assert_awaited_once()
+        immediate_mock.assert_not_awaited()
+        self.assertEqual(alert_manager.finalize_opportunity.await_count, 2)
+
+
     async def test_delivery_concurrency_is_applied_to_recipients(self):
         active = 0
         peak = 0

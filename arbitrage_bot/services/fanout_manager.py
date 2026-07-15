@@ -114,6 +114,7 @@ class FanoutManager:
                     "alert": alert,
                     "preferences": target.get("preferences") or {},
                     "opportunity": target.get("prepared_opportunity") or self._snapshot_opportunity(opportunity),
+                    "event_state": target.get("event_state"),
                 }
             )
             existing_chat_ids.add(chat_id)
@@ -233,6 +234,7 @@ class FanoutManager:
                     continue
             target_payload = dict(target)
             target_payload["prepared_opportunity"] = prepared_opportunity
+            target_payload["event_state"] = last_state
             eligible_targets.append(target_payload)
 
         return eligible_targets, drop_reasons
@@ -247,25 +249,18 @@ class FanoutManager:
             max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
             max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
 
-        calc_results = calculator.calculate_opportunities(
-            directions,
+        books = (directions or {}).get(opportunity.direction) or {}
+        current_result = calculator.calculate_opportunity(
+            poly_asks=books.get("poly") or [],
+            pf_asks=books.get("pf") or [],
             max_capital=max_capital,
             max_polymarket_capital=max_polymarket_capital,
             max_predict_fun_capital=max_predict_fun_capital,
         )
-        if not calc_results:
-            return None
-
-        current_result = next(
-            (
-                result
-                for result in calc_results
-                if result.get("direction") == opportunity.direction
-            ),
-            None,
-        )
         if current_result is None:
             return None
+        current_result = dict(current_result)
+        current_result["direction"] = opportunity.direction
 
         payload = {
             "direction": getattr(opportunity, "direction", None),
