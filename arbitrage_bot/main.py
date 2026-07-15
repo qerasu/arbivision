@@ -20,14 +20,19 @@ async def lifespan(_app):
     async with managed_runtime(*coroutines):
         yield
 
-app = FastAPI(title="Arbitrage Alert Bot API", lifespan=lifespan)
+app = FastAPI(
+    title="Arbitrage Alert Bot API",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 @app.get("/")
 async def root():
     return {
         "message": "Arbitrage Alert Bot API is running",
-        "docs": "/docs",
         "health": "/api/health",
         "status": "/api/status",
     }

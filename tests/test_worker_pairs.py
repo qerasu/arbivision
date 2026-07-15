@@ -1726,7 +1726,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_mock.await_count, 1)
 
 
-    async def test_process_candidates_fetches_orderbooks_per_pair(self):
+    async def test_process_candidates_fetches_orderbooks_in_one_batch(self):
         class FakeScalarResult:
             def __init__(self, items):
                 self.items = items
@@ -1753,12 +1753,12 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         fake_db = FakeDb()
 
         async def fetch_orderbooks(pairs, *_args, **_kwargs):
-            pair = pairs[0]
             return [
                 {
                     "pair": pair,
                     "directions": {"A_yes_B_no": {"poly": [(0.4, 2)], "pf": [(0.5, 2)]}},
                 }
+                for pair in pairs
             ]
 
 
@@ -1801,11 +1801,9 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ):
             await _process_candidates(fake_db, orderbook_service, calculator, alert_manager, fanout_manager, self.state)
 
+        orderbook_service.fetch_orderbooks_for_pairs.assert_awaited_once()
         self.assertEqual(
-            [
-                call.args[0][0].pair_hash
-                for call in orderbook_service.fetch_orderbooks_for_pairs.await_args_list
-            ],
+            [pair.pair_hash for pair in orderbook_service.fetch_orderbooks_for_pairs.await_args.args[0]],
             ["pair-1", "pair-2"],
         )
 
@@ -1900,7 +1898,7 @@ class AlertRetryQueueTests(unittest.IsolatedAsyncioTestCase):
         retry_queue.enqueue.assert_called_once()
 
 
-    async def test_successful_batch_waits_for_queued_delivery_before_finalizing(self):
+    async def test_successful_delivery_finalizes_while_failed_delivery_is_queued(self):
         opportunity = SimpleNamespace()
         deliveries = [
             {
@@ -1926,19 +1924,82 @@ class AlertRetryQueueTests(unittest.IsolatedAsyncioTestCase):
         }]
         retry_queue = MagicMock()
         retry_queue.enqueue.return_value = True
+        alert_manager = SimpleNamespace(finalize_opportunity=AsyncMock())
 
         with patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(side_effect=[True, False]),
-        ), patch("arbitrage_bot.worker.AsyncSessionLocal") as session_factory:
+        ), patch("arbitrage_bot.worker.AlertManager", return_value=alert_manager):
             await worker_module._send_all_deliveries(
                 pair_results,
                 SimpleNamespace(),
                 retry_queue,
             )
 
-        session_factory.assert_not_called()
+        alert_manager.finalize_opportunity.assert_awaited_once_with(opportunity)
         retry_queue.enqueue.assert_called_once()
+
+
+    async def test_delivery_concurrency_is_applied_to_recipients(self):
+        active = 0
+        peak = 0
+
+        async def send(*_args, **_kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return True
+
+        deliveries = [
+            {
+                "alert": SimpleNamespace(status="queued"),
+                "preferences": {},
+                "opportunity": SimpleNamespace(),
+            }
+            for _ in range(2)
+        ]
+        with patch("arbitrage_bot.worker.send_alert_immediately", new=send):
+            sent_count = await _send_delivery_alerts(
+                deliveries,
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                {},
+                SimpleNamespace(),
+                send_semaphore=asyncio.Semaphore(2),
+            )
+
+        self.assertEqual(sent_count, 2)
+        self.assertEqual(peak, 2)
+
+
+    async def test_successful_retry_finalizes_opportunity(self):
+        opportunity = SimpleNamespace()
+        item = {
+            "delivery": {
+                "alert": SimpleNamespace(),
+                "preferences": {},
+                "opportunity": SimpleNamespace(),
+            },
+            "opportunity": opportunity,
+            "pair": SimpleNamespace(),
+            "market_a": SimpleNamespace(),
+            "market_b": SimpleNamespace(),
+            "directions": {},
+        }
+        alert_manager = SimpleNamespace(finalize_opportunity=AsyncMock())
+
+        with patch(
+            "arbitrage_bot.worker.send_alert_immediately",
+            new=AsyncMock(return_value=True),
+        ), patch("arbitrage_bot.worker.AlertManager", return_value=alert_manager):
+            sent = await worker_module._retry_alert_delivery(item, SimpleNamespace())
+
+        self.assertTrue(sent)
+        alert_manager.finalize_opportunity.assert_awaited_once_with(opportunity)
 
 
     async def test_retry_queue_stops_after_max_attempts(self):

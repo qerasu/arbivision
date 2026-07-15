@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 from aiogram.types import LinkPreviewOptions
 from aiogram.types import MenuButtonCommands
+from cachetools import TTLCache
 from sqlalchemy.exc import ProgrammingError
 
 from arbitrage_bot.core.config import settings
@@ -32,6 +33,9 @@ _shared_dp = None
 _shared_delivery_bot = None
 _DELIVERY_DEDUPE_TTL_SECONDS = max(86400, int(settings.ALERTS_DEDUPE_TTL_SECONDS))
 _EVENT_REPEAT_TTL_SECONDS = max(300, int(settings.ALERTS_DEDUPE_TTL_SECONDS))
+# ponytail: process-local fallback covers Redis outages only until restart
+_delivery_dedupe_fallback = TTLCache(maxsize=5000, ttl=_DELIVERY_DEDUPE_TTL_SECONDS)
+_alert_event_fallback = TTLCache(maxsize=5000, ttl=_EVENT_REPEAT_TTL_SECONDS)
 
 
 def setup_bot():
@@ -343,13 +347,14 @@ async def _is_duplicate_delivery(alert):
     if not message_hash or not chat_id:
         return False
 
+    fallback_marker = _delivery_dedupe_fallback.get(_delivery_dedupe_key(alert))
     try:
         redis = get_redis()
         if redis is None:
-            return False
-        return bool(await redis.get(_delivery_dedupe_key(alert)))
+            return bool(fallback_marker)
+        return bool(await redis.get(_delivery_dedupe_key(alert))) or bool(fallback_marker)
     except Exception:
-        return False
+        return bool(fallback_marker)
 
 
 async def _store_delivery_marker(alert):
@@ -358,6 +363,7 @@ async def _store_delivery_marker(alert):
     if not message_hash or not chat_id:
         return
 
+    _delivery_dedupe_fallback[_delivery_dedupe_key(alert)] = True
     try:
         redis = get_redis()
         if redis is None:
@@ -415,13 +421,13 @@ async def _load_alert_event_state(alert, opportunity, pair=None):
     if state_key is None:
         return None
 
+    raw_value = _alert_event_fallback.get(state_key)
     try:
         redis = get_redis()
-        if redis is None:
-            return None
-        raw_value = await redis.get(state_key)
+        if redis is not None:
+            raw_value = await redis.get(state_key) or raw_value
     except Exception:
-        return None
+        pass
 
     if not raw_value:
         return None
@@ -434,6 +440,8 @@ async def _store_alert_event_state(alert, event_opportunity, sent_opportunity, p
     if state_key is None:
         return
 
+    raw_state = json.dumps(_build_alert_event_state(alert, sent_opportunity))
+    _alert_event_fallback[state_key] = raw_state
     try:
         redis = get_redis()
         if redis is None:
@@ -441,7 +449,7 @@ async def _store_alert_event_state(alert, event_opportunity, sent_opportunity, p
         await redis.setex(
             state_key,
             _EVENT_REPEAT_TTL_SECONDS,
-            json.dumps(_build_alert_event_state(alert, sent_opportunity)),
+            raw_state,
         )
     except Exception:
         pass

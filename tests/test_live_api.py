@@ -32,6 +32,7 @@ class LiveApiSmokeTests(unittest.TestCase):
     def setUpClass(cls):
         load_env_file(ENV_FILE_PATH)
         cls.base_url = _base_url()
+        cls.admin_api_token = os.environ.get("ADMIN_API_TOKEN", "")
 
 
     def test_root_returns_expected_navigation_links(self):
@@ -41,17 +42,23 @@ class LiveApiSmokeTests(unittest.TestCase):
         self.assertEqual(payload["message"], "Arbitrage Alert Bot API is running")
         self.assertEqual(payload["health"], "/api/health")
         self.assertEqual(payload["status"], "/api/status")
+        self.assertNotIn("docs", payload)
 
 
     def test_health_returns_ok(self):
         status_code, payload = _request_json(f"{self.base_url}/api/health")
 
         self.assertEqual(status_code, 200)
-        self.assertEqual(payload, {"status": "ok"})
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["database"], "ok")
+        self.assertIn(payload["redis"], {"ok", "degraded"})
 
 
     def test_status_returns_runtime_counters(self):
-        status_code, payload = _request_json(f"{self.base_url}/api/status")
+        status_code, payload = _request_json(
+            f"{self.base_url}/api/status",
+            headers={"Authorization": f"Bearer {self.admin_api_token}"},
+        )
 
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["status"], "ok")

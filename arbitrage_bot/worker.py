@@ -725,6 +725,24 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         }
 
     delivery_targets = await fanout_manager.get_delivery_targets()
+    orderbook_started_at = time.monotonic()
+    try:
+        orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs(
+            active_pairs,
+            db,
+            market_map=market_map,
+        )
+    except Exception as e:
+        log.error("failed to fetch orderbooks batch", error=format_error_details(e))
+        incr_counter("worker.orderbook_batch_failed")
+        await send_system_error_notification("worker", "fetch orderbooks batch", e)
+        orderbooks_data = []
+    _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
+    orderbooks_by_pair_hash = {
+        item["pair"].pair_hash: item
+        for item in orderbooks_data
+        if item.get("pair") is not None
+    }
     pair_fetch_concurrency = max(1, int(settings.ORDERBOOK_PREDICT_FUN_CONCURRENCY or 1))
     semaphore = asyncio.Semaphore(pair_fetch_concurrency)
 
@@ -733,11 +751,11 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         async with semaphore:
             _record_timing("worker.timing.pair_queue_wait", queued_at)
             return await _process_candidate_pair(
-                orderbook_service,
                 calculator,
                 pair,
                 market_map,
                 delivery_targets,
+                orderbooks_by_pair_hash.get(pair.pair_hash),
             )
 
     pair_results = await asyncio.gather(
@@ -767,11 +785,11 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
 
 
 async def _process_candidate_pair(
-    orderbook_service,
     calculator,
     pair,
     market_map,
     delivery_targets,
+    orderbook_data,
 ):
     pair_stats = {
         "pair_hash": pair.pair_hash,
@@ -780,90 +798,72 @@ async def _process_candidate_pair(
         "deliverable_opportunities": 0,
         "deliveries": [],
     }
-    try:
-        orderbook_started_at = time.monotonic()
-        async with AsyncSessionLocal() as db:
-            orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs(
-                [pair],
-                db,
-                market_map=market_map,
-            )
-        _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
-    except Exception as e:
-        _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
-        log.error(
-            "failed to fetch orderbook for pair",
-            pair_id=pair.id,
-            error=format_error_details(e),
-        )
-        incr_counter("worker.pair_orderbook_failed")
-        await send_system_error_notification("worker", f"fetch orderbook pair {pair.id}", e)
+    if orderbook_data is None:
         return pair_stats
 
-    for item in orderbooks_data:
-        item_pair = item.get("pair") or pair
-        if getattr(item_pair, "pair_hash", None) != pair.pair_hash:
-            continue
+    item_pair = orderbook_data.get("pair") or pair
+    if getattr(item_pair, "pair_hash", None) != pair.pair_hash:
+        return pair_stats
 
-        market_a = market_map.get(item_pair.market_id_a)
-        market_b = market_map.get(item_pair.market_id_b)
-        if market_a is None or market_b is None:
-            continue
+    market_a = market_map.get(item_pair.market_id_a)
+    market_b = market_map.get(item_pair.market_id_b)
+    if market_a is None or market_b is None:
+        return pair_stats
 
-        pair_stats["has_orderbooks"] = True
-        incr_counter("worker.pairs_with_orderbooks")
+    pair_stats["has_orderbooks"] = True
+    incr_counter("worker.pairs_with_orderbooks")
 
-        directions = item.get("directions")
-        calculate_started_at = time.monotonic()
-        calc_results = calculator.calculate_opportunities(directions)
-        _record_timing("worker.timing.calculate", calculate_started_at)
-        if not calc_results:
-            incr_counter("calculator.drop.no_profitable_directions")
-            continue
-        incr_counter("worker.calc_positive_spread", len(calc_results))
+    directions = orderbook_data.get("directions")
+    calculate_started_at = time.monotonic()
+    calc_results = calculator.calculate_opportunities(directions)
+    _record_timing("worker.timing.calculate", calculate_started_at)
+    if not calc_results:
+        incr_counter("calculator.drop.no_profitable_directions")
+        return pair_stats
+    incr_counter("worker.calc_positive_spread", len(calc_results))
 
-        for calc_result in calc_results:
-            try:
-                async with AsyncSessionLocal() as db:
-                    alert_manager = AlertManager(db)
-                    opportunity = await alert_manager.process_opportunity(item_pair, calc_result)
-                    if not opportunity:
-                        continue
-                    incr_counter("worker.opportunities_created")
+    for calc_result in calc_results:
+        try:
+            async with AsyncSessionLocal() as db:
+                alert_manager = AlertManager(db)
+                opportunity = await alert_manager.process_opportunity(item_pair, calc_result)
+                if not opportunity:
+                    continue
+                incr_counter("worker.opportunities_created")
 
-                    fanout_manager = FanoutManager(db)
-                    fanout_started_at = time.monotonic()
-                    deliveries = await fanout_manager.create_alert_deliveries(
-                        opportunity,
-                        market_a,
-                        market_b,
-                        delivery_targets=delivery_targets,
-                        directions=directions,
-                        calculator=calculator,
-                    )
-                    _record_timing("worker.timing.fanout", fanout_started_at)
-
-                    if deliveries:
-                        pair_stats["deliverable_opportunities"] += 1
-                        pair_stats["deliveries"].append({
-                            "deliveries": deliveries,
-                            "opportunity": opportunity,
-                            "pair": item_pair,
-                            "market_a": market_a,
-                            "market_b": market_b,
-                            "directions": directions,
-                        })
-
-                    incr_counter("worker.opportunity_processed")
-                    pair_stats["opportunities"] += 1
-            except Exception as e:
-                log.error(
-                    "failed to process opportunity",
-                    pair_id=pair.id,
-                    error=format_error_details(e),
+                fanout_manager = FanoutManager(db)
+                fanout_started_at = time.monotonic()
+                deliveries = await fanout_manager.create_alert_deliveries(
+                    opportunity,
+                    market_a,
+                    market_b,
+                    delivery_targets=delivery_targets,
+                    directions=directions,
+                    calculator=calculator,
                 )
-                incr_counter("worker.opportunity_failed")
-                await send_system_error_notification("worker", "process opportunity", e)
+                _record_timing("worker.timing.fanout", fanout_started_at)
+
+                if deliveries:
+                    pair_stats["deliverable_opportunities"] += 1
+                    pair_stats["deliveries"].append({
+                        "deliveries": deliveries,
+                        "opportunity": opportunity,
+                        "pair": item_pair,
+                        "market_a": market_a,
+                        "market_b": market_b,
+                        "directions": directions,
+                    })
+
+                incr_counter("worker.opportunity_processed")
+                pair_stats["opportunities"] += 1
+        except Exception as e:
+            log.error(
+                "failed to process opportunity",
+                pair_id=pair.id,
+                error=format_error_details(e),
+            )
+            incr_counter("worker.opportunity_failed")
+            await send_system_error_notification("worker", "process opportunity", e)
 
     return pair_stats
 
@@ -883,20 +883,20 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
     successful_opportunities = []
 
     async def send_batch(delivery_batch):
-        async with semaphore:
-            sent_count = await _send_delivery_alerts(
-                delivery_batch["deliveries"],
-                delivery_batch["opportunity"],
-                delivery_batch["pair"],
-                delivery_batch["market_a"],
-                delivery_batch["market_b"],
-                delivery_batch["directions"],
-                calculator,
-                retry_queue,
-            )
-            if _deliveries_completed(delivery_batch["deliveries"]):
-                successful_opportunities.append(delivery_batch["opportunity"])
-            return sent_count
+        sent_count = await _send_delivery_alerts(
+            delivery_batch["deliveries"],
+            delivery_batch["opportunity"],
+            delivery_batch["pair"],
+            delivery_batch["market_a"],
+            delivery_batch["market_b"],
+            delivery_batch["directions"],
+            calculator,
+            retry_queue,
+            send_semaphore=semaphore,
+        )
+        if sent_count:
+            successful_opportunities.append(delivery_batch["opportunity"])
+        return sent_count
 
     results = await asyncio.gather(
         *(send_batch(batch) for batch in all_delivery_batches),
@@ -909,10 +909,9 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
 
     if successful_opportunities:
         try:
-            async with AsyncSessionLocal() as db:
-                alert_manager = AlertManager(db)
-                for opportunity in successful_opportunities:
-                    await alert_manager.finalize_opportunity(opportunity)
+            alert_manager = AlertManager(None)
+            for opportunity in successful_opportunities:
+                await alert_manager.finalize_opportunity(opportunity)
         except Exception as e:
             log.error("failed to finalize opportunities", error=format_error_details(e))
 
@@ -926,10 +925,11 @@ async def _send_delivery_alerts(
     directions,
     calculator,
     retry_queue=None,
+    send_semaphore=None,
 ):
-    send_results = []
+    semaphore = send_semaphore or asyncio.Semaphore(max(1, len(deliveries)))
 
-    for delivery in deliveries:
+    async def send_one(delivery):
         retry_item = {
             "delivery": delivery,
             "opportunity": opportunity,
@@ -938,44 +938,39 @@ async def _send_delivery_alerts(
             "market_b": market_b,
             "directions": directions,
         }
-        try:
-            sent = await send_alert_immediately(
-                delivery["alert"],
-                opportunity,
-                pair,
-                market_a,
-                market_b,
-                delivery["preferences"],
-                directions,
-                calculator,
-                prepared_opportunity=delivery.get("opportunity"),
-            )
-            if sent:
-                delivery["alert"].status = "sent"
-                incr_counter("worker.immediate_send_success")
-                send_results.append(1)
-            else:
+        async with semaphore:
+            try:
+                sent = await send_alert_immediately(
+                    delivery["alert"],
+                    opportunity,
+                    pair,
+                    market_a,
+                    market_b,
+                    delivery["preferences"],
+                    directions,
+                    calculator,
+                    prepared_opportunity=delivery.get("opportunity"),
+                )
+                if sent:
+                    delivery["alert"].status = "sent"
+                    incr_counter("worker.immediate_send_success")
+                    return 1
+
                 incr_counter("worker.immediate_send_failed")
-                send_results.append(0)
                 if getattr(delivery["alert"], "status", None) not in {"cancelled", "suppressed"}:
                     if getattr(delivery["alert"], "status", None) != "failed":
                         _mark_delivery_failed(delivery["alert"], "delivery returned false")
                     if retry_queue is not None:
                         retry_queue.enqueue(retry_item)
-        except Exception as e:
-            log.error("delivery send failed", error=format_error_details(e))
-            incr_counter("worker.immediate_send_failed")
-            send_results.append(0)
-            _mark_delivery_failed(delivery["alert"], e)
-            if retry_queue is not None:
-                retry_queue.enqueue(retry_item)
+            except Exception as e:
+                log.error("delivery send failed", error=format_error_details(e))
+                incr_counter("worker.immediate_send_failed")
+                _mark_delivery_failed(delivery["alert"], e)
+                if retry_queue is not None:
+                    retry_queue.enqueue(retry_item)
+            return 0
 
-    return sum(send_results)
-
-
-def _deliveries_completed(deliveries):
-    terminal_statuses = {"sent", "cancelled", "suppressed"}
-    return all(getattr(delivery["alert"], "status", None) in terminal_statuses for delivery in deliveries)
+    return sum(await asyncio.gather(*(send_one(delivery) for delivery in deliveries)))
 
 
 def _mark_delivery_failed(alert, error):
@@ -1002,6 +997,7 @@ async def _retry_alert_delivery(item, calculator):
         incr_counter("worker.retry_send_failed")
         return False
 
+    await AlertManager(None).finalize_opportunity(item["opportunity"])
     incr_counter("worker.retry_send_success")
     return True
 

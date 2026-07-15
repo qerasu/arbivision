@@ -47,6 +47,7 @@ class Settings:
         self.REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
         self.PREDICT_FUN_API_KEY = os.getenv("PREDICT_FUN_API_KEY", "")
+        self.ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 
         self.FEE_POLYMARKET_BPS = _get_float_setting("FEE_POLYMARKET_BPS", 90.0)
         self.FEE_PREDICT_FUN_BPS = _get_float_setting("FEE_PREDICT_FUN_BPS", 100.0)

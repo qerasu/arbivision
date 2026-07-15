@@ -1,21 +1,62 @@
-from fastapi import APIRouter, Depends
+import asyncio
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer
 from sqlalchemy import func
 from sqlalchemy.future import select
 
+from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.database import get_db
 from arbitrage_bot.core.observability import snapshot_counters
+from arbitrage_bot.core.redis import get_redis
 from arbitrage_bot.models.orm import Market
 from arbitrage_bot.models.orm import MarketPair
 
 router = APIRouter()
+_bearer = HTTPBearer(auto_error=False)
+
+
+def require_internal_api_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    expected_token = settings.ADMIN_API_TOKEN
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="internal API token is not configured")
+
+    if credentials is None or not secrets.compare_digest(credentials.credentials, expected_token):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 @router.get("/health")
-async def health_check():
-    return {"status": "ok"}
+async def health_check(db=Depends(get_db)):
+    try:
+        await db.execute(select(1))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+
+    redis_status = "degraded"
+    redis = get_redis()
+    if redis is not None:
+        try:
+            await asyncio.wait_for(redis.ping(), timeout=1.0)
+            redis_status = "ok"
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "database": "ok",
+        "redis": redis_status,
+    }
 
 
-@router.get("/status")
+@router.get("/status", dependencies=[Depends(require_internal_api_token)])
 async def status_check(db=Depends(get_db)):
     runtime_metrics = snapshot_counters()
     markets_stmt = select(

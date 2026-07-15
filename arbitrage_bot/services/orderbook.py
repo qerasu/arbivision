@@ -663,7 +663,7 @@ class OrderbookService:
         except (TypeError, ValueError):
             return None
 
-        if not isfinite(price) or not isfinite(size):
+        if not isfinite(price) or not isfinite(size) or not 0.0 <= price <= 1.0 or size <= 0:
             return None
 
         return price, size

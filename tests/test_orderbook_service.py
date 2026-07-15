@@ -36,6 +36,9 @@ class OrderbookServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(service._extract_level({"price": "NaN", "size": "1"}))
         self.assertIsNone(service._extract_level(["0.5", "Infinity"]))
+        self.assertIsNone(service._extract_level(["-0.1", "2"]))
+        self.assertIsNone(service._extract_level(["1.1", "2"]))
+        self.assertIsNone(service._extract_level(["0.5", "0"]))
         self.assertEqual(service._extract_level(["0.5", "2"]), (0.5, 2.0))
 
 
