@@ -4,6 +4,5 @@ meta:
     name: pip
     version: "3.11"
 run:
-  command: sh
-  args: -c "alembic upgrade head && exec uvicorn --host 0.0.0.0 --port $PORT arbitrage_bot.main:app"
+  command: alembic upgrade head && exec uvicorn --host 0.0.0.0 --port $PORT arbitrage_bot.main:app
   containerPort: 80
