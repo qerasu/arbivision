@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.services import system_notifier
 from arbitrage_bot.services.ingestion import IngestionService
@@ -175,6 +177,14 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(system_notifier.is_transient_network_error(error))
 
 
+    def test_detects_transient_gateway_http_status(self):
+        request = httpx.Request("GET", "https://api.predict.fun/v1/markets")
+        response = httpx.Response(502, request=request)
+        error = httpx.HTTPStatusError("Bad Gateway", request=request, response=response)
+
+        self.assertTrue(system_notifier.is_transient_network_error(error))
+
+
     def test_does_not_mark_generic_runtime_error_as_transient_network_issue(self):
         self.assertFalse(system_notifier.is_transient_network_error(RuntimeError("gamma down")))
 
@@ -182,7 +192,12 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
     async def test_ingestion_reports_source_error_to_telegram(self):
         db = FakeDbSession()
         service = IngestionService(db)
-        service.polymarket.fetch_markets = AsyncMock(side_effect=RuntimeError("gamma down"))
+
+        async def failing_pages():
+            raise RuntimeError("gamma down")
+            yield
+
+        service.polymarket.iter_market_pages = MagicMock(return_value=failing_pages())
         service.predict_fun.fetch_markets = AsyncMock(return_value=[])
         service.polymarket.close = AsyncMock()
         service.predict_fun.close = AsyncMock()
@@ -204,11 +219,14 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
     async def test_ingestion_skips_system_notification_for_transient_network_error(self):
         db = FakeDbSession()
         service = IngestionService(db)
-        service.polymarket.fetch_markets = AsyncMock(
-            side_effect=RuntimeError(
+
+        async def failing_pages():
+            raise RuntimeError(
                 "SSLError: [SSL: RECORD_LAYER_FAILURE] record layer failure (_ssl.c:2710)"
             )
-        )
+            yield
+
+        service.polymarket.iter_market_pages = MagicMock(return_value=failing_pages())
         service.predict_fun.fetch_markets = AsyncMock(return_value=[])
         service.polymarket.close = AsyncMock()
         service.predict_fun.close = AsyncMock()

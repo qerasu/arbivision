@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.core.observability import incr_counter
+from arbitrage_bot.tg_bot.bot import load_alert_event_states
+from arbitrage_bot.tg_bot.bot import should_send_repeat_alert
 from arbitrage_bot.tg_bot.preferences import filter_reason_for_preferences
 from arbitrage_bot.tg_bot.preferences import get_global_preferences
 from arbitrage_bot.tg_bot.preferences import get_telegram_alert_targets
@@ -60,6 +62,10 @@ class FanoutManager:
 
     async def _create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, directions=None, calculator=None):
         targets = delivery_targets if delivery_targets is not None else await self._get_delivery_targets()
+        event_states = await load_alert_event_states(
+            (target.get("telegram_chat_id") for target in targets),
+            opportunity,
+        )
         eligible_targets, drop_reasons = self._filter_targets(
             opportunity,
             targets,
@@ -67,6 +73,7 @@ class FanoutManager:
             market_b,
             directions=directions,
             calculator=calculator,
+            event_states=event_states,
         )
         if not eligible_targets:
             incr_counter("fanout.opportunity_filtered_all_targets")
@@ -148,13 +155,15 @@ class FanoutManager:
         _delivery_targets_cache_expires_at = time.monotonic() + settings.FANOUT_TARGET_CACHE_TTL_SECONDS
 
 
-    def _filter_targets(self, opportunity, targets, market_a, market_b, directions=None, calculator=None):
+    def _filter_targets(self, opportunity, targets, market_a, market_b, directions=None, calculator=None, event_states=None):
         eligible_targets = []
         drop_reasons = set()
+        event_states = event_states or {}
 
         for target in targets:
             if not target.get("telegram_chat_id"):
                 continue
+            chat_id = str(target["telegram_chat_id"])
             preferences = target.get("preferences") or {}
             if preferences.get("muted"):
                 drop_reasons.add("muted")
@@ -163,8 +172,20 @@ class FanoutManager:
                     chat_id=target.get("telegram_chat_id"),
                 )
                 continue
+            last_state = event_states.get(chat_id)
+            current_message_hash = str(getattr(opportunity, "message_hash", "") or "")
+            if last_state is not None and current_message_hash and current_message_hash == last_state["message_hash"]:
+                drop_reasons.add("repeat_suppressed")
+                continue
             prepared_opportunity = opportunity
-            if directions is not None and calculator is not None:
+            if directions is not None and calculator is not None and any(
+                preferences.get(field) is not None
+                for field in (
+                    "max_capital_usd",
+                    "max_polymarket_capital_usd",
+                    "max_predict_fun_capital_usd",
+                )
+            ):
                 prepared_opportunity = self._prepare_opportunity_for_target(
                     opportunity,
                     directions,
@@ -201,6 +222,15 @@ class FanoutManager:
                     pref_min_profit=preferences.get("min_profit_usd"),
                 )
                 continue
+            if last_state is not None:
+                should_send, _ = should_send_repeat_alert(
+                    last_state,
+                    opportunity,
+                    prepared_opportunity,
+                )
+                if not should_send:
+                    drop_reasons.add("repeat_suppressed")
+                    continue
             target_payload = dict(target)
             target_payload["prepared_opportunity"] = prepared_opportunity
             eligible_targets.append(target_payload)

@@ -50,6 +50,22 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter._get_json.await_count, 2)
 
 
+    async def test_iter_market_pages_yields_each_page_separately(self):
+        adapter = PolymarketAdapter()
+        adapter._get_json = AsyncMock(
+            side_effect=[
+                {"markets": [{"id": "1"}, {"id": "2"}], "next_cursor": "cursor-2"},
+                {"markets": [{"id": "3"}]},
+            ]
+        )
+        adapter.page_limit = 2
+
+        pages = [page async for page in adapter.iter_market_pages()]
+
+        self.assertEqual(pages, [[{"id": "1"}, {"id": "2"}], [{"id": "3"}]])
+        self.assertTrue(adapter.last_fetch_complete)
+
+
     async def test_fetch_markets_stops_if_same_page_repeats(self):
         adapter = PolymarketAdapter()
         adapter._get_json = AsyncMock(

@@ -2,11 +2,18 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+from cachetools import TTLCache
+
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.core.redis import get_redis
 
 log = get_logger("alert_manager")
+# ponytail: process-local fallback covers Redis outages only until restart
+_dedupe_fallback = TTLCache(
+    maxsize=5000,
+    ttl=max(1, settings.ALERTS_DEDUPE_TTL_SECONDS),
+)
 
 
 class AlertManager:
@@ -23,12 +30,12 @@ class AlertManager:
         dedupe_key = f"alert-dedupe:{pair.pair_hash}:{direction}"
         state_to_save = self._build_dedupe_state(calc_result)
 
-        last_alert_data = None
+        last_alert_data = _dedupe_fallback.get(dedupe_key)
         if redis is not None:
             try:
-                last_alert_data = await redis.get(dedupe_key)
+                last_alert_data = await redis.get(dedupe_key) or last_alert_data
             except Exception:
-                last_alert_data = None
+                pass
 
         if last_alert_data:
             last_state = self._parse_dedupe_state(last_alert_data)
@@ -140,10 +147,12 @@ class AlertManager:
 
 
     async def _store_dedupe_state(self, redis, dedupe_key, state_to_save):
+        raw_state = json.dumps(state_to_save)
+        _dedupe_fallback[dedupe_key] = raw_state
         if redis is None:
             return
 
         try:
-            await redis.setex(dedupe_key, self.dedupe_ttl, json.dumps(state_to_save))
+            await redis.setex(dedupe_key, self.dedupe_ttl, raw_state)
         except Exception:
             pass

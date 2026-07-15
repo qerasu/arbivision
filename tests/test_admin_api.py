@@ -81,9 +81,15 @@ def main():
     load_env_file(ENV_FILE_PATH)
     args = _parse_args()
     base_url = _base_url(args)
+    admin_api_token = os.environ.get("ADMIN_API_TOKEN", "")
 
     _run_check("health", f"{base_url}/api/health", verbose=args.verbose)
-    _run_check("status", f"{base_url}/api/status", verbose=args.verbose)
+    _run_check(
+        "status",
+        f"{base_url}/api/status",
+        headers={"Authorization": f"Bearer {admin_api_token}"},
+        verbose=args.verbose,
+    )
 
 
 if __name__ == "__main__":

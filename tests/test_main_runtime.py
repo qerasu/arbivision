@@ -7,6 +7,12 @@ from arbitrage_bot import main as main_module
 
 
 class MainRuntimeModeTests(unittest.IsolatedAsyncioTestCase):
+    def test_api_documentation_is_disabled(self):
+        self.assertIsNone(main_module.app.docs_url)
+        self.assertIsNone(main_module.app.redoc_url)
+        self.assertIsNone(main_module.app.openapi_url)
+
+
     async def _collect_runtime_targets(self, mode):
         captured = []
 

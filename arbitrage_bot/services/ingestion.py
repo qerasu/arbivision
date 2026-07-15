@@ -30,7 +30,7 @@ class IngestionService:
         self.normalizer = NormalizerService()
         self._changed_market_ids_by_platform = self._empty_changed_market_ids()
         self._source_last_sync_completed_at = {}
-        self._source_last_full_sync_completed_at = {}
+        self._source_last_full_sync_attempted_at = {}
 
 
     async def close(self):
@@ -221,17 +221,19 @@ class IngestionService:
 
         if self._should_sync_source("polymarket", now):
             polymarket_full_sync = self._should_run_polymarket_full_sync(now)
+            if polymarket_full_sync:
+                self._source_last_full_sync_attempted_at["polymarket"] = now
             source_jobs.append(
                 (
                     "polymarket",
-                    self.polymarket.fetch_markets(
-                        max_pages=None if polymarket_full_sync else settings.POLYMARKET_INCREMENTAL_MAX_PAGES
+                    self._sync_source_pages(
+                        "polymarket",
+                        self.polymarket.iter_market_pages(
+                            max_pages=None if polymarket_full_sync else settings.POLYMARKET_INCREMENTAL_MAX_PAGES
+                        ),
+                        self._map_polymarket_market,
+                        self.polymarket,
                     ),
-                    self._map_polymarket_market,
-                    self.polymarket,
-                    {
-                        "full_sync": polymarket_full_sync,
-                    },
                 )
             )
 
@@ -239,12 +241,12 @@ class IngestionService:
             source_jobs.append(
                 (
                     "predict.fun",
-                    self.predict_fun.fetch_markets(),
-                    self._map_predict_fun_market,
-                    self.predict_fun,
-                    {
-                        "full_sync": True,
-                    },
+                    self._fetch_and_sync_source(
+                        "predict.fun",
+                        self.predict_fun.fetch_markets(),
+                        self._map_predict_fun_market,
+                        self.predict_fun,
+                    ),
                 )
             )
 
@@ -256,18 +258,11 @@ class IngestionService:
             return_exceptions=True,
         )
 
-        for (source_name, _, mapper, adapter, sync_meta), result in zip(source_jobs, results):
-            synced = await self._sync_source(
-                source_name,
-                result,
-                mapper,
-                adapter,
-            )
+        for (source_name, _), result in zip(source_jobs, results):
+            synced = False if isinstance(result, BaseException) else bool(result)
             if synced:
                 successful_sources.append(source_name)
                 self._source_last_sync_completed_at[source_name] = time.monotonic()
-                if sync_meta.get("full_sync") and getattr(adapter, "last_fetch_complete", True):
-                    self._source_last_full_sync_completed_at[source_name] = time.monotonic()
 
         return self._build_sync_result(
             bool(successful_sources),
@@ -325,35 +320,107 @@ class IngestionService:
             float(settings.MARKET_SYNC_INTERVAL_SECONDS),
             float(settings.MARKET_REFRESH_SECONDS),
         )
-        last_completed_at = self._source_last_full_sync_completed_at.get("polymarket")
-        if last_completed_at is None:
+        last_attempted_at = self._source_last_full_sync_attempted_at.get("polymarket")
+        if last_attempted_at is None:
             return True
-        return (now - last_completed_at) >= full_interval
+        return (now - last_attempted_at) >= full_interval
+
+
+    async def _fetch_and_sync_source(self, source_name, fetch_coro, mapper, adapter):
+        try:
+            payload = await fetch_coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            payload = exc
+
+        return await self._sync_source(source_name, payload, mapper, adapter)
 
 
     async def _sync_source(self, source_name, payload_or_exc, mapper, adapter=None):
-        try:
+        async def pages():
             if isinstance(payload_or_exc, BaseException):
                 raise payload_or_exc
 
             raw_items = payload_or_exc.get("data", payload_or_exc) if isinstance(payload_or_exc, dict) else payload_or_exc
-            mapped_items = [mapper(item) for item in raw_items if isinstance(item, dict)]
-            platform = mapped_items[0]["platform"] if mapped_items else self._source_platform_name(source_name)
+            yield raw_items or []
+
+        return await self._sync_source_pages(source_name, pages(), mapper, adapter)
+
+
+    async def _sync_source_pages(self, source_name, pages, mapper, adapter=None):
+        try:
+            platform = self._source_platform_name(source_name)
+            seen_market_keys = set()
+            seen_market_ids = set()
+            changed_market_ids = set()
+            duplicate_count = 0
+            duplicate_market_ids = set()
+            sample_market_ids = []
+            pending_items = []
+
+            async def upsert_pending_items(raw_chunk):
+                nonlocal duplicate_count, platform
+
+                mapped_items = [mapper(item) for item in raw_chunk if isinstance(item, dict)]
+                mapped_items, chunk_duplicate_count, chunk_duplicate_metadata = self._dedupe_market_items(mapped_items)
+                duplicate_count += chunk_duplicate_count
+                duplicate_market_ids.update(chunk_duplicate_metadata["market_ids"])
+                for market_id in chunk_duplicate_metadata["sample_market_ids"]:
+                    if len(sample_market_ids) < 5:
+                        sample_market_ids.append(market_id)
+
+                unique_items = []
+                for item in mapped_items:
+                    platform = item["platform"]
+                    market_id = item["platform_market_id"]
+                    key = (platform, market_id)
+                    if key in seen_market_keys:
+                        duplicate_count += 1
+                        duplicate_market_ids.add(market_id)
+                        if len(sample_market_ids) < 5:
+                            sample_market_ids.append(market_id)
+                        continue
+                    seen_market_keys.add(key)
+                    seen_market_ids.add(market_id)
+                    unique_items.append(item)
+
+                if not unique_items:
+                    return
+
+                batch_changed_market_ids = await self._upsert_markets(unique_items)
+                await self.db.commit()
+                changed_market_ids.update(batch_changed_market_ids)
+                self._changed_market_ids_by_platform.setdefault(platform, set()).update(
+                    batch_changed_market_ids
+                )
+
+            async for raw_items in pages:
+                if not isinstance(raw_items, list):
+                    raw_items = list(raw_items or [])
+                pending_items.extend(raw_items)
+                while len(pending_items) >= self.UPSERT_LOOKUP_BATCH_SIZE:
+                    raw_chunk = pending_items[:self.UPSERT_LOOKUP_BATCH_SIZE]
+                    del pending_items[:self.UPSERT_LOOKUP_BATCH_SIZE]
+                    await upsert_pending_items(raw_chunk)
+
+            if pending_items:
+                await upsert_pending_items(pending_items)
+
             is_partial = getattr(adapter, "last_fetch_partial", False)
             is_complete = adapter is None or getattr(adapter, "last_fetch_complete", False)
-            mapped_items, duplicate_count, duplicate_metadata = self._dedupe_market_items(mapped_items)
             if duplicate_count:
                 log.info(
                     "duplicate markets removed before upsert",
                     source=source_name,
                     duplicate_rows=duplicate_count,
-                    duplicate_distinct_markets=duplicate_metadata["distinct_market_ids"],
-                    sample_market_ids=duplicate_metadata["sample_market_ids"],
+                    duplicate_distinct_markets=len(duplicate_market_ids),
+                    sample_market_ids=sample_market_ids,
                 )
                 await record_duplicate_markets(source_name, duplicate_count)
             else:
                 await record_duplicate_markets(source_name, 0)
-            if not mapped_items:
+            if not seen_market_keys:
                 self._changed_market_ids_by_platform.setdefault(platform, set())
                 if is_partial:
                     log.warning(
@@ -369,28 +436,28 @@ class IngestionService:
                         fetched_markets=0,
                     )
                 return True
-            changed_market_ids = set()
-            for chunk in self._chunked(mapped_items, 1000):
-                changed_market_ids.update(await self._upsert_markets(chunk))
-                await self.db.commit()
             if is_partial:
                 log.warning(
                     "partial sync completed, skipping stale market detection",
                     source=source_name,
-                    fetched_markets=len(mapped_items),
+                    fetched_markets=len(seen_market_keys),
                 )
             elif not is_complete:
                 log.info(
                     "incremental sync completed, skipping stale market detection",
                     source=source_name,
-                    fetched_markets=len(mapped_items),
+                    fetched_markets=len(seen_market_keys),
                 )
             else:
-                changed_market_ids.update(await self._mark_missing_markets_closed(
+                stale_market_ids = await self._mark_missing_markets_closed(
                     platform,
-                    {item["platform_market_id"] for item in mapped_items},
-                ))
+                    seen_market_ids,
+                )
                 await self.db.commit()
+                changed_market_ids.update(stale_market_ids)
+                self._changed_market_ids_by_platform.setdefault(platform, set()).update(
+                    stale_market_ids
+                )
             self._changed_market_ids_by_platform.setdefault(platform, set()).update(changed_market_ids)
             return not is_partial
         except asyncio.CancelledError:
@@ -422,6 +489,7 @@ class IngestionService:
         return list(deduped.values()), duplicate_count, {
             "distinct_market_ids": len(duplicate_market_ids),
             "sample_market_ids": sample_market_ids,
+            "market_ids": duplicate_market_ids,
         }
 
 

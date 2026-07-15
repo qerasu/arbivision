@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -36,6 +37,9 @@ class OrderbookServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(service._extract_level({"price": "NaN", "size": "1"}))
         self.assertIsNone(service._extract_level(["0.5", "Infinity"]))
+        self.assertIsNone(service._extract_level(["-0.1", "2"]))
+        self.assertIsNone(service._extract_level(["1.1", "2"]))
+        self.assertIsNone(service._extract_level(["0.5", "0"]))
         self.assertEqual(service._extract_level(["0.5", "2"]), (0.5, 2.0))
 
 
@@ -303,6 +307,55 @@ class OrderbookServiceTests(unittest.IsolatedAsyncioTestCase):
         service.polymarket.fetch_books.assert_awaited_once_with(
             ["poly-no-1", "poly-no-2", "poly-yes-1", "poly-yes-2"]
         )
+
+
+    async def test_fetches_both_platforms_concurrently_for_multiple_pairs(self):
+        service = OrderbookService()
+        predict_started = asyncio.Event()
+        polymarket_started = asyncio.Event()
+
+        async def fetch_predict_fun(_market_id):
+            predict_started.set()
+            await polymarket_started.wait()
+            return {"data": {"asks": [[0.2, 5]], "bids": [[0.7, 6]]}}
+
+        async def fetch_polymarket(token_ids):
+            polymarket_started.set()
+            await predict_started.wait()
+            return [
+                {"asset_id": token_id, "asks": [{"price": "0.4", "size": "2"}]}
+                for token_id in token_ids
+            ]
+
+        service.predict_fun.fetch_orderbook = AsyncMock(side_effect=fetch_predict_fun)
+        service.polymarket.fetch_books = AsyncMock(side_effect=fetch_polymarket)
+        pairs = [
+            SimpleNamespace(
+                id=index,
+                market_id_a=100 + index,
+                market_id_b=200 + index,
+                outcome_mapping_json={
+                    "market_a": {"yes": f"poly-yes-{index}", "no": f"poly-no-{index}"},
+                    "market_b": {"yes": f"pf-yes-{index}", "no": f"pf-no-{index}"},
+                },
+            )
+            for index in range(2)
+        ]
+        db = FakeDbSession(
+            [
+                (100, "polymarket", "poly-100"),
+                (101, "polymarket", "poly-101"),
+                (200, "predict_fun", "pf-200"),
+                (201, "predict_fun", "pf-201"),
+            ]
+        )
+
+        result = await asyncio.wait_for(
+            service.fetch_orderbooks_for_pairs(pairs, db),
+            timeout=1,
+        )
+
+        self.assertEqual(len(result), 2)
 
 
     async def test_polymarket_books_fetch_failure_skips_pairs_without_failing_cycle(self):

@@ -149,9 +149,6 @@ class MatcherService:
             if outcome_mapping and self._has_compatible_direct_condition_context(
                 poly_signature,
                 pf_signature,
-            ) and self._has_compatible_market_context(
-                poly_signature,
-                pf_signature,
             ):
                 return {
                     "matched": True,

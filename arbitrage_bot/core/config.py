@@ -47,6 +47,7 @@ class Settings:
         self.REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
         self.PREDICT_FUN_API_KEY = os.getenv("PREDICT_FUN_API_KEY", "")
+        self.ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 
         self.FEE_POLYMARKET_BPS = _get_float_setting("FEE_POLYMARKET_BPS", 90.0)
         self.FEE_PREDICT_FUN_BPS = _get_float_setting("FEE_PREDICT_FUN_BPS", 100.0)
@@ -66,7 +67,7 @@ class Settings:
         self.MARKET_SYNC_INTERVAL_SECONDS = _get_float_setting("MARKET_SYNC_INTERVAL_SECONDS", 60.0)
         self.POLYMARKET_INCREMENTAL_MAX_PAGES = _get_int_setting("POLYMARKET_INCREMENTAL_MAX_PAGES", 20)
         self.POLYMARKET_FULL_SYNC_INTERVAL_SECONDS = _get_float_setting("POLYMARKET_FULL_SYNC_INTERVAL_SECONDS", 1800.0)
-        self.MATCHER_FULL_REMATCH_INTERVAL_SECONDS = _get_float_setting("MATCHER_FULL_REMATCH_INTERVAL_SECONDS", 1800.0)
+        self.MATCHER_FULL_REMATCH_INTERVAL_SECONDS = _get_float_setting("MATCHER_FULL_REMATCH_INTERVAL_SECONDS", 21600.0)
         self.DB_CLEANUP_INTERVAL_SECONDS = _get_float_setting("DB_CLEANUP_INTERVAL_SECONDS", 10800.0)
         self.DB_CLEANUP_RETENTION_SECONDS = _get_float_setting("DB_CLEANUP_RETENTION_SECONDS", 21600.0)
 

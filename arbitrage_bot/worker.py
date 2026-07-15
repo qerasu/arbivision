@@ -34,11 +34,13 @@ log = get_logger("worker")
 _EMPTY_COUNTS_MAX_SIZE = 1000
 _SIGNATURE_CACHE_MAX_SIZE = 20000
 _EMPTY_COUNT_TTL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 20, 3600)
+_EMPTY_PROBE_INTERVAL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 12, 60)
 
 
 @dataclass
 class WorkerState:
     pair_empty_counts: TTLCache = field(default_factory=lambda: TTLCache(maxsize=_EMPTY_COUNTS_MAX_SIZE, ttl=_EMPTY_COUNT_TTL_SECONDS))
+    empty_probe_due_at: dict = field(default_factory=dict)
     market_signature_cache: TTLCache = field(default_factory=lambda: TTLCache(maxsize=_SIGNATURE_CACHE_MAX_SIZE, ttl=_EMPTY_COUNT_TTL_SECONDS))
     hot_pair_hashes: list = field(default_factory=list)
     candidate_context_loaded: bool = False
@@ -203,23 +205,6 @@ async def run_sync_loop(state=None):
 
 
 async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager, retry_queue=None):
-    sync_result = await ingestion.sync_markets()
-    if _should_run_full_pair_rematch(time.monotonic(), state):
-        _invalidate_candidate_context_cache(state)
-        hot_pair_hashes = await _upsert_market_pairs(db, matcher, None, state)
-        _queue_hot_pairs(state, hot_pair_hashes)
-        _mark_full_pair_rematch_completed(state)
-    else:
-        changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
-        if _has_changed_market_ids(changed_market_ids_by_platform):
-            _invalidate_candidate_context_cache(state)
-            hot_pair_hashes = await _upsert_market_pairs(
-                db,
-                matcher,
-                changed_market_ids_by_platform,
-                state,
-            )
-            _queue_hot_pairs(state, hot_pair_hashes)
     cycle_stats = await _process_candidates(
         db,
         orderbook_service,
@@ -244,6 +229,24 @@ async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculato
         opportunities=cycle_stats["opportunities"],
         deliverable_opportunities=cycle_stats["deliverable_opportunities"],
     )
+
+    sync_result = await ingestion.sync_markets()
+    if _should_run_full_pair_rematch(time.monotonic(), state):
+        _invalidate_candidate_context_cache(state)
+        hot_pair_hashes = await _upsert_market_pairs(db, matcher, None, state)
+        _queue_hot_pairs(state, hot_pair_hashes)
+        _mark_full_pair_rematch_completed(state)
+    else:
+        changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
+        if _has_changed_market_ids(changed_market_ids_by_platform):
+            _invalidate_candidate_context_cache(state)
+            hot_pair_hashes = await _upsert_market_pairs(
+                db,
+                matcher,
+                changed_market_ids_by_platform,
+                state,
+            )
+            _queue_hot_pairs(state, hot_pair_hashes)
     await _run_database_cleanup_if_due(db, state)
 
 
@@ -410,22 +413,17 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         if not changed_market_ids:
             return set()
 
-    poly_markets, pf_markets = await _load_active_markets_by_platform(db)
-    active_market_ids = {
-        market.id
-        for market in poly_markets
-    }.union(
-        market.id
-        for market in pf_markets
-    )
-    poly_by_id = {market.id: market for market in poly_markets}
+    if full_rematch:
+        state.market_signature_cache.clear()
+
+    pf_markets = await _load_active_markets(db, "predict_fun")
     pf_by_id = {market.id: market for market in pf_markets}
-    poly_changed = list(poly_markets) if full_rematch else [
-        poly_by_id[market_id]
-        for market_id in changed_poly_ids
-        if market_id in poly_by_id
-    ]
-    pf_changed = [] if full_rematch else [
+    poly_changed = [] if full_rematch else await _load_active_markets(
+        db,
+        "polymarket",
+        changed_poly_ids,
+    )
+    pf_changed = list(pf_markets) if full_rematch else [
         pf_by_id[market_id]
         for market_id in changed_pf_ids
         if market_id in pf_by_id
@@ -449,19 +447,24 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
             poly_is_source=True,
         )
 
-    if pf_changed and poly_markets and not reached_limit:
+    if pf_changed and not reached_limit:
         pf_signatures = _build_cached_market_signatures(pf_changed, matcher, state)
-        poly_signatures = _build_cached_market_signatures(poly_markets, matcher, state)
-        poly_index = _build_candidate_index_from_signatures(poly_signatures)
-        reached_limit = _match_changed_markets(
-            pf_changed,
-            pf_signatures,
-            poly_index,
-            matcher,
-            matched_pairs,
-            pair_limit,
-            poly_is_source=False,
-        )
+        async for poly_batch in _iter_active_market_batches(db, "polymarket"):
+            poly_signatures = _build_cached_market_signatures(poly_batch, matcher, state)
+            poly_index = _build_candidate_index_from_signatures(poly_signatures)
+            reached_limit = _match_changed_markets(
+                pf_changed,
+                pf_signatures,
+                poly_index,
+                matcher,
+                matched_pairs,
+                pair_limit,
+                poly_is_source=False,
+            )
+            for market in poly_batch:
+                state.market_signature_cache.pop(market.id, None)
+            if reached_limit:
+                break
 
     if full_rematch:
         existing_pairs = await _load_active_pairs(db)
@@ -478,7 +481,6 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         stale_pairs = [pair for pair in existing_pairs if pair.status == "stale"]
         await _clear_empty_counts_for_pairs(stale_pairs, state)
     if not new_pairs and not has_updates:
-        _prune_market_signature_cache(state, active_market_ids)
         return hot_pair_hashes
 
     if new_pairs:
@@ -490,21 +492,38 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         await db.rollback()
         hot_pair_hashes = set()
 
-    _prune_market_signature_cache(state, active_market_ids)
     return hot_pair_hashes
 
 
-async def _load_active_markets_by_platform(db):
-    poly_stmt = select(Market).where(
-        and_(Market.platform == "polymarket", Market.status == "active")
+async def _load_active_markets(db, platform, market_ids=None):
+    stmt = select(Market).where(
+        and_(Market.platform == platform, Market.status == "active")
     )
-    pf_stmt = select(Market).where(
-        and_(Market.platform == "predict_fun", Market.status == "active")
-    )
+    if market_ids is not None:
+        if not market_ids:
+            return []
+        stmt = stmt.where(Market.id.in_(market_ids))
+    return (await db.execute(stmt)).scalars().all()
 
-    poly_markets = (await db.execute(poly_stmt)).scalars().all()
-    pf_markets = (await db.execute(pf_stmt)).scalars().all()
-    return poly_markets, pf_markets
+
+async def _iter_active_market_batches(db, platform, batch_size=500):
+    last_market_id = 0
+    while True:
+        stmt = (
+            select(Market)
+            .where(
+                Market.platform == platform,
+                Market.status == "active",
+                Market.id > last_market_id,
+            )
+            .order_by(Market.id)
+            .limit(batch_size)
+        )
+        markets = (await db.execute(stmt)).scalars().all()
+        if not markets:
+            return
+        yield markets
+        last_market_id = markets[-1].id
 
 
 async def _load_active_pairs(db):
@@ -725,6 +744,24 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         }
 
     delivery_targets = await fanout_manager.get_delivery_targets()
+    orderbook_started_at = time.monotonic()
+    try:
+        orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs(
+            active_pairs,
+            db,
+            market_map=market_map,
+        )
+    except Exception as e:
+        log.error("failed to fetch orderbooks batch", error=format_error_details(e))
+        incr_counter("worker.orderbook_batch_failed")
+        await send_system_error_notification("worker", "fetch orderbooks batch", e)
+        orderbooks_data = []
+    _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
+    orderbooks_by_pair_hash = {
+        item["pair"].pair_hash: item
+        for item in orderbooks_data
+        if item.get("pair") is not None
+    }
     pair_fetch_concurrency = max(1, int(settings.ORDERBOOK_PREDICT_FUN_CONCURRENCY or 1))
     semaphore = asyncio.Semaphore(pair_fetch_concurrency)
 
@@ -733,11 +770,11 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         async with semaphore:
             _record_timing("worker.timing.pair_queue_wait", queued_at)
             return await _process_candidate_pair(
-                orderbook_service,
                 calculator,
                 pair,
                 market_map,
                 delivery_targets,
+                orderbooks_by_pair_hash.get(pair.pair_hash),
             )
 
     pair_results = await asyncio.gather(
@@ -767,11 +804,11 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
 
 
 async def _process_candidate_pair(
-    orderbook_service,
     calculator,
     pair,
     market_map,
     delivery_targets,
+    orderbook_data,
 ):
     pair_stats = {
         "pair_hash": pair.pair_hash,
@@ -780,90 +817,72 @@ async def _process_candidate_pair(
         "deliverable_opportunities": 0,
         "deliveries": [],
     }
-    try:
-        orderbook_started_at = time.monotonic()
-        async with AsyncSessionLocal() as db:
-            orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs(
-                [pair],
-                db,
-                market_map=market_map,
-            )
-        _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
-    except Exception as e:
-        _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
-        log.error(
-            "failed to fetch orderbook for pair",
-            pair_id=pair.id,
-            error=format_error_details(e),
-        )
-        incr_counter("worker.pair_orderbook_failed")
-        await send_system_error_notification("worker", f"fetch orderbook pair {pair.id}", e)
+    if orderbook_data is None:
         return pair_stats
 
-    for item in orderbooks_data:
-        item_pair = item.get("pair") or pair
-        if getattr(item_pair, "pair_hash", None) != pair.pair_hash:
-            continue
+    item_pair = orderbook_data.get("pair") or pair
+    if getattr(item_pair, "pair_hash", None) != pair.pair_hash:
+        return pair_stats
 
-        market_a = market_map.get(item_pair.market_id_a)
-        market_b = market_map.get(item_pair.market_id_b)
-        if market_a is None or market_b is None:
-            continue
+    market_a = market_map.get(item_pair.market_id_a)
+    market_b = market_map.get(item_pair.market_id_b)
+    if market_a is None or market_b is None:
+        return pair_stats
 
-        pair_stats["has_orderbooks"] = True
-        incr_counter("worker.pairs_with_orderbooks")
+    pair_stats["has_orderbooks"] = True
+    incr_counter("worker.pairs_with_orderbooks")
 
-        directions = item.get("directions")
-        calculate_started_at = time.monotonic()
-        calc_results = calculator.calculate_opportunities(directions)
-        _record_timing("worker.timing.calculate", calculate_started_at)
-        if not calc_results:
-            incr_counter("calculator.drop.no_profitable_directions")
-            continue
-        incr_counter("worker.calc_positive_spread", len(calc_results))
+    directions = orderbook_data.get("directions")
+    calculate_started_at = time.monotonic()
+    calc_results = calculator.calculate_opportunities(directions)
+    _record_timing("worker.timing.calculate", calculate_started_at)
+    if not calc_results:
+        incr_counter("calculator.drop.no_profitable_directions")
+        return pair_stats
+    incr_counter("worker.calc_positive_spread", len(calc_results))
 
-        for calc_result in calc_results:
-            try:
-                async with AsyncSessionLocal() as db:
-                    alert_manager = AlertManager(db)
-                    opportunity = await alert_manager.process_opportunity(item_pair, calc_result)
-                    if not opportunity:
-                        continue
-                    incr_counter("worker.opportunities_created")
+    for calc_result in calc_results:
+        try:
+            async with AsyncSessionLocal() as db:
+                alert_manager = AlertManager(db)
+                opportunity = await alert_manager.process_opportunity(item_pair, calc_result)
+                if not opportunity:
+                    continue
+                incr_counter("worker.opportunities_created")
 
-                    fanout_manager = FanoutManager(db)
-                    fanout_started_at = time.monotonic()
-                    deliveries = await fanout_manager.create_alert_deliveries(
-                        opportunity,
-                        market_a,
-                        market_b,
-                        delivery_targets=delivery_targets,
-                        directions=directions,
-                        calculator=calculator,
-                    )
-                    _record_timing("worker.timing.fanout", fanout_started_at)
-
-                    if deliveries:
-                        pair_stats["deliverable_opportunities"] += 1
-                        pair_stats["deliveries"].append({
-                            "deliveries": deliveries,
-                            "opportunity": opportunity,
-                            "pair": item_pair,
-                            "market_a": market_a,
-                            "market_b": market_b,
-                            "directions": directions,
-                        })
-
-                    incr_counter("worker.opportunity_processed")
-                    pair_stats["opportunities"] += 1
-            except Exception as e:
-                log.error(
-                    "failed to process opportunity",
-                    pair_id=pair.id,
-                    error=format_error_details(e),
+                fanout_manager = FanoutManager(db)
+                fanout_started_at = time.monotonic()
+                deliveries = await fanout_manager.create_alert_deliveries(
+                    opportunity,
+                    market_a,
+                    market_b,
+                    delivery_targets=delivery_targets,
+                    directions=directions,
+                    calculator=calculator,
                 )
-                incr_counter("worker.opportunity_failed")
-                await send_system_error_notification("worker", "process opportunity", e)
+                _record_timing("worker.timing.fanout", fanout_started_at)
+
+                if deliveries:
+                    pair_stats["deliverable_opportunities"] += 1
+                    pair_stats["deliveries"].append({
+                        "deliveries": deliveries,
+                        "opportunity": opportunity,
+                        "pair": item_pair,
+                        "market_a": market_a,
+                        "market_b": market_b,
+                        "directions": directions,
+                    })
+
+                incr_counter("worker.opportunity_processed")
+                pair_stats["opportunities"] += 1
+        except Exception as e:
+            log.error(
+                "failed to process opportunity",
+                pair_id=pair.id,
+                error=format_error_details(e),
+            )
+            incr_counter("worker.opportunity_failed")
+            await send_system_error_notification("worker", "process opportunity", e)
 
     return pair_stats
 
@@ -883,20 +902,20 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
     successful_opportunities = []
 
     async def send_batch(delivery_batch):
-        async with semaphore:
-            sent_count = await _send_delivery_alerts(
-                delivery_batch["deliveries"],
-                delivery_batch["opportunity"],
-                delivery_batch["pair"],
-                delivery_batch["market_a"],
-                delivery_batch["market_b"],
-                delivery_batch["directions"],
-                calculator,
-                retry_queue,
-            )
-            if _deliveries_completed(delivery_batch["deliveries"]):
-                successful_opportunities.append(delivery_batch["opportunity"])
-            return sent_count
+        sent_count = await _send_delivery_alerts(
+            delivery_batch["deliveries"],
+            delivery_batch["opportunity"],
+            delivery_batch["pair"],
+            delivery_batch["market_a"],
+            delivery_batch["market_b"],
+            delivery_batch["directions"],
+            calculator,
+            retry_queue,
+            send_semaphore=semaphore,
+        )
+        if sent_count:
+            successful_opportunities.append(delivery_batch["opportunity"])
+        return sent_count
 
     results = await asyncio.gather(
         *(send_batch(batch) for batch in all_delivery_batches),
@@ -909,10 +928,9 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
 
     if successful_opportunities:
         try:
-            async with AsyncSessionLocal() as db:
-                alert_manager = AlertManager(db)
-                for opportunity in successful_opportunities:
-                    await alert_manager.finalize_opportunity(opportunity)
+            alert_manager = AlertManager(None)
+            for opportunity in successful_opportunities:
+                await alert_manager.finalize_opportunity(opportunity)
         except Exception as e:
             log.error("failed to finalize opportunities", error=format_error_details(e))
 
@@ -926,10 +944,11 @@ async def _send_delivery_alerts(
     directions,
     calculator,
     retry_queue=None,
+    send_semaphore=None,
 ):
-    send_results = []
+    semaphore = send_semaphore or asyncio.Semaphore(max(1, len(deliveries)))
 
-    for delivery in deliveries:
+    async def send_one(delivery):
         retry_item = {
             "delivery": delivery,
             "opportunity": opportunity,
@@ -938,44 +957,39 @@ async def _send_delivery_alerts(
             "market_b": market_b,
             "directions": directions,
         }
-        try:
-            sent = await send_alert_immediately(
-                delivery["alert"],
-                opportunity,
-                pair,
-                market_a,
-                market_b,
-                delivery["preferences"],
-                directions,
-                calculator,
-                prepared_opportunity=delivery.get("opportunity"),
-            )
-            if sent:
-                delivery["alert"].status = "sent"
-                incr_counter("worker.immediate_send_success")
-                send_results.append(1)
-            else:
+        async with semaphore:
+            try:
+                sent = await send_alert_immediately(
+                    delivery["alert"],
+                    opportunity,
+                    pair,
+                    market_a,
+                    market_b,
+                    delivery["preferences"],
+                    directions,
+                    calculator,
+                    prepared_opportunity=delivery.get("opportunity"),
+                )
+                if sent:
+                    delivery["alert"].status = "sent"
+                    incr_counter("worker.immediate_send_success")
+                    return 1
+
                 incr_counter("worker.immediate_send_failed")
-                send_results.append(0)
                 if getattr(delivery["alert"], "status", None) not in {"cancelled", "suppressed"}:
                     if getattr(delivery["alert"], "status", None) != "failed":
                         _mark_delivery_failed(delivery["alert"], "delivery returned false")
                     if retry_queue is not None:
                         retry_queue.enqueue(retry_item)
-        except Exception as e:
-            log.error("delivery send failed", error=format_error_details(e))
-            incr_counter("worker.immediate_send_failed")
-            send_results.append(0)
-            _mark_delivery_failed(delivery["alert"], e)
-            if retry_queue is not None:
-                retry_queue.enqueue(retry_item)
+            except Exception as e:
+                log.error("delivery send failed", error=format_error_details(e))
+                incr_counter("worker.immediate_send_failed")
+                _mark_delivery_failed(delivery["alert"], e)
+                if retry_queue is not None:
+                    retry_queue.enqueue(retry_item)
+            return 0
 
-    return sum(send_results)
-
-
-def _deliveries_completed(deliveries):
-    terminal_statuses = {"sent", "cancelled", "suppressed"}
-    return all(getattr(delivery["alert"], "status", None) in terminal_statuses for delivery in deliveries)
+    return sum(await asyncio.gather(*(send_one(delivery) for delivery in deliveries)))
 
 
 def _mark_delivery_failed(alert, error):
@@ -1002,6 +1016,7 @@ async def _retry_alert_delivery(item, calculator):
         incr_counter("worker.retry_send_failed")
         return False
 
+    await AlertManager(None).finalize_opportunity(item["opportunity"])
     incr_counter("worker.retry_send_success")
     return True
 
@@ -1124,6 +1139,7 @@ async def _clear_empty_count(pair_hash, state):
         pass
 
     state.pair_empty_counts.pop(pair_hash, None)
+    state.empty_probe_due_at.pop(pair_hash, None)
 
 
 async def _increment_empty_count(pair_hash, state):
@@ -1154,11 +1170,20 @@ async def _clear_empty_counts_for_pairs(pairs, state):
 async def _filter_skippable_pairs(pairs, state):
     empty_counts = await _get_empty_counts([pair.pair_hash for pair in pairs], state)
     active = []
+    probe_pair = None
+    now = time.monotonic()
     for pair in pairs:
         empty_count = empty_counts.get(pair.pair_hash, 0)
-        if empty_count >= settings.EMPTY_ORDERBOOK_THRESHOLD:
+        if empty_count < settings.EMPTY_ORDERBOOK_THRESHOLD:
+            state.empty_probe_due_at.pop(pair.pair_hash, None)
+            active.append(pair)
             continue
-        active.append(pair)
+        if probe_pair is None and state.empty_probe_due_at.get(pair.pair_hash, 0) <= now:
+            probe_pair = pair
+
+    if probe_pair is not None:
+        state.empty_probe_due_at[probe_pair.pair_hash] = now + _EMPTY_PROBE_INTERVAL_SECONDS
+        active.append(probe_pair)
     return active
 
 
@@ -1238,6 +1263,7 @@ async def _update_empty_counts(checked_pairs, pairs_with_data, state):
             for pair in checked_pairs:
                 key = _pair_empty_count_key(pair.pair_hash)
                 if pair.pair_hash in pairs_with_data:
+                    state.empty_probe_due_at.pop(pair.pair_hash, None)
                     pipe.delete(key)
                     continue
                 pipe.incr(key)

@@ -80,6 +80,7 @@ Redis также хранит отметку о доставленном тек�
 | Переменная | По умолчанию | Назначение |
 |---|---:|---|
 | `PREDICT_FUN_API_KEY` | — | API-ключ Predict.Fun для worker |
+| `ADMIN_API_TOKEN` | — | Bearer-токен для доступа к `GET /api/status` |
 | `TELEGRAM_BOT_TOKEN` | — | токен Telegram-бота |
 | `TELEGRAM_DEFAULT_CHAT_IDS` | пусто | резервный список получателей через запятую |
 | `TELEGRAM_SYSTEM_ERROR_CHAT_IDS` | пусто | идентификаторы чатов с доступом к `/stats` |
@@ -89,7 +90,7 @@ Redis также хранит отметку о доставленном тек�
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | `localhost` / `6379` / `0` | подключение к Redis |
 | `REDIS_PASSWORD` | — | пароль Redis |
 | `FEE_POLYMARKET_BPS` / `FEE_PREDICT_FUN_BPS` | `90` / `100` | комиссии площадок в базисных пунктах |
-| `ALERTS_DEDUPE_TTL_SECONDS` | `600` | срок хранения состояния дедупликации |
+| `ALERTS_DEDUPE_TTL_SECONDS` | `600` | срок первичной дедупликации; успешный Telegram-алерт запоминается до закрытия рынка, минимум на 24 часа |
 | `ALERTS_DELTA_PROFIT_THRESHOLD_USD` | `3` | минимальный рост прибыли для повторного уведомления |
 | `ALERTS_DELTA_ROI_THRESHOLD_PERCENT` | `0.5` | минимальный рост ROI для повторного уведомления |
 | `MARKET_REFRESH_SECONDS` / `MARKET_SYNC_INTERVAL_SECONDS` | `5` / `60` | частота worker-цикла и синхронизации рынков |
@@ -179,9 +180,13 @@ APP_RUNTIME_MODE=telegram python -m uvicorn arbitrage_bot.main:app --reload
 - `GET /api/health`
 - `GET /api/status`
 
-`GET /api/status` возвращает агрегаты по рынкам, парам и runtime-метрикам в полях `opportunity_counts.total`, `opportunity_counts.filtered_runtime` и `alert_counts.sent_runtime`.
+`GET /api/health` возвращает `503`, если PostgreSQL недоступен; состояние Redis показывается как `ok` или `degraded`, поскольку сервис умеет временно работать без него.
 
-HTTP API не использует авторизацию. Не публикуйте эти ручки напрямую.
+`GET /api/status` требует заголовок `Authorization: Bearer <ADMIN_API_TOKEN>` и возвращает агрегаты по рынкам, парам и runtime-метрикам в полях `opportunity_counts.total`, `opportunity_counts.filtered_runtime` и `alert_counts.sent_runtime`. Если токен не настроен, ручка отвечает `503`.
+
+Swagger, ReDoc и OpenAPI schema отключены. `GET /api/health` остаётся публичным для health-проб.
+
+Перед публикацией задайте длинный случайный `ADMIN_API_TOKEN` в секретах Amvera; не сохраняйте его в `amvera.yml` или репозитории.
 
 ## Тесты
 

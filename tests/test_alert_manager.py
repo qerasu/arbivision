@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from arbitrage_bot.services import alert_manager as alert_manager_module
 from arbitrage_bot.services.alert_manager import AlertManager
 
 
@@ -21,6 +22,10 @@ class FakeRedis:
 
 
 class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        alert_manager_module._dedupe_fallback.clear()
+
+
     def _build_calc_result(self, *, net_profit=7.5, net_roi=0.12):
         return {
             "direction": "A_yes_B_no",
@@ -48,6 +53,18 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opportunity.direction, "A_yes_B_no")
         self.assertTrue(opportunity.message_hash)
         self.assertEqual(len(redis.setex_calls), 1)
+
+
+    async def test_uses_memory_dedupe_when_redis_is_unavailable(self):
+        manager = AlertManager(db_session=None)
+        pair = SimpleNamespace(id=7, pair_hash="pair-offline")
+
+        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=None):
+            opportunity = await manager.process_opportunity(pair, self._build_calc_result())
+            await manager.finalize_opportunity(opportunity)
+            duplicate = await manager.process_opportunity(pair, self._build_calc_result())
+
+        self.assertFalse(duplicate)
 
 
     async def test_skips_opportunity_when_profit_deltas_are_below_threshold(self):

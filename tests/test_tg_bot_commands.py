@@ -10,6 +10,7 @@ from aiogram.exceptions import TelegramBadRequest
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
+from arbitrage_bot.tg_bot import bot as bot_module
 from arbitrage_bot.tg_bot.bot import _apply_calc_result_to_opportunity
 from arbitrage_bot.tg_bot.bot import _build_bot_commands
 from arbitrage_bot.tg_bot.bot import _build_market_url
@@ -768,6 +769,10 @@ class FakeTelegramAlertRedis:
         return self.data.get(key)
 
 
+    async def mget(self, keys):
+        return [self.data.get(key) for key in keys]
+
+
     async def set(self, key, value, ex=None):
         self.data[key] = value
         self.set_calls.append((key, value, ex))
@@ -781,6 +786,8 @@ class FakeTelegramAlertRedis:
 class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         reset_counters()
+        bot_module._delivery_dedupe_fallback.clear()
+        bot_module._alert_event_fallback.clear()
 
 
     def _build_pair(self):
@@ -839,6 +846,20 @@ class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+    def test_alert_event_ttl_reaches_latest_market_close(self):
+        now = datetime(2026, 3, 21, tzinfo=timezone.utc)
+        market_a = SimpleNamespace(
+            raw_payload_json={"endDate": "2026-03-26T00:00:00+00:00"},
+        )
+        market_b = SimpleNamespace(
+            raw_payload_json={"resolveDate": "2026-03-30T00:00:00+00:00"},
+        )
+
+        ttl_seconds = bot_module._alert_event_ttl_seconds(market_a, market_b, now=now)
+
+        self.assertEqual(ttl_seconds, 9 * 86400)
+
+
     async def test_send_alert_immediately_marks_first_delivery_as_initial(self):
         redis = FakeTelegramAlertRedis()
         bot = SimpleNamespace(send_message=AsyncMock())
@@ -850,7 +871,10 @@ class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
         with patch("arbitrage_bot.tg_bot.bot._get_delivery_bot", return_value=bot), patch(
             "arbitrage_bot.tg_bot.bot.get_redis",
             return_value=redis,
-        ) as redis_mock:
+        ), patch(
+            "arbitrage_bot.tg_bot.bot._alert_event_ttl_seconds",
+            return_value=12345,
+        ):
             sent = await send_alert_immediately(
                 alert,
                 opportunity,
@@ -871,6 +895,45 @@ class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
             json.loads(redis.data["telegram-alert-event:1001:pair-1:A_yes_B_no"])["message_hash"],
             "hash-1",
         )
+        self.assertEqual(redis.setex_calls[0][1], 12345)
+
+
+    async def test_send_alert_immediately_dedupes_in_memory_without_redis(self):
+        bot = SimpleNamespace(send_message=AsyncMock())
+        opportunity = self._build_runtime_opportunity()
+        pair = self._build_pair()
+        market_a, market_b = self._build_markets()
+
+        with patch("arbitrage_bot.tg_bot.bot._get_delivery_bot", return_value=bot), patch(
+            "arbitrage_bot.tg_bot.bot.get_redis",
+            return_value=None,
+        ):
+            first_sent = await send_alert_immediately(
+                self._build_alert(message_hash="offline-hash"),
+                opportunity,
+                pair,
+                market_a,
+                market_b,
+                preferences={},
+                directions={},
+                calculator=SimpleNamespace(),
+                prepared_opportunity=opportunity,
+            )
+            duplicate_sent = await send_alert_immediately(
+                self._build_alert(message_hash="offline-hash"),
+                opportunity,
+                pair,
+                market_a,
+                market_b,
+                preferences={},
+                directions={},
+                calculator=SimpleNamespace(),
+                prepared_opportunity=opportunity,
+            )
+
+        self.assertTrue(first_sent)
+        self.assertFalse(duplicate_sent)
+        bot.send_message.assert_awaited_once()
 
 
     async def test_send_alert_immediately_marks_material_repeat_as_update(self):
