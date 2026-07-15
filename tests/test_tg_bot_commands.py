@@ -940,6 +940,7 @@ class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Market 1", text)
         self.assertIn("Market 2", text)
         self.assertIn("📈 ROI 12.00% · 💰 Profit $7 · 💵 Volume $43", text)
+        self.assertIn("🧾 Buy 50 shares each: Polymarket YES · Predict.Fun NO", text)
         self.assertIn(
             '<a href="https://polymarket.com/market/manchester-united-win?r=qerasuu">Polymarket</a>',
             text,
