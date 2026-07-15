@@ -42,16 +42,7 @@ arbitrage_bot/
   runtime.py        запуск worker и Telegram
   worker.py         основной цикл обработки рынков
 utilities/
-  start.py          локальный dev-запуск сервиса
-  stop.py           безопасная остановка процесса и контейнеров
   run_tests.py      запуск тестов
-  backup.py         бэкап данных
-  bootstrap.py      начальная настройка окружения
-  auto_update.py    обновление кода из origin/main
-  run_auto_update.ps1
-                    Windows-обёртка для auto_update.py с lock-файлом и логом
-  install_auto_update_task.ps1
-                    установка Windows Scheduled Task для автообновления
 ```
 
 
@@ -93,7 +84,6 @@ Redis также хранит отметку о доставленном тек�
 | `TELEGRAM_DEFAULT_CHAT_IDS` | пусто | резервный список получателей через запятую |
 | `TELEGRAM_SYSTEM_ERROR_CHAT_IDS` | пусто | идентификаторы чатов с доступом к `/stats` |
 | `APP_RUNTIME_MODE` | `all` | `all`, `worker`, `telegram` или `api` |
-| `APP_HOST` / `APP_PORT` | `127.0.0.1` / `8000` | адрес HTTP-сервера при запуске через `utilities/start.py` |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `arb_user` / `arb_pass` / `arbitrage_db` | учётные данные PostgreSQL |
 | `POSTGRES_HOST` / `POSTGRES_PORT` | `localhost` / `5432` | подключение к PostgreSQL |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | `localhost` / `6379` / `0` | подключение к Redis |
@@ -126,108 +116,6 @@ Redis также хранит отметку о доставленном тек�
 - отправка нескольким получателям выполняется параллельно с лимитом `TELEGRAM_SEND_CONCURRENCY`
 - старые служебные записи удаляются по расписанию, заданному `DB_CLEANUP_INTERVAL_SECONDS`
 - при недоступном Redis часть дедупликации и кеширования временно работает в памяти
-
-## Старт для разработки (macos/linux)
-
-1. Перейдите в папку проекта:
-
-```bash
-cd arbivision
-```
-
-2. Создайте виртуальное окружение:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-3. Подготовьте файл окружения:
-
-```bash
-mkdir -p ~/.config/arbivision
-cp .env.example ~/.config/arbivision/.env
-```
-
-Заполните в `~/.config/arbivision/.env` реальные значения `PREDICT_FUN_API_KEY`, `TELEGRAM_BOT_TOKEN` и нужные chat ids.
-
-4. Установите зависимости:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-5. Запустите проект:
-
-```bash
-python utilities/start.py
-```
-
-Что делает `utilities/start.py`:
-
-- загружает `.env`
-- запускает `docker compose up -d`
-- ждёт готовности Postgres
-- прогоняет `alembic upgrade head`
-- стартует `uvicorn arbitrage_bot.main:app --reload`
-- пишет PID в временный файл, чтобы `utilities/stop.py` мог остановить именно этот процесс
-
-Остановка:
-
-```bash
-python utilities/stop.py
-```
-
-`utilities/stop.py` завершает только сохранённый PID, не пытаясь убивать посторонние `uvicorn`-процессы, а затем делает `docker compose stop`.
-
-Опция `python utilities/stop.py --drop` безвозвратно удаляет контейнеры, сеть и volumes для Postgres и Redis. Перед удалением данных можно создать PostgreSQL-бэкап:
-
-```bash
-python utilities/backup.py
-```
-
-Бэкап сохраняется в `backups/`. Redis этой командой не резервируется.
-
-## Автообновление на Windows-сервере
-
-`utilities/auto_update.py`:
-
-- делает `git fetch origin main`
-- сравнивает локальный `HEAD` с `origin/main`
-- если коммиты совпадают, завершает работу без изменений
-- если есть новый коммит, выполняет `git pull --ff-only origin main`
-- все git-команды выполняются с `timeout=60s`; при зависании сети процесс не блокируется навсегда
-- при ошибке выбрасывается `RuntimeError`, а не `SystemExit`, что безопасно при вызове из другого модуля
-
-`auto_update.py` не вызывает `utilities/stop.py` и `utilities/start.py`. Если сервис уже запущен отдельно через `uvicorn --reload`, изменения Python-кода подхватываются автоматически.
-
-`run_auto_update.ps1` защищает запуск lock-файлом `tmp/auto_update.lock`, чтобы две задачи планировщика не тянули git одновременно. Wrapper записывает в lock PID процесса и автоматически перехватывает stale lock, если процесс уже завершился или lock старше 15 минут.
-
-Ручная проверка на Windows:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\utilities\run_auto_update.ps1
-```
-
-Установка задачи планировщика с интервалом 5 минут:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\utilities\install_auto_update_task.ps1
-```
-
-Установка с интервалом 10 минут:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\utilities\install_auto_update_task.ps1 -IntervalMinutes 10
-```
-
-Проверка задачи:
-
-```powershell
-schtasks /Query /TN "Arbivision Auto Update" /V /FO LIST
-```
-
-Лог автообновления пишется в `logs/auto_update.log`. В нём должны быть строки `run auto_update.py`, `local HEAD`, `remote HEAD`, `no updates found` или `update completed`, а также `exit code: 0`.
 
 ## Альтернативные способы запуска
 
@@ -293,7 +181,7 @@ APP_RUNTIME_MODE=telegram python -m uvicorn arbitrage_bot.main:app --reload
 
 `GET /api/status` возвращает агрегаты по рынкам, парам и runtime-метрикам в полях `opportunity_counts.total`, `opportunity_counts.filtered_runtime` и `alert_counts.sent_runtime`.
 
-HTTP API не использует авторизацию. По умолчанию `utilities/start.py` привязывает его к `127.0.0.1`; не публикуйте эти ручки напрямую.
+HTTP API не использует авторизацию. Не публикуйте эти ручки напрямую.
 
 ## Тесты
 
