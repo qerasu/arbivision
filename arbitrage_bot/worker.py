@@ -1,6 +1,4 @@
 import asyncio
-import hashlib
-import json
 import time
 import traceback
 from cachetools import TTLCache
@@ -24,7 +22,7 @@ from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.core.observability import incr_counter
 from arbitrage_bot.services.system_notifier import format_error_details, send_system_error_notification
 from arbitrage_bot.services.operations_monitor import record_worker_cycle
-from arbitrage_bot.tg_bot.bot import send_alert_immediately
+from arbitrage_bot.tg_bot.bot import send_alert_digest, send_alert_immediately
 from arbitrage_bot.tg_bot.preferences import extract_pair_close_datetime
 from sqlalchemy.future import select
 from sqlalchemy import and_, delete, or_
@@ -771,6 +769,8 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
             _record_timing("worker.timing.pair_queue_wait", queued_at)
             return await _process_candidate_pair(
                 calculator,
+                alert_manager,
+                fanout_manager,
                 pair,
                 market_map,
                 delivery_targets,
@@ -805,6 +805,8 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
 
 async def _process_candidate_pair(
     calculator,
+    alert_manager,
+    fanout_manager,
     pair,
     market_map,
     delivery_targets,
@@ -843,38 +845,35 @@ async def _process_candidate_pair(
 
     for calc_result in calc_results:
         try:
-            async with AsyncSessionLocal() as db:
-                alert_manager = AlertManager(db)
-                opportunity = await alert_manager.process_opportunity(item_pair, calc_result)
-                if not opportunity:
-                    continue
-                incr_counter("worker.opportunities_created")
+            opportunity = await alert_manager.process_opportunity(item_pair, calc_result)
+            if not opportunity:
+                continue
+            incr_counter("worker.opportunities_created")
 
-                fanout_manager = FanoutManager(db)
-                fanout_started_at = time.monotonic()
-                deliveries = await fanout_manager.create_alert_deliveries(
-                    opportunity,
-                    market_a,
-                    market_b,
-                    delivery_targets=delivery_targets,
-                    directions=directions,
-                    calculator=calculator,
-                )
-                _record_timing("worker.timing.fanout", fanout_started_at)
+            fanout_started_at = time.monotonic()
+            deliveries = await fanout_manager.create_alert_deliveries(
+                opportunity,
+                market_a,
+                market_b,
+                delivery_targets=delivery_targets,
+                directions=directions,
+                calculator=calculator,
+            )
+            _record_timing("worker.timing.fanout", fanout_started_at)
 
-                if deliveries:
-                    pair_stats["deliverable_opportunities"] += 1
-                    pair_stats["deliveries"].append({
-                        "deliveries": deliveries,
-                        "opportunity": opportunity,
-                        "pair": item_pair,
-                        "market_a": market_a,
-                        "market_b": market_b,
-                        "directions": directions,
-                    })
+            if deliveries:
+                pair_stats["deliverable_opportunities"] += 1
+                pair_stats["deliveries"].append({
+                    "deliveries": deliveries,
+                    "opportunity": opportunity,
+                    "pair": item_pair,
+                    "market_a": market_a,
+                    "market_b": market_b,
+                    "directions": directions,
+                })
 
-                incr_counter("worker.opportunity_processed")
-                pair_stats["opportunities"] += 1
+            incr_counter("worker.opportunity_processed")
+            pair_stats["opportunities"] += 1
         except Exception as e:
             log.error(
                 "failed to process opportunity",
@@ -895,15 +894,42 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
     ]
 
     if not all_delivery_batches:
-        return
+        return False
 
     send_concurrency = max(1, int(settings.TELEGRAM_SEND_CONCURRENCY or 1))
     semaphore = asyncio.Semaphore(send_concurrency)
-    successful_opportunities = []
+    delivery_groups = {}
+    for delivery_batch in all_delivery_batches:
+        for delivery in delivery_batch["deliveries"]:
+            alert = delivery["alert"]
+            chat_id = getattr(alert, "telegram_chat_id", None)
+            group_key = ("chat", str(chat_id)) if chat_id is not None else ("alert", id(alert))
+            delivery_groups.setdefault(group_key, []).append({
+                **delivery_batch,
+                "delivery": delivery,
+            })
 
-    async def send_batch(delivery_batch):
+    async def send_group(items):
+        if len(items) > 1:
+            async with semaphore:
+                successful = await send_alert_digest(items, calculator)
+            if retry_queue is not None:
+                for item in items:
+                    if getattr(item["delivery"]["alert"], "status", None) != "failed":
+                        continue
+                    retry_queue.enqueue({
+                        "delivery": item["delivery"],
+                        "opportunity": item["opportunity"],
+                        "pair": item["pair"],
+                        "market_a": item["market_a"],
+                        "market_b": item["market_b"],
+                        "directions": item["directions"],
+                    })
+            return successful
+
+        delivery_batch = items[0]
         sent_count = await _send_delivery_alerts(
-            delivery_batch["deliveries"],
+            [delivery_batch["delivery"]],
             delivery_batch["opportunity"],
             delivery_batch["pair"],
             delivery_batch["market_a"],
@@ -913,26 +939,29 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
             retry_queue,
             send_semaphore=semaphore,
         )
-        if sent_count:
-            successful_opportunities.append(delivery_batch["opportunity"])
-        return sent_count
+        return [delivery_batch["opportunity"]] if sent_count else []
 
     results = await asyncio.gather(
-        *(send_batch(batch) for batch in all_delivery_batches),
+        *(send_group(items) for items in delivery_groups.values()),
         return_exceptions=True,
     )
 
+    successful_opportunities = {}
     for idx, result in enumerate(results):
         if isinstance(result, Exception):
             log.error("delivery batch failed", batch_index=idx, error=format_error_details(result))
+            continue
+        for opportunity in result:
+            successful_opportunities[id(opportunity)] = opportunity
 
     if successful_opportunities:
         try:
             alert_manager = AlertManager(None)
-            for opportunity in successful_opportunities:
+            for opportunity in successful_opportunities.values():
                 await alert_manager.finalize_opportunity(opportunity)
         except Exception as e:
             log.error("failed to finalize opportunities", error=format_error_details(e))
+    return True
 
 
 async def _send_delivery_alerts(
@@ -969,6 +998,8 @@ async def _send_delivery_alerts(
                     directions,
                     calculator,
                     prepared_opportunity=delivery.get("opportunity"),
+                    event_state_loaded="event_state" in delivery,
+                    event_state=delivery.get("event_state"),
                 )
                 if sent:
                     delivery["alert"].status = "sent"
@@ -1026,17 +1057,13 @@ def _pair_empty_count_key(pair_hash):
 
 
 def _market_signature_fingerprint(market):
-    outcomes_hash = hashlib.md5(
-        json.dumps(getattr(market, "outcomes_json", None), sort_keys=True, ensure_ascii=True).encode()
-    ).hexdigest()
-    payload_hash = hashlib.md5(
-        json.dumps(getattr(market, "raw_payload_json", None), sort_keys=True, ensure_ascii=True).encode()
-    ).hexdigest()
     return (
         getattr(market, "title", None),
+        getattr(market, "description", None),
         getattr(market, "category", None),
-        outcomes_hash,
-        payload_hash,
+        getattr(market, "slug", None),
+        getattr(market, "outcomes_json", None),
+        getattr(market, "raw_payload_json", None),
         getattr(market, "status", None),
         getattr(market, "updated_at", None),
     )
