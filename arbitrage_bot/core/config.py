@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus
 
 from arbitrage_bot.core.env_loader import load_env_file
 
@@ -44,6 +44,7 @@ class Settings:
         self.REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
         self.REDIS_PORT = _get_int_setting("REDIS_PORT", 6379)
         self.REDIS_DB = _get_int_setting("REDIS_DB", 0)
+        self.REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
         self.PREDICT_FUN_API_KEY = os.getenv("PREDICT_FUN_API_KEY", "")
 
@@ -88,7 +89,8 @@ class Settings:
 
     @property
     def redis_url(self):
-        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        auth = f":{quote(self.REDIS_PASSWORD, safe='')}@" if self.REDIS_PASSWORD else ""
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
 
 settings = Settings()

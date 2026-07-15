@@ -1,9 +1,22 @@
 import asyncio
+import os
 import unittest
 from unittest.mock import AsyncMock
 from unittest.mock import patch
 
 from arbitrage_bot.core import redis as redis_module
+from arbitrage_bot.core.config import Settings
+
+
+class RedisSettingsTests(unittest.TestCase):
+    def test_redis_url_includes_escaped_password(self):
+        with patch.dict(os.environ, {
+            "REDIS_HOST": "redis",
+            "REDIS_PORT": "6379",
+            "REDIS_DB": "2",
+            "REDIS_PASSWORD": "p@ss word",
+        }, clear=False):
+            self.assertEqual(Settings().redis_url, "redis://:p%40ss%20word@redis:6379/2")
 
 
 class RedisConnectionTests(unittest.IsolatedAsyncioTestCase):

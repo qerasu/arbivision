@@ -28,7 +28,12 @@ async def init_redis():
             )
             await client.ping()
             _redis_client = client
-            log.info("redis connection initialized", url=settings.redis_url)
+            log.info(
+                "redis connection initialized",
+                host=settings.REDIS_HOST,
+                port=settings.REDIS_PORT,
+                db=settings.REDIS_DB,
+            )
             return _redis_client
         except Exception as exc:
             if client is not None:

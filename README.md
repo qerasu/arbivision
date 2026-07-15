@@ -97,6 +97,7 @@ Redis также хранит отметку о доставленном тек�
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `arb_user` / `arb_pass` / `arbitrage_db` | учётные данные PostgreSQL |
 | `POSTGRES_HOST` / `POSTGRES_PORT` | `localhost` / `5432` | подключение к PostgreSQL |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | `localhost` / `6379` / `0` | подключение к Redis |
+| `REDIS_PASSWORD` | — | пароль Redis |
 | `FEE_POLYMARKET_BPS` / `FEE_PREDICT_FUN_BPS` | `90` / `100` | комиссии площадок в базисных пунктах |
 | `ALERTS_DEDUPE_TTL_SECONDS` | `600` | срок хранения состояния дедупликации |
 | `ALERTS_DELTA_PROFIT_THRESHOLD_USD` | `3` | минимальный рост прибыли для повторного уведомления |
