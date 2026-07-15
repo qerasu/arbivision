@@ -146,13 +146,23 @@ def _format_alert_digest_message(items, language=None):
             f"💵 {translate(language, 'Volume', 'Объём')} "
             f"{_format_money(getattr(opportunity, 'capital_required', 0.0))}"
         )
+        direction = _describe_direction(getattr(opportunity, "direction", None), item["pair"])
+        shares = _format_shares(getattr(opportunity, "shares", 0.0))
+        orders = translate(
+            language,
+            f"🧾 Buy {shares} shares each: Polymarket {html.escape(direction['leg_1_label'])} · "
+            f"Predict.Fun {html.escape(direction['leg_2_label'])}",
+            f"🧾 Купить по {shares} shares: Polymarket {html.escape(direction['leg_1_label'])} · "
+            f"Predict.Fun {html.escape(direction['leg_2_label'])}",
+        )
         links = _format_market_links(market_a, market_b)
         line = (
             f"\n<b>{index}. {repeat_marker}{html.escape(title)}</b>\n"
             f"{metrics}\n"
+            f"{orders}\n"
             f"🔗 {links}"
         )
-        visible_line_length = len(title) + len(metrics) + len("\n🔗 Polymarket | Predict.Fun")
+        visible_line_length = len(title) + len(metrics) + len(orders) + len("\n🔗 Polymarket | Predict.Fun")
         if text_length + visible_line_length > 3600:
             break
         lines.append(line)
