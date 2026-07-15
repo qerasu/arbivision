@@ -1,13 +1,9 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-try:
-    from bootstrap import ensure_repo_on_path
-except ModuleNotFoundError:
-    from utilities.bootstrap import ensure_repo_on_path
-
-repo_root = ensure_repo_on_path()
+repo_root = Path(__file__).resolve().parent.parent
 
 
 def _python_exec():

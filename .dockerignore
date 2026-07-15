@@ -1,0 +1,12 @@
+.env
+.env.*
+.git
+.github
+.venv
+__pycache__
+*.py[cod]
+backups
+graphify-out
+logs
+tests
+tmp
