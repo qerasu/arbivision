@@ -10,6 +10,7 @@ from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.core.observability import incr_counter
 from arbitrage_bot.models.orm import Market
 from arbitrage_bot.services.system_notifier import format_compact_error
+from arbitrage_bot.services.orderbook_stream import OrderbookStream
 from sqlalchemy.future import select
 
 log = get_logger("orderbook")
@@ -17,7 +18,7 @@ _CACHE_MISS = object()
 
 
 class OrderbookService:
-    def __init__(self):
+    def __init__(self, streaming_enabled=False):
         self.polymarket = PolymarketAdapter()
         self.predict_fun = PredictFunAdapter()
         self._pair_fetch_concurrency = settings.ORDERBOOK_PREDICT_FUN_CONCURRENCY
@@ -26,11 +27,73 @@ class OrderbookService:
         self._polymarket_batch_size = settings.ORDERBOOK_POLYMARKET_BATCH_SIZE
         self._predict_fun_orderbook_cache = {}
         self._polymarket_book_cache = {}
+        self._stream = OrderbookStream(settings.PREDICT_FUN_API_KEY) if streaming_enabled else None
+        self._last_stream_reconcile_at = None
 
 
     async def close(self):
+        if self._stream is not None:
+            await self._stream.close()
         await self.polymarket.close()
         await self.predict_fun.close()
+
+
+    def prepare_pairs_for_cycle(self, market_pairs, market_map, force_pair_hashes=()):
+        if self._stream is None:
+            return market_pairs
+
+        prepared_pairs = self._prepare_pairs_from_market_map(market_pairs, market_map)
+        self._stream.register_pairs(prepared_pairs)
+        now = time.monotonic()
+        should_reconcile = (
+            self._last_stream_reconcile_at is None
+            or now - self._last_stream_reconcile_at >= 30.0
+        )
+        if not self._stream.ready or should_reconcile:
+            self._last_stream_reconcile_at = now
+            return market_pairs
+
+        selected_hashes = self._stream.dirty_pair_hashes | {
+            str(pair_hash)
+            for pair_hash in force_pair_hashes
+            if pair_hash
+        }
+        return [
+            pair
+            for pair in market_pairs
+            if str(getattr(pair, "pair_hash", "") or "") in selected_hashes
+        ]
+
+
+    def consume_pair_updates(self, market_pairs):
+        if self._stream is not None:
+            self._stream.consume_pairs(market_pairs)
+
+
+    async def wait_for_updates(self, timeout):
+        if self._stream is None:
+            await asyncio.sleep(timeout)
+            return False
+        return await self._stream.wait_for_update(timeout)
+
+
+    def _prepare_pairs_from_market_map(self, market_pairs, market_map):
+        prepared_pairs = []
+        for pair in market_pairs:
+            market_a = market_map.get(pair.market_id_a)
+            market_b = market_map.get(pair.market_id_b)
+            poly_platform_id, pf_platform_id = self._resolve_platform_market_ids_from_rows(
+                market_a,
+                market_b,
+            )
+            if not poly_platform_id or not pf_platform_id:
+                continue
+            prepared_pairs.append({
+                "pair": pair,
+                "poly_market_id": poly_platform_id,
+                "pf_market_id": pf_platform_id,
+            })
+        return prepared_pairs
 
 
     async def fetch_orderbooks_for_pairs(self, market_pairs, db_session, market_map=None, bypass_cache=False):
@@ -253,6 +316,11 @@ class OrderbookService:
 
 
     async def _fetch_predict_fun_orderbook_with_reason(self, market_id, semaphore=None, bypass_cache=False):
+        if self._stream is not None and not bypass_cache:
+            streamed = self._stream.get_predict_book(market_id)
+            if streamed is not None:
+                return streamed, None
+
         if not bypass_cache:
             cached_value = self._get_cache_value(self._predict_fun_orderbook_cache, market_id)
             if cached_value is _CACHE_MISS:
@@ -298,6 +366,8 @@ class OrderbookService:
 
         if not bypass_cache:
             self._set_cache_value(self._predict_fun_orderbook_cache, market_id, payload)
+        if self._stream is not None:
+            self._stream.seed_predict_book(market_id, payload)
         return payload, None
 
 
@@ -376,6 +446,11 @@ class OrderbookService:
             if bypass_cache:
                 missing_token_ids.append(token_id)
                 continue
+            if self._stream is not None:
+                streamed = self._stream.get_polymarket_book(token_id)
+                if streamed is not None:
+                    books[token_id] = streamed
+                    continue
             cached_value = self._get_cache_value(self._polymarket_book_cache, token_id)
             if cached_value is _CACHE_MISS:
                 continue
@@ -412,6 +487,8 @@ class OrderbookService:
                         self._set_cache_value(self._polymarket_book_cache, token_id, _CACHE_MISS)
                     continue
                 self._set_cache_value(self._polymarket_book_cache, token_id, book)
+                if self._stream is not None:
+                    self._stream.seed_polymarket_book(token_id, book)
                 books[token_id] = book
 
         return books

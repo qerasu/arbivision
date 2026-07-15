@@ -44,7 +44,11 @@ class PredictFunAdapter(BaseAdapter):
         )
         self.last_fetch_partial = False
         self.last_fetch_complete = True
-        self.rate_limiter = TokenBucketRateLimiter(tokens_per_second=15.0, max_tokens=30)
+        rest_rps = max(1.0, float(settings.PREDICT_FUN_REST_RPS))
+        self.rate_limiter = TokenBucketRateLimiter(
+            tokens_per_second=rest_rps,
+            max_tokens=max(2, int(rest_rps * 2)),
+        )
 
 
     async def close(self):

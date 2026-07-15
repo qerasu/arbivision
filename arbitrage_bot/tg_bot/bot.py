@@ -139,16 +139,24 @@ def _format_alert_digest_message(items, language=None):
         if len(title) > 60:
             title = f"{title[:57]}..."
         repeat_marker = "🔄 " if item["is_repeat"] else ""
+        metrics = (
+            f"📈 ROI {float(getattr(opportunity, 'net_roi', 0.0) or 0.0) * 100:.2f}% · "
+            f"💰 {translate(language, 'Profit', 'Прибыль')} "
+            f"{_format_money(getattr(opportunity, 'net_profit', 0.0))} · "
+            f"💵 {translate(language, 'Volume', 'Объём')} "
+            f"{_format_money(getattr(opportunity, 'capital_required', 0.0))}"
+        )
+        links = _format_market_links(market_a, market_b)
         line = (
             f"\n<b>{index}. {repeat_marker}{html.escape(title)}</b>\n"
-            f"📈 {float(getattr(opportunity, 'net_roi', 0.0) or 0.0) * 100:.2f}% · "
-            f"💰 {_format_money(getattr(opportunity, 'net_profit', 0.0))} · "
-            f"💵 {_format_money(getattr(opportunity, 'capital_required', 0.0))}"
+            f"{metrics}\n"
+            f"🔗 {links}"
         )
-        if text_length + len(line) > 3600:
+        visible_line_length = len(title) + len(metrics) + len("\n🔗 Polymarket | Predict.Fun")
+        if text_length + visible_line_length > 3600:
             break
         lines.append(line)
-        text_length += len(line)
+        text_length += visible_line_length
         shown_count += 1
     remaining_count = len(sorted_items) - shown_count
     if remaining_count:
