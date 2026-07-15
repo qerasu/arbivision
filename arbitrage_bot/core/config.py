@@ -24,6 +24,13 @@ def _get_float_setting(name, default):
         return default
 
 
+def _get_bool_setting(name, default):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _get_set_setting(name, default):
     raw = os.getenv(name, "")
 
@@ -47,6 +54,7 @@ class Settings:
         self.REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 
         self.PREDICT_FUN_API_KEY = os.getenv("PREDICT_FUN_API_KEY", "")
+        self.PREDICT_FUN_REST_RPS = _get_float_setting("PREDICT_FUN_REST_RPS", 4.0)
         self.ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
 
         self.FEE_POLYMARKET_BPS = _get_float_setting("FEE_POLYMARKET_BPS", 90.0)
@@ -61,6 +69,7 @@ class Settings:
         self.ORDERBOOK_CACHE_MAX_ITEMS = _get_int_setting("ORDERBOOK_CACHE_MAX_ITEMS", 5000)
         self.ORDERBOOK_POLYMARKET_BATCH_SIZE = _get_int_setting("ORDERBOOK_POLYMARKET_BATCH_SIZE", 100)
         self.ORDERBOOK_PREDICT_FUN_CONCURRENCY = _get_int_setting("ORDERBOOK_PREDICT_FUN_CONCURRENCY", 12)
+        self.ORDERBOOK_STREAMING_ENABLED = _get_bool_setting("ORDERBOOK_STREAMING_ENABLED", True)
         self.MAX_ACTIVE_PAIRS_PER_CYCLE = _get_int_setting("MAX_ACTIVE_PAIRS_PER_CYCLE", 450)
 
         self.MARKET_REFRESH_SECONDS = _get_int_setting("MARKET_REFRESH_SECONDS", 5)

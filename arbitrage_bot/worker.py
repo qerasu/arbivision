@@ -159,7 +159,9 @@ async def run_sync_loop(state=None):
     runtime_state = state or WorkerState()
     ingestion = IngestionService(db_session=None)
     matcher = MatcherService()
-    orderbook_service = OrderbookService()
+    orderbook_service = OrderbookService(
+        streaming_enabled=settings.ORDERBOOK_STREAMING_ENABLED,
+    )
     calculator = ArbitrageCalculator()
     retry_queue = AlertRetryQueue(calculator)
     retry_task = asyncio.create_task(retry_queue.run())
@@ -194,7 +196,7 @@ async def run_sync_loop(state=None):
                 incr_counter("worker.cycle_failed")
                 await send_system_error_notification("worker", "sync loop", e)
                 
-            await asyncio.sleep(settings.MARKET_REFRESH_SECONDS)
+            await orderbook_service.wait_for_updates(settings.MARKET_REFRESH_SECONDS)
     finally:
         retry_task.cancel()
         await asyncio.gather(retry_task, return_exceptions=True)
@@ -729,6 +731,13 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         }
 
     active_pairs = await _filter_skippable_pairs(pairs, state)
+    prepare_pairs = getattr(orderbook_service, "prepare_pairs_for_cycle", None)
+    if prepare_pairs is not None:
+        active_pairs = prepare_pairs(
+            active_pairs,
+            market_map,
+            force_pair_hashes=state.hot_pair_hashes,
+        )
     active_pairs = _select_active_pairs_for_cycle(active_pairs, market_map, state)
     incr_counter("worker.active_pairs_loaded", len(active_pairs))
     if not active_pairs:
@@ -742,6 +751,9 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         }
 
     delivery_targets = await fanout_manager.get_delivery_targets()
+    consume_updates = getattr(orderbook_service, "consume_pair_updates", None)
+    if consume_updates is not None:
+        consume_updates(active_pairs)
     orderbook_started_at = time.monotonic()
     try:
         orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs(

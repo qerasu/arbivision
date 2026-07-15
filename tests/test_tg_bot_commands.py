@@ -939,6 +939,15 @@ class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2 arbitrage opportunities", text)
         self.assertIn("Market 1", text)
         self.assertIn("Market 2", text)
+        self.assertIn("📈 ROI 12.00% · 💰 Profit $7 · 💵 Volume $43", text)
+        self.assertIn(
+            '<a href="https://polymarket.com/market/manchester-united-win?r=qerasuu">Polymarket</a>',
+            text,
+        )
+        self.assertIn(
+            '<a href="https://predict.fun/market/pf-123?ref=077A2">Predict.Fun</a>',
+            text,
+        )
         self.assertEqual(len(sent_opportunities), 2)
         self.assertEqual(redis.mget_calls, [])
         self.assertIn("telegram-alert-event:1001:pair-1:A_yes_B_no", redis.data)

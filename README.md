@@ -80,6 +80,7 @@ Redis также хранит отметку о доставленном тек�
 | Переменная | По умолчанию | Назначение |
 |---|---:|---|
 | `PREDICT_FUN_API_KEY` | — | API-ключ Predict.Fun для worker |
+| `PREDICT_FUN_REST_RPS` | `4` | лимит резервных REST-запросов Predict.Fun в секунду |
 | `ADMIN_API_TOKEN` | — | Bearer-токен для доступа к `GET /api/status` |
 | `TELEGRAM_BOT_TOKEN` | — | токен Telegram-бота |
 | `TELEGRAM_DEFAULT_CHAT_IDS` | пусто | резервный список получателей через запятую |
@@ -96,6 +97,7 @@ Redis также хранит отметку о доставленном тек�
 | `MARKET_REFRESH_SECONDS` / `MARKET_SYNC_INTERVAL_SECONDS` | `5` / `60` | частота worker-цикла и синхронизации рынков |
 | `MAX_ACTIVE_PAIRS_PER_CYCLE` | `450` | максимум проверяемых пар за цикл |
 | `ORDERBOOK_PREDICT_FUN_CONCURRENCY` | `12` | параллельность запросов Predict.Fun orderbook |
+| `ORDERBOOK_STREAMING_ENABLED` | `true` | получать live-стаканы через WebSocket; REST остаётся резервом |
 | `TELEGRAM_SEND_CONCURRENCY` | `8` | число параллельных отправок в Telegram |
 | `TELEGRAM_ALERT_RETRY_MAX_ATTEMPTS` | `3` | максимум попыток отправки одного уведомления |
 | `TELEGRAM_ALERT_RETRY_BASE_DELAY_SECONDS` | `5` | начальная задержка перед повторной отправкой |
