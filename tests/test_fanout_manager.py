@@ -1,22 +1,37 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.models.orm import Market
 from arbitrage_bot.services.fanout_manager import FanoutManager
+from arbitrage_bot.tg_bot import bot as bot_module
 
 
 class FakeDbSession:
     pass
 
 
+class FakeRedis:
+    def __init__(self, data):
+        self.data = data
+        self.mget_calls = []
+
+
+    async def mget(self, keys):
+        self.mget_calls.append(list(keys))
+        return [self.data.get(key) for key in keys]
+
+
 class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         FanoutManager._cache_value = None
         FanoutManager._cache_expires_at = 0.0
+        bot_module._alert_event_fallback.clear()
         reset_counters()
 
 
@@ -199,3 +214,93 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(deliveries), 1)
         self.assertAlmostEqual(deliveries[0]["opportunity"].capital_required, 4.65)
         self.assertAlmostEqual(deliveries[0]["opportunity"].shares, 5.0)
+
+
+    async def test_fanout_suppresses_repeat_before_target_recalculation(self):
+        manager = FanoutManager(FakeDbSession())
+        opportunity = SimpleNamespace(
+            pair_hash="pair-1",
+            direction="A_yes_B_no",
+            message_hash="hash-1",
+            net_roi=0.12,
+            capital_required=10.0,
+            net_profit=5.0,
+        )
+        redis = FakeRedis(
+            {
+                "telegram-alert-event:1001:pair-1:A_yes_B_no": json.dumps(
+                    {
+                        "message_hash": "hash-1",
+                        "net_profit": 5.0,
+                        "net_roi": 0.12,
+                        "shares": 10.0,
+                    }
+                ),
+                "telegram-alert-event:1002:pair-1:A_yes_B_no": json.dumps(
+                    {
+                        "message_hash": "hash-1",
+                        "net_profit": 5.0,
+                        "net_roi": 0.12,
+                        "shares": 10.0,
+                    }
+                ),
+            }
+        )
+        calculator = SimpleNamespace(calculate_opportunities=Mock())
+        market_a, market_b = self._build_markets()
+
+        with patch("arbitrage_bot.tg_bot.bot.get_redis", return_value=redis):
+            deliveries = await manager.create_alert_deliveries(
+                opportunity,
+                market_a,
+                market_b,
+                delivery_targets=[
+                    {
+                        "telegram_chat_id": "1001",
+                        "preferences": {"max_capital_usd": 50.0},
+                    },
+                    {
+                        "telegram_chat_id": "1002",
+                        "preferences": {"max_capital_usd": 50.0},
+                    },
+                ],
+                directions={},
+                calculator=calculator,
+            )
+
+        self.assertEqual(deliveries, [])
+        self.assertEqual(len(redis.mget_calls), 1)
+        self.assertEqual(len(redis.mget_calls[0]), 2)
+        calculator.calculate_opportunities.assert_not_called()
+        self.assertEqual(snapshot_counters()["fanout.drop.repeat_suppressed"], 1)
+
+
+    async def test_fanout_skips_recalculation_without_capital_limits(self):
+        manager = FanoutManager(FakeDbSession())
+        opportunity = SimpleNamespace(
+            pair_hash="pair-1",
+            direction="A_yes_B_no",
+            message_hash="hash-1",
+            net_roi=0.12,
+            capital_required=10.0,
+            net_profit=5.0,
+        )
+        calculator = SimpleNamespace(calculate_opportunities=Mock())
+        market_a, market_b = self._build_markets()
+
+        deliveries = await manager.create_alert_deliveries(
+            opportunity,
+            market_a,
+            market_b,
+            delivery_targets=[
+                {
+                    "telegram_chat_id": "1001",
+                    "preferences": {},
+                }
+            ],
+            directions={},
+            calculator=calculator,
+        )
+
+        self.assertEqual(len(deliveries), 1)
+        calculator.calculate_opportunities.assert_not_called()

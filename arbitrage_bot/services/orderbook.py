@@ -60,56 +60,31 @@ class OrderbookService:
         if not prepared_pairs:
             return []
 
-        if len(prepared_pairs) == 1:
-            pf_task = asyncio.create_task(
-                self._fetch_predict_fun_orderbooks(
-                    prepared_pairs,
-                    bypass_cache=bypass_cache,
-                )
-            )
-            polymarket_task = asyncio.create_task(
-                self._fetch_polymarket_books(
-                    prepared_pairs,
-                    bypass_cache=bypass_cache,
-                )
-            )
-            pf_orderbooks, pf_drop_reasons = await pf_task
-            prepared_pairs = self._retain_pairs_with_predict_fun_orderbooks(
+        pf_task = asyncio.create_task(
+            self._fetch_predict_fun_orderbooks(
                 prepared_pairs,
-                pf_orderbooks,
-                pf_drop_reasons,
+                bypass_cache=bypass_cache,
             )
-            if not prepared_pairs:
-                if not polymarket_task.done():
-                    polymarket_task.cancel()
-                await asyncio.gather(polymarket_task, return_exceptions=True)
-                return []
-
-            polymarket_books = await polymarket_task
-            return self._build_orderbook_results(
-                prepared_pairs,
-                pf_orderbooks,
-                pf_drop_reasons,
-                polymarket_books,
-                prepared_pairs_retained=True,
-            )
-
-        pf_orderbooks, pf_drop_reasons = await self._fetch_predict_fun_orderbooks(
-            prepared_pairs,
-            bypass_cache=bypass_cache,
         )
+        polymarket_task = asyncio.create_task(
+            self._fetch_polymarket_books(
+                prepared_pairs,
+                bypass_cache=bypass_cache,
+            )
+        )
+        pf_orderbooks, pf_drop_reasons = await pf_task
         prepared_pairs = self._retain_pairs_with_predict_fun_orderbooks(
             prepared_pairs,
             pf_orderbooks,
             pf_drop_reasons,
         )
         if not prepared_pairs:
+            if not polymarket_task.done():
+                polymarket_task.cancel()
+            await asyncio.gather(polymarket_task, return_exceptions=True)
             return []
 
-        polymarket_books = await self._fetch_polymarket_books(
-            prepared_pairs,
-            bypass_cache=bypass_cache,
-        )
+        polymarket_books = await polymarket_task
         return self._build_orderbook_results(
             prepared_pairs,
             pf_orderbooks,

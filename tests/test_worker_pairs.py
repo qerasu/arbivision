@@ -390,8 +390,8 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         fake_db = FakeDb()
 
         with patch(
-            "arbitrage_bot.worker._load_active_markets_by_platform",
-            new=AsyncMock(return_value=(poly_markets, pf_markets)),
+            "arbitrage_bot.worker._load_active_markets",
+            new=AsyncMock(side_effect=[pf_markets, poly_markets[:1]]),
         ), patch(
             "arbitrage_bot.worker._load_pairs_for_market_ids",
             new=AsyncMock(return_value=[]),
@@ -411,6 +411,54 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.assertEqual(matcher.match_candidates.call_count, 3)
         self.assertEqual(len(fake_db.added), 3)
         self.assertEqual(fake_db.commit_calls, 1)
+
+
+    def test_full_rematch_discards_polymarket_batches_from_signature_cache(self):
+        poly_markets = [
+            SimpleNamespace(id=market_id, title=f"poly {market_id}", category="sports", outcomes_json=[], raw_payload_json={}, status="active", updated_at="v1")
+            for market_id in (1, 2)
+        ]
+        pf_market = SimpleNamespace(id=10, title="pf", category="sports", outcomes_json=[], raw_payload_json={}, status="active", updated_at="v1")
+        matcher = Mock()
+        matcher.max_ranked_candidates = 25
+        matcher.build_market_signature.side_effect = lambda market: {
+            "market": market,
+            "tokens": {"shared"},
+            "condition_ids": [],
+        }
+        matcher.candidate_rank_score.return_value = 1.0
+        matcher.match_candidates.side_effect = lambda poly, pf, **kwargs: SimpleNamespace(
+            pair_hash=f"{poly.id}-{pf.id}",
+            status="auto_approved",
+            match_score=0.9,
+            match_reason_json={"ok": True},
+            outcome_mapping_json={"market_a": {}},
+        )
+        fake_db = SimpleNamespace(
+            add_all=Mock(),
+            flush=AsyncMock(),
+            commit=AsyncMock(),
+            rollback=AsyncMock(),
+        )
+
+        async def poly_batches():
+            for market in poly_markets:
+                yield [market]
+
+        with patch(
+            "arbitrage_bot.worker._load_active_markets",
+            new=AsyncMock(return_value=[pf_market]),
+        ), patch(
+            "arbitrage_bot.worker._iter_active_market_batches",
+            return_value=poly_batches(),
+        ), patch(
+            "arbitrage_bot.worker._load_active_pairs",
+            new=AsyncMock(return_value=[]),
+        ):
+            asyncio.run(_upsert_market_pairs(fake_db, matcher, None, self.state))
+
+        self.assertEqual(set(self.state.market_signature_cache), {pf_market.id})
+        self.assertEqual(len(fake_db.add_all.call_args.args[0]), 2)
 
 
     def test_upsert_market_pairs_keeps_unvisited_pairs_active_when_limit_is_hit(self):
@@ -462,8 +510,8 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         )
 
         with patch.object(worker_module.settings, "MAX_MARKET_PAIRS_PER_LOOP", 1), patch(
-            "arbitrage_bot.worker._load_active_markets_by_platform",
-            new=AsyncMock(return_value=([poly_market], pf_markets)),
+            "arbitrage_bot.worker._load_active_markets",
+            new=AsyncMock(side_effect=[pf_markets, [poly_market]]),
         ), patch(
             "arbitrage_bot.worker._load_pairs_for_market_ids",
             new=AsyncMock(return_value=existing_pairs),
@@ -734,7 +782,10 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_cycle_skips_pair_rebuild_when_market_sync_was_not_needed(self):
         fake_db = SimpleNamespace()
-        ingestion = SimpleNamespace(sync_markets=AsyncMock(return_value=False))
+        events = []
+        ingestion = SimpleNamespace(
+            sync_markets=AsyncMock(side_effect=lambda: events.append("sync") or False)
+        )
         matcher = SimpleNamespace()
         orderbook_service = SimpleNamespace()
         calculator = SimpleNamespace()
@@ -747,7 +798,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ) as upsert_mock, patch(
             "arbitrage_bot.worker._process_candidates",
             new=AsyncMock(
-                return_value={
+                side_effect=lambda *args: events.append("process") or {
                     "approved_pairs": 0,
                     "active_pairs": 0,
                     "pairs_with_books": 0,
@@ -764,6 +815,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
 
         upsert_mock.assert_not_awaited()
         process_mock.assert_awaited_once()
+        self.assertEqual(events[:2], ["process", "sync"])
 
 
     async def test_run_cycle_performs_full_pair_rematch_even_without_market_changes(self):
@@ -1024,7 +1076,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_db.execute_calls, 2)
 
 
-    async def test_filter_skippable_pairs_reads_threshold_from_redis(self):
+    async def test_filter_skippable_pairs_probes_one_quarantined_pair(self):
         fake_redis = FakeRedis()
         fake_redis.data["worker:pair-empty-count:pair-1"] = "3"
         pairs = [
@@ -1036,9 +1088,17 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.worker.get_redis",
             new=MagicMock(return_value=fake_redis),
         ):
-            active_pairs = await _filter_skippable_pairs(pairs, self.state)
+            first_active_pairs = await _filter_skippable_pairs(pairs, self.state)
+            second_active_pairs = await _filter_skippable_pairs(pairs, self.state)
 
-        self.assertEqual([pair.pair_hash for pair in active_pairs], ["pair-2"])
+        self.assertEqual(
+            [pair.pair_hash for pair in first_active_pairs],
+            ["pair-2", "pair-1"],
+        )
+        self.assertEqual(
+            [pair.pair_hash for pair in second_active_pairs],
+            ["pair-2"],
+        )
 
 
     async def test_update_empty_counts_persists_to_redis(self):

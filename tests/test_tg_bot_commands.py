@@ -769,6 +769,10 @@ class FakeTelegramAlertRedis:
         return self.data.get(key)
 
 
+    async def mget(self, keys):
+        return [self.data.get(key) for key in keys]
+
+
     async def set(self, key, value, ex=None):
         self.data[key] = value
         self.set_calls.append((key, value, ex))
@@ -842,6 +846,20 @@ class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+    def test_alert_event_ttl_reaches_latest_market_close(self):
+        now = datetime(2026, 3, 21, tzinfo=timezone.utc)
+        market_a = SimpleNamespace(
+            raw_payload_json={"endDate": "2026-03-26T00:00:00+00:00"},
+        )
+        market_b = SimpleNamespace(
+            raw_payload_json={"resolveDate": "2026-03-30T00:00:00+00:00"},
+        )
+
+        ttl_seconds = bot_module._alert_event_ttl_seconds(market_a, market_b, now=now)
+
+        self.assertEqual(ttl_seconds, 9 * 86400)
+
+
     async def test_send_alert_immediately_marks_first_delivery_as_initial(self):
         redis = FakeTelegramAlertRedis()
         bot = SimpleNamespace(send_message=AsyncMock())
@@ -853,7 +871,10 @@ class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
         with patch("arbitrage_bot.tg_bot.bot._get_delivery_bot", return_value=bot), patch(
             "arbitrage_bot.tg_bot.bot.get_redis",
             return_value=redis,
-        ) as redis_mock:
+        ), patch(
+            "arbitrage_bot.tg_bot.bot._alert_event_ttl_seconds",
+            return_value=12345,
+        ):
             sent = await send_alert_immediately(
                 alert,
                 opportunity,
@@ -874,6 +895,7 @@ class TelegramAlertDeliveryTests(unittest.IsolatedAsyncioTestCase):
             json.loads(redis.data["telegram-alert-event:1001:pair-1:A_yes_B_no"])["message_hash"],
             "hash-1",
         )
+        self.assertEqual(redis.setex_calls[0][1], 12345)
 
 
     async def test_send_alert_immediately_dedupes_in_memory_without_redis(self):

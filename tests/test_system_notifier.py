@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.services import system_notifier
 from arbitrage_bot.services.ingestion import IngestionService
@@ -171,6 +173,14 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
         error = RuntimeError(
             "ClientOSError: [Errno 1] [SSL: RECORD_LAYER_FAILURE] record layer failure (_ssl.c:2710)"
         )
+
+        self.assertTrue(system_notifier.is_transient_network_error(error))
+
+
+    def test_detects_transient_gateway_http_status(self):
+        request = httpx.Request("GET", "https://api.predict.fun/v1/markets")
+        response = httpx.Response(502, request=request)
+        error = httpx.HTTPStatusError("Bad Gateway", request=request, response=response)
 
         self.assertTrue(system_notifier.is_transient_network_error(error))
 

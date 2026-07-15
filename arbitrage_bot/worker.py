@@ -34,11 +34,13 @@ log = get_logger("worker")
 _EMPTY_COUNTS_MAX_SIZE = 1000
 _SIGNATURE_CACHE_MAX_SIZE = 20000
 _EMPTY_COUNT_TTL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 20, 3600)
+_EMPTY_PROBE_INTERVAL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 12, 60)
 
 
 @dataclass
 class WorkerState:
     pair_empty_counts: TTLCache = field(default_factory=lambda: TTLCache(maxsize=_EMPTY_COUNTS_MAX_SIZE, ttl=_EMPTY_COUNT_TTL_SECONDS))
+    empty_probe_due_at: dict = field(default_factory=dict)
     market_signature_cache: TTLCache = field(default_factory=lambda: TTLCache(maxsize=_SIGNATURE_CACHE_MAX_SIZE, ttl=_EMPTY_COUNT_TTL_SECONDS))
     hot_pair_hashes: list = field(default_factory=list)
     candidate_context_loaded: bool = False
@@ -203,23 +205,6 @@ async def run_sync_loop(state=None):
 
 
 async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager, retry_queue=None):
-    sync_result = await ingestion.sync_markets()
-    if _should_run_full_pair_rematch(time.monotonic(), state):
-        _invalidate_candidate_context_cache(state)
-        hot_pair_hashes = await _upsert_market_pairs(db, matcher, None, state)
-        _queue_hot_pairs(state, hot_pair_hashes)
-        _mark_full_pair_rematch_completed(state)
-    else:
-        changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
-        if _has_changed_market_ids(changed_market_ids_by_platform):
-            _invalidate_candidate_context_cache(state)
-            hot_pair_hashes = await _upsert_market_pairs(
-                db,
-                matcher,
-                changed_market_ids_by_platform,
-                state,
-            )
-            _queue_hot_pairs(state, hot_pair_hashes)
     cycle_stats = await _process_candidates(
         db,
         orderbook_service,
@@ -244,6 +229,24 @@ async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculato
         opportunities=cycle_stats["opportunities"],
         deliverable_opportunities=cycle_stats["deliverable_opportunities"],
     )
+
+    sync_result = await ingestion.sync_markets()
+    if _should_run_full_pair_rematch(time.monotonic(), state):
+        _invalidate_candidate_context_cache(state)
+        hot_pair_hashes = await _upsert_market_pairs(db, matcher, None, state)
+        _queue_hot_pairs(state, hot_pair_hashes)
+        _mark_full_pair_rematch_completed(state)
+    else:
+        changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
+        if _has_changed_market_ids(changed_market_ids_by_platform):
+            _invalidate_candidate_context_cache(state)
+            hot_pair_hashes = await _upsert_market_pairs(
+                db,
+                matcher,
+                changed_market_ids_by_platform,
+                state,
+            )
+            _queue_hot_pairs(state, hot_pair_hashes)
     await _run_database_cleanup_if_due(db, state)
 
 
@@ -410,22 +413,17 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         if not changed_market_ids:
             return set()
 
-    poly_markets, pf_markets = await _load_active_markets_by_platform(db)
-    active_market_ids = {
-        market.id
-        for market in poly_markets
-    }.union(
-        market.id
-        for market in pf_markets
-    )
-    poly_by_id = {market.id: market for market in poly_markets}
+    if full_rematch:
+        state.market_signature_cache.clear()
+
+    pf_markets = await _load_active_markets(db, "predict_fun")
     pf_by_id = {market.id: market for market in pf_markets}
-    poly_changed = list(poly_markets) if full_rematch else [
-        poly_by_id[market_id]
-        for market_id in changed_poly_ids
-        if market_id in poly_by_id
-    ]
-    pf_changed = [] if full_rematch else [
+    poly_changed = [] if full_rematch else await _load_active_markets(
+        db,
+        "polymarket",
+        changed_poly_ids,
+    )
+    pf_changed = list(pf_markets) if full_rematch else [
         pf_by_id[market_id]
         for market_id in changed_pf_ids
         if market_id in pf_by_id
@@ -449,19 +447,24 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
             poly_is_source=True,
         )
 
-    if pf_changed and poly_markets and not reached_limit:
+    if pf_changed and not reached_limit:
         pf_signatures = _build_cached_market_signatures(pf_changed, matcher, state)
-        poly_signatures = _build_cached_market_signatures(poly_markets, matcher, state)
-        poly_index = _build_candidate_index_from_signatures(poly_signatures)
-        reached_limit = _match_changed_markets(
-            pf_changed,
-            pf_signatures,
-            poly_index,
-            matcher,
-            matched_pairs,
-            pair_limit,
-            poly_is_source=False,
-        )
+        async for poly_batch in _iter_active_market_batches(db, "polymarket"):
+            poly_signatures = _build_cached_market_signatures(poly_batch, matcher, state)
+            poly_index = _build_candidate_index_from_signatures(poly_signatures)
+            reached_limit = _match_changed_markets(
+                pf_changed,
+                pf_signatures,
+                poly_index,
+                matcher,
+                matched_pairs,
+                pair_limit,
+                poly_is_source=False,
+            )
+            for market in poly_batch:
+                state.market_signature_cache.pop(market.id, None)
+            if reached_limit:
+                break
 
     if full_rematch:
         existing_pairs = await _load_active_pairs(db)
@@ -478,7 +481,6 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         stale_pairs = [pair for pair in existing_pairs if pair.status == "stale"]
         await _clear_empty_counts_for_pairs(stale_pairs, state)
     if not new_pairs and not has_updates:
-        _prune_market_signature_cache(state, active_market_ids)
         return hot_pair_hashes
 
     if new_pairs:
@@ -490,21 +492,38 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         await db.rollback()
         hot_pair_hashes = set()
 
-    _prune_market_signature_cache(state, active_market_ids)
     return hot_pair_hashes
 
 
-async def _load_active_markets_by_platform(db):
-    poly_stmt = select(Market).where(
-        and_(Market.platform == "polymarket", Market.status == "active")
+async def _load_active_markets(db, platform, market_ids=None):
+    stmt = select(Market).where(
+        and_(Market.platform == platform, Market.status == "active")
     )
-    pf_stmt = select(Market).where(
-        and_(Market.platform == "predict_fun", Market.status == "active")
-    )
+    if market_ids is not None:
+        if not market_ids:
+            return []
+        stmt = stmt.where(Market.id.in_(market_ids))
+    return (await db.execute(stmt)).scalars().all()
 
-    poly_markets = (await db.execute(poly_stmt)).scalars().all()
-    pf_markets = (await db.execute(pf_stmt)).scalars().all()
-    return poly_markets, pf_markets
+
+async def _iter_active_market_batches(db, platform, batch_size=500):
+    last_market_id = 0
+    while True:
+        stmt = (
+            select(Market)
+            .where(
+                Market.platform == platform,
+                Market.status == "active",
+                Market.id > last_market_id,
+            )
+            .order_by(Market.id)
+            .limit(batch_size)
+        )
+        markets = (await db.execute(stmt)).scalars().all()
+        if not markets:
+            return
+        yield markets
+        last_market_id = markets[-1].id
 
 
 async def _load_active_pairs(db):
@@ -1120,6 +1139,7 @@ async def _clear_empty_count(pair_hash, state):
         pass
 
     state.pair_empty_counts.pop(pair_hash, None)
+    state.empty_probe_due_at.pop(pair_hash, None)
 
 
 async def _increment_empty_count(pair_hash, state):
@@ -1150,11 +1170,20 @@ async def _clear_empty_counts_for_pairs(pairs, state):
 async def _filter_skippable_pairs(pairs, state):
     empty_counts = await _get_empty_counts([pair.pair_hash for pair in pairs], state)
     active = []
+    probe_pair = None
+    now = time.monotonic()
     for pair in pairs:
         empty_count = empty_counts.get(pair.pair_hash, 0)
-        if empty_count >= settings.EMPTY_ORDERBOOK_THRESHOLD:
+        if empty_count < settings.EMPTY_ORDERBOOK_THRESHOLD:
+            state.empty_probe_due_at.pop(pair.pair_hash, None)
+            active.append(pair)
             continue
-        active.append(pair)
+        if probe_pair is None and state.empty_probe_due_at.get(pair.pair_hash, 0) <= now:
+            probe_pair = pair
+
+    if probe_pair is not None:
+        state.empty_probe_due_at[probe_pair.pair_hash] = now + _EMPTY_PROBE_INTERVAL_SECONDS
+        active.append(probe_pair)
     return active
 
 
@@ -1234,6 +1263,7 @@ async def _update_empty_counts(checked_pairs, pairs_with_data, state):
             for pair in checked_pairs:
                 key = _pair_empty_count_key(pair.pair_hash)
                 if pair.pair_hash in pairs_with_data:
+                    state.empty_probe_due_at.pop(pair.pair_hash, None)
                     pipe.delete(key)
                     continue
                 pipe.incr(key)

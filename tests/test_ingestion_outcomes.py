@@ -301,7 +301,7 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_call.kwargs["max_pages"], 7)
 
 
-    async def test_sync_markets_retries_full_polymarket_sync_until_complete(self):
+    async def test_sync_markets_waits_before_retrying_incomplete_full_polymarket_sync(self):
         class FakeDbSession:
             def __init__(self):
                 self.commit_calls = 0
@@ -343,7 +343,7 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         first_call = service.polymarket.iter_market_pages.call_args_list[0]
         second_call = service.polymarket.iter_market_pages.call_args_list[1]
         self.assertIsNone(first_call.kwargs["max_pages"])
-        self.assertIsNone(second_call.kwargs["max_pages"])
+        self.assertEqual(second_call.kwargs["max_pages"], 7)
 
 
     async def test_sync_source_dedupes_duplicate_market_rows_before_upsert(self):
@@ -417,7 +417,11 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
         async def pages():
-            yield [{"id": str(index), "title": f"market {index}"} for index in range(2500)]
+            for offset in range(0, 2500, 100):
+                yield [
+                    {"id": str(index), "title": f"market {index}"}
+                    for index in range(offset, min(offset + 100, 2500))
+                ]
 
 
         def mapper(item):

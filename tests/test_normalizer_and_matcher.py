@@ -115,6 +115,30 @@ class MatcherServiceTests(unittest.TestCase):
         self.assertEqual(pair.match_score, 1.0)
 
 
+    def test_direct_condition_match_ignores_platform_specific_descriptions(self):
+        poly_market = SimpleNamespace(
+            id=10,
+            title="Will the Fed raise rates in 2026?",
+            description="This market resolves using the Federal Reserve announcement.",
+            outcomes_json=[{"id": "poly-y", "label": "Yes"}, {"id": "poly-n", "label": "No"}],
+            raw_payload_json={"conditionId": "cond-1"},
+            category="economy",
+        )
+        pf_market = SimpleNamespace(
+            id=20,
+            title="Will the Fed raise rates in 2026?",
+            description="Resolution is based on the official FOMC decision.",
+            outcomes_json=[{"id": "pf-y", "label": "Yes"}, {"id": "pf-n", "label": "No"}],
+            raw_payload_json={"polymarketConditionIds": ["cond-1"]},
+            category="economy",
+        )
+
+        pair = self.matcher.match_candidates(poly_market, pf_market)
+
+        self.assertIsNotNone(pair)
+        self.assertEqual(pair.match_reason_json["strategy"], "condition_id")
+
+
     def test_rejects_direct_condition_match_when_binary_subjects_differ(self):
         poly_market = SimpleNamespace(
             id=10,

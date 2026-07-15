@@ -14,6 +14,7 @@ from aiogram.types import BotCommand
 from aiogram.types import LinkPreviewOptions
 from aiogram.types import MenuButtonCommands
 from cachetools import TTLCache
+from cachetools import TLRUCache
 from sqlalchemy.exc import ProgrammingError
 
 from arbitrage_bot.core.config import settings
@@ -32,10 +33,13 @@ log = get_logger("tg_bot")
 _shared_dp = None
 _shared_delivery_bot = None
 _DELIVERY_DEDUPE_TTL_SECONDS = max(86400, int(settings.ALERTS_DEDUPE_TTL_SECONDS))
-_EVENT_REPEAT_TTL_SECONDS = max(300, int(settings.ALERTS_DEDUPE_TTL_SECONDS))
+_EVENT_REPEAT_TTL_SECONDS = max(86400, int(settings.ALERTS_DEDUPE_TTL_SECONDS))
 # ponytail: process-local fallback covers Redis outages only until restart
 _delivery_dedupe_fallback = TTLCache(maxsize=5000, ttl=_DELIVERY_DEDUPE_TTL_SECONDS)
-_alert_event_fallback = TTLCache(maxsize=5000, ttl=_EVENT_REPEAT_TTL_SECONDS)
+_alert_event_fallback = TLRUCache(
+    maxsize=5000,
+    ttu=lambda _key, value, now: now + value[1],
+)
 
 
 def setup_bot():
@@ -416,46 +420,94 @@ def _parse_alert_event_state(raw_value):
         return None
 
 
-async def _load_alert_event_state(alert, opportunity, pair=None):
-    state_key = _alert_event_state_key(alert, opportunity, pair=pair)
-    if state_key is None:
-        return None
+def _alert_event_ttl_seconds(market_a, market_b, now=None):
+    close_at = extract_pair_close_datetime(market_a, market_b)
+    if close_at is None:
+        return _EVENT_REPEAT_TTL_SECONDS
+    if close_at.tzinfo is None:
+        close_at = close_at.replace(tzinfo=timezone.utc)
 
-    raw_value = _alert_event_fallback.get(state_key)
+    current_time = now or datetime.now(timezone.utc)
+    return max(
+        _EVENT_REPEAT_TTL_SECONDS,
+        math.ceil((close_at - current_time).total_seconds()),
+    )
+
+
+async def _load_alert_event_state(alert, opportunity, pair=None):
+    chat_id = str(getattr(alert, "telegram_chat_id", "") or "")
+    states = await load_alert_event_states([chat_id], opportunity, pair=pair)
+    return states.get(chat_id)
+
+
+async def load_alert_event_states(chat_ids, opportunity, pair=None):
+    state_keys = {}
+    raw_values = {}
+    for raw_chat_id in chat_ids:
+        chat_id = str(raw_chat_id or "")
+        state_key = _alert_event_state_key(
+            SimpleNamespace(telegram_chat_id=chat_id),
+            opportunity,
+            pair=pair,
+        )
+        if state_key is None or chat_id in state_keys:
+            continue
+        state_keys[chat_id] = state_key
+        fallback_state = _alert_event_fallback.get(state_key)
+        if fallback_state:
+            raw_values[chat_id] = fallback_state[0]
+
     try:
         redis = get_redis()
-        if redis is not None:
-            raw_value = await redis.get(state_key) or raw_value
+        if redis is not None and state_keys:
+            keys = list(state_keys.values())
+            if hasattr(redis, "mget"):
+                redis_values = await redis.mget(keys)
+            else:
+                redis_values = await asyncio.gather(*(redis.get(key) for key in keys))
+            for chat_id, raw_value in zip(state_keys, redis_values):
+                if raw_value:
+                    raw_values[chat_id] = raw_value
     except Exception:
         pass
 
-    if not raw_value:
-        return None
+    states = {}
+    for chat_id, raw_value in raw_values.items():
+        state = _parse_alert_event_state(raw_value)
+        if state is not None:
+            states[chat_id] = state
+    return states
 
-    return _parse_alert_event_state(raw_value)
 
-
-async def _store_alert_event_state(alert, event_opportunity, sent_opportunity, pair=None):
+async def _store_alert_event_state(
+    alert,
+    event_opportunity,
+    sent_opportunity,
+    pair=None,
+    market_a=None,
+    market_b=None,
+):
     state_key = _alert_event_state_key(alert, event_opportunity, pair=pair)
     if state_key is None:
         return
 
+    ttl_seconds = _alert_event_ttl_seconds(market_a, market_b)
     raw_state = json.dumps(_build_alert_event_state(alert, sent_opportunity))
-    _alert_event_fallback[state_key] = raw_state
+    _alert_event_fallback[state_key] = (raw_state, ttl_seconds)
     try:
         redis = get_redis()
         if redis is None:
             return
         await redis.setex(
             state_key,
-            _EVENT_REPEAT_TTL_SECONDS,
+            ttl_seconds,
             raw_state,
         )
     except Exception:
         pass
 
 
-def _should_send_repeat_alert(last_state, alert, opportunity):
+def should_send_repeat_alert(last_state, alert, opportunity):
     current_message_hash = str(getattr(alert, "message_hash", "") or "")
     if current_message_hash and current_message_hash == last_state["message_hash"]:
         return False, "repeat suppressed: already notified for current market state"
@@ -560,7 +612,7 @@ async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, p
     last_state = await _load_alert_event_state(alert, opportunity, pair=pair)
     is_repeat = last_state is not None
     if last_state is not None:
-        should_send_repeat, suppress_reason = _should_send_repeat_alert(last_state, alert, prepared_opportunity)
+        should_send_repeat, suppress_reason = should_send_repeat_alert(last_state, alert, prepared_opportunity)
         if not should_send_repeat:
             alert.status = "suppressed"
             alert.next_retry_at = None
@@ -579,7 +631,14 @@ async def send_alert_immediately(alert, opportunity, pair, market_a, market_b, p
             preferences=current_preferences,
             is_repeat=is_repeat,
         )
-        await _store_alert_event_state(alert, opportunity, prepared_opportunity, pair=pair)
+        await _store_alert_event_state(
+            alert,
+            opportunity,
+            prepared_opportunity,
+            pair=pair,
+            market_a=market_a,
+            market_b=market_b,
+        )
         if is_repeat:
             incr_counter("telegram.alert_repeat_sent")
         return True

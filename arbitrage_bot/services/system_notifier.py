@@ -84,6 +84,10 @@ def format_compact_error(error):
 
 
 def is_transient_network_error(error):
+    status_code = getattr(getattr(error, "response", None), "status_code", None)
+    if status_code in {502, 503, 504}:
+        return True
+
     details = format_error_details(error).lower()
     return any(marker in details for marker in _TRANSIENT_NETWORK_MARKERS)
 

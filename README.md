@@ -90,7 +90,7 @@ Redis также хранит отметку о доставленном тек�
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | `localhost` / `6379` / `0` | подключение к Redis |
 | `REDIS_PASSWORD` | — | пароль Redis |
 | `FEE_POLYMARKET_BPS` / `FEE_PREDICT_FUN_BPS` | `90` / `100` | комиссии площадок в базисных пунктах |
-| `ALERTS_DEDUPE_TTL_SECONDS` | `600` | срок хранения состояния дедупликации |
+| `ALERTS_DEDUPE_TTL_SECONDS` | `600` | срок первичной дедупликации; успешный Telegram-алерт запоминается до закрытия рынка, минимум на 24 часа |
 | `ALERTS_DELTA_PROFIT_THRESHOLD_USD` | `3` | минимальный рост прибыли для повторного уведомления |
 | `ALERTS_DELTA_ROI_THRESHOLD_PERCENT` | `0.5` | минимальный рост ROI для повторного уведомления |
 | `MARKET_REFRESH_SECONDS` / `MARKET_SYNC_INTERVAL_SECONDS` | `5` / `60` | частота worker-цикла и синхронизации рынков |

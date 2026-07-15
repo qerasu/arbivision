@@ -30,7 +30,7 @@ class IngestionService:
         self.normalizer = NormalizerService()
         self._changed_market_ids_by_platform = self._empty_changed_market_ids()
         self._source_last_sync_completed_at = {}
-        self._source_last_full_sync_completed_at = {}
+        self._source_last_full_sync_attempted_at = {}
 
 
     async def close(self):
@@ -221,6 +221,8 @@ class IngestionService:
 
         if self._should_sync_source("polymarket", now):
             polymarket_full_sync = self._should_run_polymarket_full_sync(now)
+            if polymarket_full_sync:
+                self._source_last_full_sync_attempted_at["polymarket"] = now
             source_jobs.append(
                 (
                     "polymarket",
@@ -232,10 +234,6 @@ class IngestionService:
                         self._map_polymarket_market,
                         self.polymarket,
                     ),
-                    self.polymarket,
-                    {
-                        "full_sync": polymarket_full_sync,
-                    },
                 )
             )
 
@@ -249,10 +247,6 @@ class IngestionService:
                         self._map_predict_fun_market,
                         self.predict_fun,
                     ),
-                    self.predict_fun,
-                    {
-                        "full_sync": True,
-                    },
                 )
             )
 
@@ -264,13 +258,11 @@ class IngestionService:
             return_exceptions=True,
         )
 
-        for (source_name, _, adapter, sync_meta), result in zip(source_jobs, results):
+        for (source_name, _), result in zip(source_jobs, results):
             synced = False if isinstance(result, BaseException) else bool(result)
             if synced:
                 successful_sources.append(source_name)
                 self._source_last_sync_completed_at[source_name] = time.monotonic()
-                if sync_meta.get("full_sync") and getattr(adapter, "last_fetch_complete", True):
-                    self._source_last_full_sync_completed_at[source_name] = time.monotonic()
 
         return self._build_sync_result(
             bool(successful_sources),
@@ -328,10 +320,10 @@ class IngestionService:
             float(settings.MARKET_SYNC_INTERVAL_SECONDS),
             float(settings.MARKET_REFRESH_SECONDS),
         )
-        last_completed_at = self._source_last_full_sync_completed_at.get("polymarket")
-        if last_completed_at is None:
+        last_attempted_at = self._source_last_full_sync_attempted_at.get("polymarket")
+        if last_attempted_at is None:
             return True
-        return (now - last_completed_at) >= full_interval
+        return (now - last_attempted_at) >= full_interval
 
 
     async def _fetch_and_sync_source(self, source_name, fetch_coro, mapper, adapter):
@@ -365,39 +357,55 @@ class IngestionService:
             duplicate_count = 0
             duplicate_market_ids = set()
             sample_market_ids = []
+            pending_items = []
+
+            async def upsert_pending_items(raw_chunk):
+                nonlocal duplicate_count, platform
+
+                mapped_items = [mapper(item) for item in raw_chunk if isinstance(item, dict)]
+                mapped_items, chunk_duplicate_count, chunk_duplicate_metadata = self._dedupe_market_items(mapped_items)
+                duplicate_count += chunk_duplicate_count
+                duplicate_market_ids.update(chunk_duplicate_metadata["market_ids"])
+                for market_id in chunk_duplicate_metadata["sample_market_ids"]:
+                    if len(sample_market_ids) < 5:
+                        sample_market_ids.append(market_id)
+
+                unique_items = []
+                for item in mapped_items:
+                    platform = item["platform"]
+                    market_id = item["platform_market_id"]
+                    key = (platform, market_id)
+                    if key in seen_market_keys:
+                        duplicate_count += 1
+                        duplicate_market_ids.add(market_id)
+                        if len(sample_market_ids) < 5:
+                            sample_market_ids.append(market_id)
+                        continue
+                    seen_market_keys.add(key)
+                    seen_market_ids.add(market_id)
+                    unique_items.append(item)
+
+                if not unique_items:
+                    return
+
+                batch_changed_market_ids = await self._upsert_markets(unique_items)
+                await self.db.commit()
+                changed_market_ids.update(batch_changed_market_ids)
+                self._changed_market_ids_by_platform.setdefault(platform, set()).update(
+                    batch_changed_market_ids
+                )
 
             async for raw_items in pages:
                 if not isinstance(raw_items, list):
                     raw_items = list(raw_items or [])
+                pending_items.extend(raw_items)
+                while len(pending_items) >= self.UPSERT_LOOKUP_BATCH_SIZE:
+                    raw_chunk = pending_items[:self.UPSERT_LOOKUP_BATCH_SIZE]
+                    del pending_items[:self.UPSERT_LOOKUP_BATCH_SIZE]
+                    await upsert_pending_items(raw_chunk)
 
-                for raw_chunk in self._chunked(raw_items, self.UPSERT_LOOKUP_BATCH_SIZE):
-                    mapped_items = [mapper(item) for item in raw_chunk if isinstance(item, dict)]
-                    mapped_items, chunk_duplicate_count, chunk_duplicate_metadata = self._dedupe_market_items(mapped_items)
-                    duplicate_count += chunk_duplicate_count
-                    duplicate_market_ids.update(chunk_duplicate_metadata["market_ids"])
-                    for market_id in chunk_duplicate_metadata["sample_market_ids"]:
-                        if len(sample_market_ids) < 5:
-                            sample_market_ids.append(market_id)
-
-                    for item in mapped_items:
-                        platform = item["platform"]
-                        market_id = item["platform_market_id"]
-                        key = (platform, market_id)
-                        if key in seen_market_keys:
-                            duplicate_count += 1
-                            duplicate_market_ids.add(market_id)
-                            if len(sample_market_ids) < 5:
-                                sample_market_ids.append(market_id)
-                        seen_market_keys.add(key)
-                        seen_market_ids.add(market_id)
-
-                    if mapped_items:
-                        batch_changed_market_ids = await self._upsert_markets(mapped_items)
-                        await self.db.commit()
-                        changed_market_ids.update(batch_changed_market_ids)
-                        self._changed_market_ids_by_platform.setdefault(platform, set()).update(
-                            batch_changed_market_ids
-                        )
+            if pending_items:
+                await upsert_pending_items(pending_items)
 
             is_partial = getattr(adapter, "last_fetch_partial", False)
             is_complete = adapter is None or getattr(adapter, "last_fetch_complete", False)
