@@ -780,6 +780,60 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         self.system_error_patcher.stop()
 
 
+    async def test_run_sync_loop_checks_candidates_while_market_sync_is_running(self):
+        sync_started = asyncio.Event()
+        candidate_started = asyncio.Event()
+        wait_forever = asyncio.Event()
+        fake_db = SimpleNamespace()
+        ingestion = SimpleNamespace(close=AsyncMock())
+        orderbook_service = SimpleNamespace(close=AsyncMock())
+        retry_queue = SimpleNamespace(run=AsyncMock(side_effect=wait_forever.wait))
+
+        async def run_market_sync(*args):
+            sync_started.set()
+            await wait_forever.wait()
+
+        async def run_candidates(*args):
+            await sync_started.wait()
+            candidate_started.set()
+            raise asyncio.CancelledError
+
+        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
+            "arbitrage_bot.worker.MatcherService",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.OrderbookService",
+            return_value=orderbook_service,
+        ), patch(
+            "arbitrage_bot.worker.ArbitrageCalculator",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.AlertRetryQueue",
+            return_value=retry_queue,
+        ), patch(
+            "arbitrage_bot.worker.AsyncSessionLocal",
+            new=_fake_session_context(fake_db),
+        ), patch(
+            "arbitrage_bot.worker.AlertManager",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.FanoutManager",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker._run_market_sync_loop",
+            new=run_market_sync,
+        ), patch(
+            "arbitrage_bot.worker._run_candidate_cycle",
+            new=run_candidates,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await worker_module.run_sync_loop(self.state)
+
+        self.assertTrue(candidate_started.is_set())
+        ingestion.close.assert_awaited_once()
+        orderbook_service.close.assert_awaited_once()
+
+
     async def test_run_cycle_skips_pair_rebuild_when_market_sync_was_not_needed(self):
         fake_db = SimpleNamespace()
         events = []
@@ -1314,6 +1368,70 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         send_mock.assert_awaited_once()
         counters = snapshot_counters()
         self.assertEqual(counters["worker.opportunities_created"], 1)
+
+
+    async def test_process_candidates_sends_before_slower_pair_finishes(self):
+        fast_pair = SimpleNamespace(id=1, pair_hash="fast", market_id_a=10, market_id_b=20)
+        slow_pair = SimpleNamespace(id=2, pair_hash="slow", market_id_a=30, market_id_b=40)
+        slow_pair_release = asyncio.Event()
+        alert_sent = asyncio.Event()
+        orderbook_service = SimpleNamespace(
+            fetch_orderbooks_for_pairs=AsyncMock(return_value=[
+                {"pair": fast_pair},
+                {"pair": slow_pair},
+            ]),
+        )
+        fanout_manager = SimpleNamespace(
+            get_delivery_targets=AsyncMock(return_value=[]),
+        )
+
+        async def process_pair(*args):
+            pair = args[3]
+            if pair is slow_pair:
+                await slow_pair_release.wait()
+            return {
+                "pair_hash": pair.pair_hash,
+                "has_orderbooks": True,
+                "opportunities": 1,
+                "deliverable_opportunities": 1 if pair is fast_pair else 0,
+                "deliveries": [{}] if pair is fast_pair else [],
+            }
+
+        async def send_deliveries(*args, **kwargs):
+            alert_sent.set()
+            return True
+
+        with patch.object(worker_module.settings, "APP_RUNTIME_MODE", "worker"), patch(
+            "arbitrage_bot.worker._load_candidate_context",
+            new=AsyncMock(return_value=([fast_pair, slow_pair], {})),
+        ), patch(
+            "arbitrage_bot.worker._filter_skippable_pairs",
+            new=AsyncMock(return_value=[fast_pair, slow_pair]),
+        ), patch(
+            "arbitrage_bot.worker._process_candidate_pair",
+            new=AsyncMock(side_effect=process_pair),
+        ), patch(
+            "arbitrage_bot.worker._send_all_deliveries",
+            new=AsyncMock(side_effect=send_deliveries),
+        ) as send_mock, patch(
+            "arbitrage_bot.worker._update_empty_counts",
+            new=AsyncMock(),
+        ):
+            task = asyncio.create_task(_process_candidates(
+                SimpleNamespace(),
+                orderbook_service,
+                SimpleNamespace(),
+                SimpleNamespace(),
+                fanout_manager,
+                self.state,
+            ))
+            await asyncio.wait_for(alert_sent.wait(), timeout=1)
+            self.assertFalse(task.done())
+            slow_pair_release.set()
+            await task
+
+        send_mock.assert_awaited_once()
+        self.assertIsNotNone(send_mock.await_args.kwargs["send_semaphore"])
 
 
     async def test_process_candidates_sends_immediately_in_all_mode(self):

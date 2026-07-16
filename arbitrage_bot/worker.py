@@ -165,6 +165,9 @@ async def run_sync_loop(state=None):
     calculator = ArbitrageCalculator()
     retry_queue = AlertRetryQueue(calculator)
     retry_task = asyncio.create_task(retry_queue.run())
+    market_sync_task = asyncio.create_task(
+        _run_market_sync_loop(runtime_state, ingestion, matcher)
+    )
     try:
         while True:
             try:
@@ -172,11 +175,9 @@ async def run_sync_loop(state=None):
                 async with AsyncSessionLocal() as session:
                     alert_manager = AlertManager(session)
                     fanout_manager = FanoutManager(session)
-                    await _run_cycle(
+                    await _run_candidate_cycle(
                         session,
                         runtime_state,
-                        ingestion,
-                        matcher,
                         orderbook_service,
                         calculator,
                         alert_manager,
@@ -198,12 +199,26 @@ async def run_sync_loop(state=None):
             await orderbook_service.wait_for_updates(settings.MARKET_REFRESH_SECONDS)
     finally:
         retry_task.cancel()
-        await asyncio.gather(retry_task, return_exceptions=True)
+        market_sync_task.cancel()
+        await asyncio.gather(retry_task, market_sync_task, return_exceptions=True)
         await ingestion.close()
         await orderbook_service.close()
 
 
 async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager, retry_queue=None):
+    await _run_candidate_cycle(
+        db,
+        state,
+        orderbook_service,
+        calculator,
+        alert_manager,
+        fanout_manager,
+        retry_queue,
+    )
+    await _run_market_sync_cycle(db, state, ingestion, matcher)
+
+
+async def _run_candidate_cycle(db, state, orderbook_service, calculator, alert_manager, fanout_manager, retry_queue=None):
     cycle_stats = await _process_candidates(
         db,
         orderbook_service,
@@ -229,6 +244,27 @@ async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculato
         deliverable_opportunities=cycle_stats["deliverable_opportunities"],
     )
 
+
+async def _run_market_sync_loop(state, ingestion, matcher):
+    while True:
+        try:
+            async with AsyncSessionLocal() as session:
+                await _run_market_sync_cycle(session, state, ingestion, matcher)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error(
+                "market sync loop error",
+                error=format_error_details(e),
+                traceback=traceback.format_exc(),
+            )
+            incr_counter("worker.market_sync_cycle_failed")
+            await send_system_error_notification("worker", "market sync loop", e)
+
+        await asyncio.sleep(settings.MARKET_REFRESH_SECONDS)
+
+
+async def _run_market_sync_cycle(db, state, ingestion, matcher):
     sync_result = await ingestion.sync_markets()
     if _should_run_full_pair_rematch(time.monotonic(), state):
         _invalidate_candidate_context_cache(state)
@@ -773,12 +809,15 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
     }
     pair_fetch_concurrency = max(1, int(settings.ORDERBOOK_PREDICT_FUN_CONCURRENCY or 1))
     semaphore = asyncio.Semaphore(pair_fetch_concurrency)
+    send_semaphore = None
+    if _should_send_immediately():
+        send_semaphore = asyncio.Semaphore(max(1, int(settings.TELEGRAM_SEND_CONCURRENCY or 1)))
 
     async def process_pair(pair):
         queued_at = time.monotonic()
         async with semaphore:
             _record_timing("worker.timing.pair_queue_wait", queued_at)
-            return await _process_candidate_pair(
+            result = await _process_candidate_pair(
                 calculator,
                 alert_manager,
                 fanout_manager,
@@ -787,6 +826,16 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
                 delivery_targets,
                 orderbooks_by_pair_hash.get(pair.pair_hash),
             )
+        if send_semaphore is not None and result["deliveries"]:
+            telegram_started_at = time.monotonic()
+            await _send_all_deliveries(
+                [result],
+                calculator,
+                retry_queue,
+                send_semaphore=send_semaphore,
+            )
+            _record_timing("worker.timing.telegram_send", telegram_started_at)
+        return result
 
     pair_results = await asyncio.gather(
         *(process_pair(pair) for pair in active_pairs),
@@ -798,11 +847,6 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         if result["has_orderbooks"]
     }
     await _update_empty_counts(active_pairs, pairs_with_data, state)
-
-    if _should_send_immediately():
-        telegram_started_at = time.monotonic()
-        await _send_all_deliveries(pair_results, calculator, retry_queue)
-        _record_timing("worker.timing.telegram_send", telegram_started_at)
 
     return {
         "approved_pairs": len(pairs),
@@ -897,7 +941,7 @@ async def _process_candidate_pair(
     return pair_stats
 
 
-async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
+async def _send_all_deliveries(pair_results, calculator, retry_queue=None, send_semaphore=None):
     all_delivery_batches = [
         delivery_batch
         for result in pair_results
@@ -907,8 +951,9 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None):
     if not all_delivery_batches:
         return False
 
-    send_concurrency = max(1, int(settings.TELEGRAM_SEND_CONCURRENCY or 1))
-    semaphore = asyncio.Semaphore(send_concurrency)
+    semaphore = send_semaphore or asyncio.Semaphore(
+        max(1, int(settings.TELEGRAM_SEND_CONCURRENCY or 1))
+    )
     delivery_groups = {}
     for delivery_batch in all_delivery_batches:
         for delivery in delivery_batch["deliveries"]:
