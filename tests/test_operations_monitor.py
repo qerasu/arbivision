@@ -69,37 +69,20 @@ class OperationsMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovered["ratio"], 0.95)
 
 
-    async def test_deliverable_stall_updates_stats_without_telegram_alerts(self):
-        for _ in range(5):
+    async def test_filtered_opportunities_do_not_raise_deliverable_stall(self):
+        for _ in range(10):
             await operations_monitor.record_worker_cycle(
                 active_pairs=100,
                 pairs_with_books=95,
                 opportunities=7,
                 deliverable_opportunities=0,
             )
-        warning = operations_monitor.snapshot_monitor_state()["deliverable_opportunities"]
-        for _ in range(5):
-            await operations_monitor.record_worker_cycle(
-                active_pairs=100,
-                pairs_with_books=95,
-                opportunities=7,
-                deliverable_opportunities=0,
-            )
-        critical = operations_monitor.snapshot_monitor_state()["deliverable_opportunities"]
-        await operations_monitor.record_worker_cycle(
-            active_pairs=100,
-            pairs_with_books=95,
-            opportunities=7,
-            deliverable_opportunities=2,
-        )
+        state = operations_monitor.snapshot_monitor_state()["deliverable_opportunities"]
 
-        recovered = operations_monitor.snapshot_monitor_state()["deliverable_opportunities"]
-        self.assertEqual(warning["severity"], "warning")
-        self.assertEqual(warning["streak"], 5)
-        self.assertEqual(critical["severity"], "critical")
-        self.assertEqual(critical["streak"], 10)
-        self.assertEqual(recovered["severity"], None)
-        self.assertEqual(recovered["deliverable_opportunities"], 2)
+        self.assertEqual(state["severity"], None)
+        self.assertEqual(state["streak"], 0)
+        self.assertEqual(state["opportunities"], 7)
+        self.assertEqual(state["deliverable_opportunities"], 0)
 
 
     async def test_telegram_connectivity_updates_stats_and_recovers_without_telegram_notifications(self):

@@ -9,8 +9,6 @@ _DUPLICATE_STREAK_CYCLES = 5
 _ORDERBOOK_WARNING_RATIO = 0.85
 _ORDERBOOK_CRITICAL_RATIO = 0.70
 _ORDERBOOK_STREAK_CYCLES = 3
-_DELIVERABLE_WARNING_STREAK = 5
-_DELIVERABLE_CRITICAL_STREAK = 10
 _TELEGRAM_DOWN_THRESHOLD_SECONDS = 180.0
 _TELEGRAM_RECOVERY_SECONDS = 60.0
 _TELEGRAM_IGNORED_FAILURE_MARKERS = (
@@ -241,27 +239,7 @@ async def _record_orderbook_coverage(active_pairs, pairs_with_books):
 
 
 async def _record_deliverable_stall(opportunities, deliverable_opportunities):
-    opportunities_count = int(opportunities or 0)
-    deliverable_count = int(deliverable_opportunities or 0)
-    _deliverable_state["opportunities"] = opportunities_count
-    _deliverable_state["deliverable_opportunities"] = deliverable_count
-
-    has_stall = opportunities_count > 0 and deliverable_count == 0
-    if has_stall:
-        _deliverable_state["streak"] += 1
-    else:
-        _deliverable_state["streak"] = 0
-        _deliverable_state["severity"] = None
-        return
-
-    desired_severity = None
-    if _deliverable_state["streak"] >= _DELIVERABLE_CRITICAL_STREAK:
-        desired_severity = "critical"
-    elif _deliverable_state["streak"] >= _DELIVERABLE_WARNING_STREAK:
-        desired_severity = "warning"
-
-    if desired_severity is None:
-        return
-
-    if _deliverable_state["severity"] != desired_severity:
-        _deliverable_state["severity"] = desired_severity
+    _deliverable_state["opportunities"] = int(opportunities or 0)
+    _deliverable_state["deliverable_opportunities"] = int(deliverable_opportunities or 0)
+    _deliverable_state["streak"] = 0
+    _deliverable_state["severity"] = None
