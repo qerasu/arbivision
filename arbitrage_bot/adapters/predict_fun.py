@@ -24,6 +24,7 @@ class PredictFunAdapter(BaseAdapter):
     fallback_errors = (
         httpx.ConnectError,
         httpx.ConnectTimeout,
+        httpx.ReadError,
         httpx.ReadTimeout,
         httpx.RemoteProtocolError,
     )

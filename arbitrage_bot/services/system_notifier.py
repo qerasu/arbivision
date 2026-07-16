@@ -3,6 +3,7 @@ import hashlib
 import traceback
 from time import monotonic
 
+import httpx
 from aiogram import Bot
 
 from arbitrage_bot.core.config import settings
@@ -84,6 +85,9 @@ def format_compact_error(error):
 
 
 def is_transient_network_error(error):
+    if isinstance(error, httpx.ReadError):
+        return True
+
     status_code = getattr(getattr(error, "response", None), "status_code", None)
     if status_code in {502, 503, 504}:
         return True

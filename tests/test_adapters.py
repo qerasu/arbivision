@@ -270,6 +270,17 @@ class PredictFunAdapterTests(unittest.IsolatedAsyncioTestCase):
         adapter._curl_get_json.assert_awaited_once()
 
 
+    async def test_get_json_uses_curl_fallback_for_read_error(self):
+        adapter = PredictFunAdapter()
+        adapter.client.get = AsyncMock(side_effect=httpx.ReadError("read failed"))
+        adapter._curl_get_json = AsyncMock(return_value={"data": []})
+
+        result = await adapter._get_json("/markets", params={"first": 1})
+
+        self.assertEqual(result, {"data": []})
+        adapter._curl_get_json.assert_awaited_once()
+
+
     async def test_curl_fallback_passes_api_key_through_stdin(self):
         adapter = PredictFunAdapter()
         adapter.headers = {"x-api-key": "secret-value"}

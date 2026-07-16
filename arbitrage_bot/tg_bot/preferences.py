@@ -432,7 +432,7 @@ def format_home_text(preferences, language=None):
 
     header = (
         f"{translate(lang, '🔎 Arbitrage Scanner', '🔎 Сканер арбитража')}\n\n"
-        f"{translate(lang, 'Monitors Polymarket and Predict.Fun for spread inefficiencies.', 'Следит за Polymarket и Predict.Fun и ищет неэффективности спреда.')}\n\n"
+        f"{translate(lang, 'Monitors Polymarket and Predict.Fun for spread inefficiencies.', 'Следит за Polymarket и Predict.Fun и ищет рыночные неэффективности.')}\n\n"
         f"{status_icon} {translate(lang, 'Status', 'Статус')}: {status_label}\n"
         f"{translate(lang, 'Filters are applied to your personal alert stream.', 'Фильтры применяются только к вашему потоку алертов.')}"
     )
