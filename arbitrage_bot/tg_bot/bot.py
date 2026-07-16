@@ -114,15 +114,8 @@ def _format_alert_message(opportunity, pair, market_a, market_b, language=None, 
     )
 
 
-def _format_alert_digest_message(items, language=None):
-    sorted_items = sorted(
-        items,
-        key=lambda item: (
-            float(getattr(item["prepared_opportunity"], "net_roi", 0.0) or 0.0),
-            float(getattr(item["prepared_opportunity"], "net_profit", 0.0) or 0.0),
-        ),
-        reverse=True,
-    )
+def _build_alert_digest_message(items, language=None):
+    sorted_items = list(items)
     header = translate(
         language,
         f"📋 {len(sorted_items)} arbitrage opportunities",
@@ -130,7 +123,7 @@ def _format_alert_digest_message(items, language=None):
     )
     lines = [header]
     text_length = len(header)
-    shown_count = 0
+    shown_items = []
     for index, item in enumerate(sorted_items, start=1):
         opportunity = item["prepared_opportunity"]
         market_a = item["market_a"]
@@ -163,19 +156,20 @@ def _format_alert_digest_message(items, language=None):
             f"🔗 {links}"
         )
         visible_line_length = len(title) + len(metrics) + len(orders) + len("\n🔗 Polymarket | Predict.Fun")
-        if text_length + visible_line_length > 3600:
+        if shown_items and text_length + visible_line_length > 3600:
             break
         lines.append(line)
         text_length += visible_line_length
-        shown_count += 1
-    remaining_count = len(sorted_items) - shown_count
+        shown_items.append(item)
+    remaining_items = sorted_items[len(shown_items):]
+    remaining_count = len(remaining_items)
     if remaining_count:
         lines.append(translate(
             language,
             f"\n\n…and {remaining_count} more",
             f"\n\n…и ещё {remaining_count}",
         ))
-    return "".join(lines)
+    return "".join(lines), shown_items, remaining_items
 
 
 def _format_repeat_alert_notice(language=None):
@@ -425,7 +419,31 @@ async def _is_duplicate_delivery(alert):
         return bool(fallback_marker)
 
 
-async def _store_delivery_marker(alert):
+async def _load_duplicate_delivery_keys(alerts):
+    keys = list(dict.fromkeys(
+        _delivery_dedupe_key(alert)
+        for alert in alerts
+        if getattr(alert, "message_hash", None) and getattr(alert, "telegram_chat_id", None)
+    ))
+    duplicate_keys = {
+        key
+        for key in keys
+        if _delivery_dedupe_fallback.get(key)
+    }
+    try:
+        redis = get_redis()
+        if redis is None or not keys:
+            return duplicate_keys
+        values = await redis.mget(keys) if hasattr(redis, "mget") else await asyncio.gather(
+            *(redis.get(key) for key in keys)
+        )
+        duplicate_keys.update(key for key, value in zip(keys, values) if value)
+    except Exception:
+        pass
+    return duplicate_keys
+
+
+async def _store_delivery_marker(alert, pipeline=None):
     message_hash = str(getattr(alert, "message_hash", "") or "")
     chat_id = str(getattr(alert, "telegram_chat_id", "") or "")
     if not message_hash or not chat_id:
@@ -433,6 +451,13 @@ async def _store_delivery_marker(alert):
 
     _delivery_dedupe_fallback[_delivery_dedupe_key(alert)] = True
     try:
+        if pipeline is not None:
+            pipeline.set(
+                _delivery_dedupe_key(alert),
+                "1",
+                ex=_DELIVERY_DEDUPE_TTL_SECONDS,
+            )
+            return
         redis = get_redis()
         if redis is None:
             return
@@ -550,6 +575,7 @@ async def _store_alert_event_state(
     pair=None,
     market_a=None,
     market_b=None,
+    pipeline=None,
 ):
     state_key = _alert_event_state_key(alert, event_opportunity, pair=pair)
     if state_key is None:
@@ -559,6 +585,9 @@ async def _store_alert_event_state(
     raw_state = json.dumps(_build_alert_event_state(alert, sent_opportunity))
     _alert_event_fallback[state_key] = (raw_state, ttl_seconds)
     try:
+        if pipeline is not None:
+            pipeline.setex(state_key, ttl_seconds, raw_state)
+            return
         redis = get_redis()
         if redis is None:
             return
@@ -567,6 +596,15 @@ async def _store_alert_event_state(
             ttl_seconds,
             raw_state,
         )
+    except Exception:
+        pass
+
+
+async def _execute_redis_pipeline(pipeline):
+    if pipeline is None:
+        return
+    try:
+        await pipeline.execute()
     except Exception:
         pass
 
@@ -703,8 +741,21 @@ async def send_alert_digest(items, calculator):
     if bot is None:
         return []
 
+    items = list(items)
+    duplicate_keys = await _load_duplicate_delivery_keys(
+        item["delivery"]["alert"]
+        for item in items
+    )
     prepared_items = []
     successful_opportunities = []
+    duplicate_pipeline = None
+    if duplicate_keys:
+        try:
+            redis = get_redis()
+            if redis is not None and hasattr(redis, "pipeline"):
+                duplicate_pipeline = redis.pipeline()
+        except Exception:
+            pass
     for item in items:
         delivery = item["delivery"]
         alert = delivery["alert"]
@@ -724,7 +775,7 @@ async def send_alert_digest(items, calculator):
         if prepared is None:
             continue
         prepared_opportunity, current_preferences, is_repeat = prepared
-        if await _is_duplicate_delivery(alert):
+        if _delivery_dedupe_key(alert) in duplicate_keys:
             alert.status = "sent"
             alert.next_retry_at = None
             alert.sent_at = datetime.now(timezone.utc)
@@ -736,6 +787,7 @@ async def send_alert_digest(items, calculator):
                 pair=item["pair"],
                 market_a=item["market_a"],
                 market_b=item["market_b"],
+                pipeline=duplicate_pipeline,
             )
             successful_opportunities.append(item["opportunity"])
             continue
@@ -748,20 +800,56 @@ async def send_alert_digest(items, calculator):
         })
 
     if not prepared_items:
+        await _execute_redis_pipeline(duplicate_pipeline)
         return successful_opportunities
 
-    language = _extract_language_from_preferences(prepared_items[0]["current_preferences"])
-    try:
-        await bot.send_message(
-            chat_id=prepared_items[0]["alert"].telegram_chat_id,
-            text=_format_alert_digest_message(prepared_items, language=language),
-            parse_mode="HTML",
-            link_preview_options=LinkPreviewOptions(is_disabled=True),
-        )
+    pending_items = sorted(
+        prepared_items,
+        key=lambda item: (
+            float(getattr(item["prepared_opportunity"], "net_roi", 0.0) or 0.0),
+            float(getattr(item["prepared_opportunity"], "net_profit", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    while pending_items:
+        failed_items = pending_items
+        try:
+            language = _extract_language_from_preferences(pending_items[0]["current_preferences"])
+            text, sent_items, remaining_items = _build_alert_digest_message(
+                pending_items,
+                language=language,
+            )
+            failed_items = sent_items + remaining_items
+            await bot.send_message(
+                chat_id=sent_items[0]["alert"].telegram_chat_id,
+                text=text,
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+        except Exception as exc:
+            for item in failed_items:
+                alert = item["alert"]
+                alert.attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
+                alert.status = "failed"
+                alert.next_retry_at = None
+                alert.error_message = str(exc)
+            await _execute_redis_pipeline(duplicate_pipeline)
+            incr_counter("telegram.digest_failed")
+            return successful_opportunities
+
         now = datetime.now(timezone.utc)
-        for item in prepared_items:
+        pipeline = duplicate_pipeline
+        duplicate_pipeline = None
+        if pipeline is None:
+            try:
+                redis = get_redis()
+                if redis is not None and hasattr(redis, "pipeline"):
+                    pipeline = redis.pipeline()
+            except Exception:
+                pass
+        for item in sent_items:
             alert = item["alert"]
-            await _store_delivery_marker(alert)
+            await _store_delivery_marker(alert, pipeline=pipeline)
             alert.status = "sent"
             alert.attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
             alert.next_retry_at = None
@@ -774,23 +862,18 @@ async def send_alert_digest(items, calculator):
                 pair=item["pair"],
                 market_a=item["market_a"],
                 market_b=item["market_b"],
+                pipeline=pipeline,
             )
             if item["is_repeat"]:
                 incr_counter("telegram.alert_repeat_sent")
             incr_counter("telegram.alert_sent")
             incr_counter("telegram.alert_send_success")
             successful_opportunities.append(item["opportunity"])
+        await _execute_redis_pipeline(pipeline)
         incr_counter("telegram.digest_sent")
-        return successful_opportunities
-    except Exception as exc:
-        for item in prepared_items:
-            alert = item["alert"]
-            alert.attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
-            alert.status = "failed"
-            alert.next_retry_at = None
-            alert.error_message = str(exc)
-        incr_counter("telegram.digest_failed")
-        return successful_opportunities
+        pending_items = remaining_items
+
+    return successful_opportunities
 
 
 async def _prepare_alert_delivery(

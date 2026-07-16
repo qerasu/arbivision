@@ -33,6 +33,7 @@ _EMPTY_COUNTS_MAX_SIZE = 1000
 _SIGNATURE_CACHE_MAX_SIZE = 20000
 _EMPTY_COUNT_TTL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 20, 3600)
 _EMPTY_PROBE_INTERVAL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 12, 60)
+_ALERT_BATCH_WINDOW_SECONDS = 0.25
 
 
 @dataclass
@@ -809,44 +810,87 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
     }
     pair_fetch_concurrency = max(1, int(settings.ORDERBOOK_PREDICT_FUN_CONCURRENCY or 1))
     semaphore = asyncio.Semaphore(pair_fetch_concurrency)
-    send_semaphore = None
-    if _should_send_immediately():
-        send_semaphore = asyncio.Semaphore(max(1, int(settings.TELEGRAM_SEND_CONCURRENCY or 1)))
 
     async def process_pair(pair):
         queued_at = time.monotonic()
-        async with semaphore:
-            _record_timing("worker.timing.pair_queue_wait", queued_at)
-            result = await _process_candidate_pair(
-                calculator,
-                alert_manager,
-                fanout_manager,
-                pair,
-                market_map,
-                delivery_targets,
-                orderbooks_by_pair_hash.get(pair.pair_hash),
+        try:
+            async with semaphore:
+                _record_timing("worker.timing.pair_queue_wait", queued_at)
+                return await _process_candidate_pair(
+                    calculator,
+                    alert_manager,
+                    fanout_manager,
+                    pair,
+                    market_map,
+                    delivery_targets,
+                    orderbooks_by_pair_hash.get(pair.pair_hash),
+                )
+        except Exception as exc:
+            log.error(
+                "failed to process candidate pair",
+                pair_id=getattr(pair, "id", None),
+                error=format_error_details(exc),
             )
-        if send_semaphore is not None and result["deliveries"]:
-            telegram_started_at = time.monotonic()
-            await _send_all_deliveries(
-                [result],
-                calculator,
-                retry_queue,
-                send_semaphore=send_semaphore,
-            )
-            _record_timing("worker.timing.telegram_send", telegram_started_at)
-        return result
+            incr_counter("worker.pair_failed")
+            await send_system_error_notification("worker", "process candidate pair", exc)
+            return {
+                "pair_hash": pair.pair_hash,
+                "has_orderbooks": False,
+                "processing_failed": True,
+                "opportunities": 0,
+                "deliverable_opportunities": 0,
+                "deliveries": [],
+            }
 
-    pair_results = await asyncio.gather(
-        *(process_pair(pair) for pair in active_pairs),
+    pending = {
+        asyncio.create_task(process_pair(pair))
+        for pair in active_pairs
+    }
+    pair_results = []
+    try:
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if pending:
+                batched, pending = await asyncio.wait(
+                    pending,
+                    timeout=_ALERT_BATCH_WINDOW_SECONDS,
+                )
+                done.update(batched)
+
+            batch_results = [task.result() for task in done]
+            pair_results.extend(batch_results)
+            if _should_send_immediately() and any(result["deliveries"] for result in batch_results):
+                telegram_started_at = time.monotonic()
+                await _send_all_deliveries(batch_results, calculator, retry_queue)
+                _record_timing("worker.timing.telegram_send", telegram_started_at)
+    finally:
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    failed_pair_hashes = {
+        result["pair_hash"]
+        for result in pair_results
+        if result.get("processing_failed")
+    }
+    _mark_hot_pairs_processed(
+        state,
+        [pair for pair in active_pairs if pair.pair_hash not in failed_pair_hashes],
     )
-    _mark_hot_pairs_processed(state, active_pairs)
     pairs_with_data = {
         result["pair_hash"]
         for result in pair_results
         if result["has_orderbooks"]
     }
-    await _update_empty_counts(active_pairs, pairs_with_data, state)
+    pairs_without_empty_evidence = pairs_with_data | {
+        result["pair_hash"]
+        for result in pair_results
+        if result.get("processing_failed")
+    }
+    await _update_empty_counts(active_pairs, pairs_without_empty_evidence, state)
 
     return {
         "approved_pairs": len(pairs),
