@@ -185,6 +185,10 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(system_notifier.is_transient_network_error(error))
 
 
+    def test_detects_httpx_read_error_as_transient(self):
+        self.assertTrue(system_notifier.is_transient_network_error(httpx.ReadError("read failed")))
+
+
     def test_does_not_mark_generic_runtime_error_as_transient_network_issue(self):
         self.assertFalse(system_notifier.is_transient_network_error(RuntimeError("gamma down")))
 
