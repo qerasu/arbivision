@@ -109,12 +109,3 @@ class SettingsRecord(Base):
     key = Column(String, nullable=False, unique=True)
     value_json = Column(JSON, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
-
-
-class BlacklistRule(Base):
-    __tablename__ = "blacklist_rules"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    rule_type = Column(Text, nullable=False)
-    rule_value = Column(Text, nullable=False)
-    reason = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

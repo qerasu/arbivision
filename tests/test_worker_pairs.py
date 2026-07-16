@@ -1370,14 +1370,18 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(counters["worker.opportunities_created"], 1)
 
 
-    async def test_process_candidates_sends_before_slower_pair_finishes(self):
-        fast_pair = SimpleNamespace(id=1, pair_hash="fast", market_id_a=10, market_id_b=20)
-        slow_pair = SimpleNamespace(id=2, pair_hash="slow", market_id_a=30, market_id_b=40)
+    async def test_process_candidates_batches_ready_pairs_without_waiting_for_slower_pair(self):
+        fast_pair_a = SimpleNamespace(id=1, pair_hash="fast-a", market_id_a=10, market_id_b=20)
+        fast_pair_b = SimpleNamespace(id=2, pair_hash="fast-b", market_id_a=30, market_id_b=40)
+        slow_pair = SimpleNamespace(id=3, pair_hash="slow", market_id_a=50, market_id_b=60)
+        fast_pair_release = asyncio.Event()
         slow_pair_release = asyncio.Event()
         alert_sent = asyncio.Event()
+        fast_pair_count = 0
         orderbook_service = SimpleNamespace(
             fetch_orderbooks_for_pairs=AsyncMock(return_value=[
-                {"pair": fast_pair},
+                {"pair": fast_pair_a},
+                {"pair": fast_pair_b},
                 {"pair": slow_pair},
             ]),
         )
@@ -1386,27 +1390,37 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def process_pair(*args):
+            nonlocal fast_pair_count
             pair = args[3]
             if pair is slow_pair:
                 await slow_pair_release.wait()
+            else:
+                fast_pair_count += 1
+                if fast_pair_count == 2:
+                    fast_pair_release.set()
+                await fast_pair_release.wait()
             return {
                 "pair_hash": pair.pair_hash,
                 "has_orderbooks": True,
                 "opportunities": 1,
-                "deliverable_opportunities": 1 if pair is fast_pair else 0,
-                "deliveries": [{}] if pair is fast_pair else [],
+                "deliverable_opportunities": 0 if pair is slow_pair else 1,
+                "deliveries": [] if pair is slow_pair else [{}],
             }
 
         async def send_deliveries(*args, **kwargs):
             alert_sent.set()
             return True
 
-        with patch.object(worker_module.settings, "APP_RUNTIME_MODE", "worker"), patch(
+        with patch.object(worker_module.settings, "APP_RUNTIME_MODE", "worker"), patch.object(
+            worker_module,
+            "_ALERT_BATCH_WINDOW_SECONDS",
+            0.01,
+        ), patch(
             "arbitrage_bot.worker._load_candidate_context",
-            new=AsyncMock(return_value=([fast_pair, slow_pair], {})),
+            new=AsyncMock(return_value=([fast_pair_a, fast_pair_b, slow_pair], {})),
         ), patch(
             "arbitrage_bot.worker._filter_skippable_pairs",
-            new=AsyncMock(return_value=[fast_pair, slow_pair]),
+            new=AsyncMock(return_value=[fast_pair_a, fast_pair_b, slow_pair]),
         ), patch(
             "arbitrage_bot.worker._process_candidate_pair",
             new=AsyncMock(side_effect=process_pair),
@@ -1427,11 +1441,65 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             ))
             await asyncio.wait_for(alert_sent.wait(), timeout=1)
             self.assertFalse(task.done())
+            self.assertEqual(len(send_mock.await_args.args[0]), 2)
             slow_pair_release.set()
             await task
 
         send_mock.assert_awaited_once()
-        self.assertIsNotNone(send_mock.await_args.kwargs["send_semaphore"])
+
+
+    async def test_process_candidates_keeps_other_pairs_when_one_fails(self):
+        failed_pair = SimpleNamespace(id=1, pair_hash="failed", market_id_a=10, market_id_b=20)
+        healthy_pair = SimpleNamespace(id=2, pair_hash="healthy", market_id_a=30, market_id_b=40)
+        self.state.hot_pair_hashes = ["failed", "healthy"]
+        orderbook_service = SimpleNamespace(
+            fetch_orderbooks_for_pairs=AsyncMock(return_value=[
+                {"pair": failed_pair},
+                {"pair": healthy_pair},
+            ]),
+        )
+        fanout_manager = SimpleNamespace(get_delivery_targets=AsyncMock(return_value=[]))
+
+        async def process_pair(*args):
+            pair = args[3]
+            if pair is failed_pair:
+                raise ValueError("bad pair")
+            return {
+                "pair_hash": pair.pair_hash,
+                "has_orderbooks": True,
+                "opportunities": 1,
+                "deliverable_opportunities": 0,
+                "deliveries": [],
+            }
+
+        with patch(
+            "arbitrage_bot.worker._load_candidate_context",
+            new=AsyncMock(return_value=([failed_pair, healthy_pair], {})),
+        ), patch(
+            "arbitrage_bot.worker._filter_skippable_pairs",
+            new=AsyncMock(return_value=[failed_pair, healthy_pair]),
+        ), patch(
+            "arbitrage_bot.worker._process_candidate_pair",
+            new=AsyncMock(side_effect=process_pair),
+        ), patch(
+            "arbitrage_bot.worker._update_empty_counts",
+            new=AsyncMock(),
+        ) as update_empty_counts_mock:
+            result = await _process_candidates(
+                SimpleNamespace(),
+                orderbook_service,
+                SimpleNamespace(),
+                SimpleNamespace(),
+                fanout_manager,
+                self.state,
+            )
+
+        self.assertEqual(result["active_pairs"], 2)
+        self.assertEqual(result["pairs_with_books"], 1)
+        self.assertEqual(result["opportunities"], 1)
+        self.assertEqual(snapshot_counters()["worker.pair_failed"], 1)
+        self.assertEqual(update_empty_counts_mock.await_args.args[1], {"failed", "healthy"})
+        self.assertEqual(self.state.hot_pair_hashes, ["failed"])
 
 
     async def test_process_candidates_sends_immediately_in_all_mode(self):
