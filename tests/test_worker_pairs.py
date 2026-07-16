@@ -834,6 +834,47 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         orderbook_service.close.assert_awaited_once()
 
 
+    async def test_run_sync_loop_backs_off_after_cycle_failure(self):
+        wait_forever = asyncio.Event()
+        ingestion = SimpleNamespace(close=AsyncMock())
+        orderbook_service = SimpleNamespace(
+            close=AsyncMock(),
+            wait_for_updates=AsyncMock(),
+        )
+        retry_queue = SimpleNamespace(run=AsyncMock(side_effect=wait_forever.wait))
+
+        with patch("arbitrage_bot.worker.IngestionService", return_value=ingestion), patch(
+            "arbitrage_bot.worker.MatcherService",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.OrderbookService",
+            return_value=orderbook_service,
+        ), patch(
+            "arbitrage_bot.worker.ArbitrageCalculator",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "arbitrage_bot.worker.AlertRetryQueue",
+            return_value=retry_queue,
+        ), patch(
+            "arbitrage_bot.worker.AsyncSessionLocal",
+            new=_fake_session_context(SimpleNamespace()),
+        ), patch(
+            "arbitrage_bot.worker._run_market_sync_loop",
+            new=AsyncMock(side_effect=wait_forever.wait),
+        ), patch(
+            "arbitrage_bot.worker._run_candidate_cycle",
+            new=AsyncMock(side_effect=RuntimeError("database unavailable")),
+        ), patch(
+            "arbitrage_bot.worker.asyncio.sleep",
+            new=AsyncMock(side_effect=asyncio.CancelledError),
+        ) as sleep_mock:
+            with self.assertRaises(asyncio.CancelledError):
+                await worker_module.run_sync_loop(self.state)
+
+        sleep_mock.assert_awaited_once_with(worker_module.settings.MARKET_REFRESH_SECONDS)
+        orderbook_service.wait_for_updates.assert_not_awaited()
+
+
     async def test_run_cycle_skips_pair_rebuild_when_market_sync_was_not_needed(self):
         fake_db = SimpleNamespace()
         events = []

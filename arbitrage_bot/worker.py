@@ -196,7 +196,9 @@ async def run_sync_loop(state=None):
                 )
                 incr_counter("worker.cycle_failed")
                 await send_system_error_notification("worker", "sync loop", e)
-                
+                await asyncio.sleep(settings.MARKET_REFRESH_SECONDS)
+                continue
+
             await orderbook_service.wait_for_updates(settings.MARKET_REFRESH_SECONDS)
     finally:
         retry_task.cancel()
