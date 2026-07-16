@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from sqlalchemy import Text, cast, or_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -21,10 +22,12 @@ log = get_logger("ingestion")
 
 class IngestionService:
 
-    UPSERT_LOOKUP_BATCH_SIZE = 1000
+    UPSERT_LOOKUP_BATCH_SIZE = 500
 
-    def __init__(self, db_session):
+    def __init__(self, db_session, session_factory=None):
         self.db = db_session
+        self.session_factory = session_factory
+        self._source_db_session = ContextVar("ingestion_source_db", default=None)
         self.polymarket = PolymarketAdapter()
         self.predict_fun = PredictFunAdapter()
         self.normalizer = NormalizerService()
@@ -226,7 +229,7 @@ class IngestionService:
             source_jobs.append(
                 (
                     "polymarket",
-                    self._sync_source_pages(
+                    lambda: self._sync_source_pages(
                         "polymarket",
                         self.polymarket.iter_market_pages(
                             max_pages=None if polymarket_full_sync else settings.POLYMARKET_INCREMENTAL_MAX_PAGES
@@ -241,7 +244,7 @@ class IngestionService:
             source_jobs.append(
                 (
                     "predict.fun",
-                    self._fetch_and_sync_source(
+                    lambda: self._fetch_and_sync_source(
                         "predict.fun",
                         self.predict_fun.fetch_markets(),
                         self._map_predict_fun_market,
@@ -254,7 +257,7 @@ class IngestionService:
             return self._build_sync_result(False)
 
         results = await asyncio.gather(
-            *(job[1] for job in source_jobs),
+            *(self._run_source_job(job) for _, job in source_jobs),
             return_exceptions=True,
         )
 
@@ -269,6 +272,23 @@ class IngestionService:
             attempted=bool(source_jobs),
             successful_sources=successful_sources,
         )
+
+
+    async def _run_source_job(self, job):
+        if self.session_factory is None:
+            return await job()
+
+        async with self.session_factory() as session:
+            token = self._source_db_session.set(session)
+            try:
+                return await job()
+            finally:
+                self._source_db_session.reset(token)
+
+
+    def _current_db(self):
+        session = self._source_db_session.get()
+        return session if session is not None else self.db
 
 
     def _empty_changed_market_ids(self):
@@ -349,6 +369,7 @@ class IngestionService:
 
 
     async def _sync_source_pages(self, source_name, pages, mapper, adapter=None):
+        db = self._current_db()
         try:
             platform = self._source_platform_name(source_name)
             seen_market_keys = set()
@@ -389,7 +410,7 @@ class IngestionService:
                     return
 
                 batch_changed_market_ids = await self._upsert_markets(unique_items)
-                await self.db.commit()
+                await db.commit()
                 changed_market_ids.update(batch_changed_market_ids)
                 self._changed_market_ids_by_platform.setdefault(platform, set()).update(
                     batch_changed_market_ids
@@ -453,7 +474,7 @@ class IngestionService:
                     platform,
                     seen_market_ids,
                 )
-                await self.db.commit()
+                await db.commit()
                 changed_market_ids.update(stale_market_ids)
                 self._changed_market_ids_by_platform.setdefault(platform, set()).update(
                     stale_market_ids
@@ -467,7 +488,7 @@ class IngestionService:
                 log.warning("markets sync failed", source=source_name, error=self._format_source_error(source_name, "markets sync", e))
                 if not is_transient_network_error(e):
                     await send_system_error_notification(source_name, "markets sync", e)
-            await self.db.rollback()
+            await db.rollback()
             return False
 
 
@@ -501,6 +522,7 @@ class IngestionService:
 
 
     async def _upsert_markets_postgresql(self, items):
+        db = self._current_db()
         now = datetime.now(timezone.utc)
         rows = [self._market_row_for_upsert(item, now) for item in items]
         insert_stmt = pg_insert(Market).values(rows)
@@ -533,7 +555,7 @@ class IngestionService:
             set_=update_fields,
             where=diff_condition,
         ).returning(Market.id)
-        result = await self.db.execute(stmt)
+        result = await db.execute(stmt)
         return {market_id for market_id, in result.all()}
 
 
@@ -563,7 +585,8 @@ class IngestionService:
             Market.platform == platform,
             Market.status == "active",
         )
-        rows = (await self.db.execute(stmt)).all()
+        db = self._current_db()
+        rows = (await db.execute(stmt)).all()
         if not rows:
             return set()
 
@@ -577,7 +600,7 @@ class IngestionService:
 
         now = datetime.now(timezone.utc)
         for chunk in self._chunked(to_close_ids, 1000):
-            await self.db.execute(
+            await db.execute(
                 update(Market)
                 .where(Market.id.in_(chunk))
                 .values(status="closed", tradable=False, updated_at=now)

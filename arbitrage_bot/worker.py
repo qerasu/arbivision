@@ -157,7 +157,7 @@ def _snapshot_pair(pair):
 
 async def run_sync_loop(state=None):
     runtime_state = state or WorkerState()
-    ingestion = IngestionService(db_session=None)
+    ingestion = IngestionService(db_session=None, session_factory=AsyncSessionLocal)
     matcher = MatcherService()
     orderbook_service = OrderbookService(
         streaming_enabled=settings.ORDERBOOK_STREAMING_ENABLED,
@@ -170,7 +170,6 @@ async def run_sync_loop(state=None):
             try:
                 incr_counter("worker.cycle_started")
                 async with AsyncSessionLocal() as session:
-                    ingestion.db = session
                     alert_manager = AlertManager(session)
                     fanout_manager = FanoutManager(session)
                     await _run_cycle(
