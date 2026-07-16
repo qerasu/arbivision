@@ -1,4 +1,6 @@
+import asyncio
 import unittest
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -185,6 +187,40 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["successful_sources"], [])
         self.assertEqual(service.polymarket.iter_market_pages.call_count, 1)
         self.assertEqual(service.predict_fun.fetch_markets.await_count, 1)
+
+
+    async def test_sync_markets_uses_separate_sessions_for_concurrent_sources(self):
+        created_sessions = []
+        used_sessions = []
+        both_sources_started = asyncio.Event()
+
+        @asynccontextmanager
+        async def session_factory():
+            session = object()
+            created_sessions.append(session)
+            yield session
+
+
+        async def capture_session(*_args, **_kwargs):
+            used_sessions.append(service._current_db())
+            if len(used_sessions) == 2:
+                both_sources_started.set()
+            await asyncio.wait_for(both_sources_started.wait(), timeout=1)
+            return True
+
+
+        service = IngestionService(db_session=None, session_factory=session_factory)
+        service.polymarket.iter_market_pages = MagicMock(return_value=object())
+        service.predict_fun.fetch_markets = AsyncMock(return_value=[])
+        service._sync_source_pages = AsyncMock(side_effect=capture_session)
+        service._sync_source = AsyncMock(side_effect=capture_session)
+
+        result = await service.sync_markets()
+
+        self.assertTrue(result["synced"])
+        self.assertEqual(len(created_sessions), 2)
+        self.assertEqual(set(used_sessions), set(created_sessions))
+        self.assertIsNot(used_sessions[0], used_sessions[1])
 
 
     async def test_sync_markets_retries_partial_source_on_next_cycle(self):
@@ -451,9 +487,9 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(synced)
         self.assertEqual(
             [len(call.args[0]) for call in service._upsert_markets.await_args_list],
-            [1000, 1000, 500],
+            [500, 500, 500, 500, 500],
         )
-        self.assertEqual(db.commit_calls, 4)
+        self.assertEqual(db.commit_calls, 6)
         service._mark_missing_markets_closed.assert_awaited_once()
 
 
