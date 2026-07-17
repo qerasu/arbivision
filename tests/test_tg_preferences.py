@@ -209,6 +209,33 @@ class TelegramPreferencesTests(unittest.TestCase):
         self.assertEqual(close_at, now + timedelta(days=9))
 
 
+    def test_extract_pair_close_datetime_reads_nested_event_datetime(self):
+        now = datetime(2026, 3, 21, tzinfo=timezone.utc)
+        market_a = SimpleNamespace(raw_payload_json={"events": [{"endDate": (now + timedelta(days=6)).isoformat()}]})
+        market_b = SimpleNamespace(raw_payload_json={"market": {"resolutionDate": (now + timedelta(days=8)).isoformat()}})
+
+        close_at = extract_pair_close_datetime(market_a, market_b)
+
+        self.assertEqual(close_at, now + timedelta(days=8))
+
+
+    def test_filter_reason_blocks_nested_far_close_datetime(self):
+        now = datetime(2026, 3, 21, tzinfo=timezone.utc)
+        opportunity = SimpleNamespace(net_roi=0.20, capital_required=200.0, net_profit=20.0)
+        market_a = SimpleNamespace(raw_payload_json={"events": [{"endDate": (now + timedelta(days=30)).isoformat()}]})
+        market_b = SimpleNamespace(raw_payload_json={"resolveDate": (now + timedelta(days=3)).isoformat()})
+
+        reason = filter_reason_for_preferences(
+            opportunity,
+            market_a,
+            market_b,
+            {"min_roi_percent": None, "max_capital_usd": None, "max_days_to_close": 15},
+            now=now,
+        )
+
+        self.assertEqual(reason, "max_days_to_close")
+
+
     def test_format_preferences_text_shows_human_readable_values(self):
         text = format_preferences_text(
             {

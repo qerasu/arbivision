@@ -538,11 +538,27 @@ def extract_pair_close_datetime(market_a, market_b):
 
 
 def _extract_market_close_datetime(raw_payload):
-    for field_name in DATETIME_FIELDS:
-        parsed = _parse_datetime_value(raw_payload.get(field_name))
-        if parsed is not None:
-            return parsed
-    return None
+    datetimes = list(_iter_payload_datetimes(raw_payload))
+    if not datetimes:
+        return None
+    return max(datetimes)
+
+
+def _iter_payload_datetimes(value):
+    if isinstance(value, dict):
+        for field_name in DATETIME_FIELDS:
+            parsed = _parse_datetime_value(value.get(field_name))
+            if parsed is not None:
+                yield parsed
+
+        for nested_value in value.values():
+            yield from _iter_payload_datetimes(nested_value)
+        return
+
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_payload_datetimes(item)
+
 
 
 def _parse_datetime_value(value):
