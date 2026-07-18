@@ -51,6 +51,7 @@ class FanoutManager:
         self._prefetched_event_states = await load_alert_event_states_batch(
             (target.get("telegram_chat_id") for target in targets),
             opportunities,
+            require_complete=True,
         )
 
 

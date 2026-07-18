@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from unittest.mock import patch
 
 from arbitrage_bot.services import alert_manager as alert_manager_module
@@ -122,6 +123,31 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(redis.mget_calls), 1)
         self.assertEqual(len(redis.mget_calls[0]), 2)
         self.assertEqual(redis.get_calls, [])
+
+
+    async def test_failed_dedupe_prefetch_falls_back_to_get(self):
+        key = "alert-dedupe:pair-123:A_yes_B_no"
+        alert_manager_module._dedupe_fallback[key] = (
+            '{"net_profit": 1.0, "net_roi": 0.01, "shares": 1.0}'
+        )
+        redis = FakeRedis(
+            {key: '{"net_profit": 10.0, "net_roi": 0.2, "shares": 5.0}'}
+        )
+        redis.mget = AsyncMock(side_effect=RuntimeError("temporary Redis error"))
+        manager = AlertManager(db_session=None)
+        pair = SimpleNamespace(id=7, pair_hash="pair-123")
+
+        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
+            await manager.prefetch_dedupe_states(
+                [SimpleNamespace(pair_hash="pair-123", direction="A_yes_B_no")]
+            )
+            result = await manager.process_opportunity(
+                pair,
+                self._build_calc_result(net_profit=11.0, net_roi=0.201),
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(redis.get_calls, [key])
 
 
     async def test_uses_stable_message_hash_for_same_payload(self):

@@ -536,7 +536,12 @@ async def load_alert_event_states(chat_ids, opportunity, pair=None):
     return states.get((pair_hash, direction), {})
 
 
-async def load_alert_event_states_batch(chat_ids, opportunities, pairs=None):
+async def load_alert_event_states_batch(
+    chat_ids,
+    opportunities,
+    pairs=None,
+    require_complete=False,
+):
     chat_ids = {str(chat_id or "") for chat_id in chat_ids if chat_id}
     pairs = list(pairs or [])
     state_keys = {}
@@ -562,6 +567,7 @@ async def load_alert_event_states_batch(chat_ids, opportunities, pairs=None):
             if fallback_state:
                 raw_values[item_key] = fallback_state[0]
 
+    batch_loaded = not state_keys
     try:
         redis = get_redis()
         if redis is not None and state_keys:
@@ -570,11 +576,15 @@ async def load_alert_event_states_batch(chat_ids, opportunities, pairs=None):
                 redis_values = await redis.mget(keys)
             else:
                 redis_values = await asyncio.gather(*(redis.get(key) for key in keys))
+            batch_loaded = True
             for item_key, raw_value in zip(state_keys, redis_values):
                 if raw_value:
                     raw_values[item_key] = raw_value
     except Exception:
         pass
+
+    if require_complete and not batch_loaded:
+        return {}
 
     for (opportunity_key, chat_id), raw_value in raw_values.items():
         state = _parse_alert_event_state(raw_value)
