@@ -31,7 +31,12 @@ class AlertManager:
             f"alert-dedupe:{opportunity.pair_hash}:{opportunity.direction}"
             for opportunity in opportunities
         }
-        states = {key: _dedupe_fallback.get(key) for key in keys}
+        states = {
+            key: fallback
+            for key in keys
+            if (fallback := _dedupe_fallback.get(key)) is not None
+        }
+        batch_loaded = not keys
         try:
             redis = get_redis()
             if redis is not None and keys:
@@ -40,14 +45,14 @@ class AlertManager:
                     values = await redis.mget(ordered_keys)
                 else:
                     values = await asyncio.gather(*(redis.get(key) for key in ordered_keys))
+                batch_loaded = True
                 states.update(
-                    (key, value)
+                    (key, value or states.get(key))
                     for key, value in zip(ordered_keys, values)
-                    if value
                 )
         except Exception:
             pass
-        self._prefetched_dedupe_states = states
+        self._prefetched_dedupe_states = states if batch_loaded else {}
 
 
     async def process_opportunity(self, pair, calc_result):

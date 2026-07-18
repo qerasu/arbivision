@@ -267,6 +267,44 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(redis.mget_calls[0]), 2)
 
 
+    async def test_failed_event_state_prefetch_retries_during_fanout(self):
+        manager = FanoutManager(FakeDbSession())
+        opportunity = SimpleNamespace(
+            pair_hash="pair-1",
+            direction="A_yes_B_no",
+            message_hash="hash-1",
+            net_roi=0.12,
+            capital_required=10.0,
+            net_profit=5.0,
+        )
+        targets = [{"telegram_chat_id": "1001", "preferences": {}}]
+        raw_state = json.dumps(
+            {
+                "message_hash": "hash-1",
+                "net_profit": 5.0,
+                "net_roi": 0.12,
+                "shares": 10.0,
+            }
+        )
+        redis = FakeRedis({})
+        redis.mget = AsyncMock(
+            side_effect=[RuntimeError("temporary Redis error"), [raw_state]]
+        )
+        market_a, market_b = self._build_markets()
+
+        with patch("arbitrage_bot.tg_bot.bot.get_redis", return_value=redis):
+            await manager.prefetch_event_states(targets, [opportunity])
+            deliveries = await manager.create_alert_deliveries(
+                opportunity,
+                market_a,
+                market_b,
+                delivery_targets=targets,
+            )
+
+        self.assertEqual(deliveries, [])
+        self.assertEqual(redis.mget.await_count, 2)
+
+
     async def test_fanout_suppresses_repeat_before_target_recalculation(self):
         manager = FanoutManager(FakeDbSession())
         opportunity = SimpleNamespace(
