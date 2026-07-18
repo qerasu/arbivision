@@ -9,11 +9,19 @@ from arbitrage_bot.services.alert_manager import AlertManager
 class FakeRedis:
     def __init__(self, initial_data=None):
         self.data = dict(initial_data or {})
+        self.get_calls = []
+        self.mget_calls = []
         self.setex_calls = []
 
 
     async def get(self, key):
+        self.get_calls.append(key)
         return self.data.get(key)
+
+
+    async def mget(self, keys):
+        self.mget_calls.append(list(keys))
+        return [self.data.get(key) for key in keys]
 
 
     async def setex(self, key, ttl, value):
@@ -86,6 +94,34 @@ class AlertManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result)
         self.assertEqual(redis.setex_calls, [])
+
+
+    async def test_prefetches_multiple_dedupe_states_in_one_request(self):
+        redis = FakeRedis(
+            {
+                "alert-dedupe:pair-123:A_yes_B_no": (
+                    '{"net_profit": 10.0, "net_roi": 0.2, "shares": 5.0}'
+                )
+            }
+        )
+        manager = AlertManager(db_session=None)
+        pair = SimpleNamespace(id=7, pair_hash="pair-123")
+        opportunities = [
+            SimpleNamespace(pair_hash="pair-123", direction="A_yes_B_no"),
+            SimpleNamespace(pair_hash="pair-456", direction="A_no_B_yes"),
+        ]
+
+        with patch("arbitrage_bot.services.alert_manager.get_redis", return_value=redis):
+            await manager.prefetch_dedupe_states(opportunities)
+            result = await manager.process_opportunity(
+                pair,
+                self._build_calc_result(net_profit=11.0, net_roi=0.201),
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(len(redis.mget_calls), 1)
+        self.assertEqual(len(redis.mget_calls[0]), 2)
+        self.assertEqual(redis.get_calls, [])
 
 
     async def test_uses_stable_message_hash_for_same_payload(self):

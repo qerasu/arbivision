@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 from types import SimpleNamespace
@@ -22,6 +23,31 @@ class AlertManager:
         self.dedupe_ttl = settings.ALERTS_DEDUPE_TTL_SECONDS
         self.delta_profit = settings.ALERTS_DELTA_PROFIT_THRESHOLD_USD
         self.delta_roi = settings.ALERTS_DELTA_ROI_THRESHOLD_PERCENT / 100.0
+        self._prefetched_dedupe_states = None
+
+
+    async def prefetch_dedupe_states(self, opportunities):
+        keys = {
+            f"alert-dedupe:{opportunity.pair_hash}:{opportunity.direction}"
+            for opportunity in opportunities
+        }
+        states = {key: _dedupe_fallback.get(key) for key in keys}
+        try:
+            redis = get_redis()
+            if redis is not None and keys:
+                ordered_keys = list(keys)
+                if hasattr(redis, "mget"):
+                    values = await redis.mget(ordered_keys)
+                else:
+                    values = await asyncio.gather(*(redis.get(key) for key in ordered_keys))
+                states.update(
+                    (key, value)
+                    for key, value in zip(ordered_keys, values)
+                    if value
+                )
+        except Exception:
+            pass
+        self._prefetched_dedupe_states = states
 
 
     async def process_opportunity(self, pair, calc_result):
@@ -30,8 +56,14 @@ class AlertManager:
         dedupe_key = f"alert-dedupe:{pair.pair_hash}:{direction}"
         state_to_save = self._build_dedupe_state(calc_result)
 
-        last_alert_data = _dedupe_fallback.get(dedupe_key)
-        if redis is not None:
+        if self._prefetched_dedupe_states is not None and dedupe_key in self._prefetched_dedupe_states:
+            last_alert_data = self._prefetched_dedupe_states[dedupe_key]
+        else:
+            last_alert_data = _dedupe_fallback.get(dedupe_key)
+        if redis is not None and (
+            self._prefetched_dedupe_states is None
+            or dedupe_key not in self._prefetched_dedupe_states
+        ):
             try:
                 last_alert_data = await redis.get(dedupe_key) or last_alert_data
             except Exception:
