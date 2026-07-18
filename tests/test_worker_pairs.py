@@ -2185,7 +2185,26 @@ class AlertRetryQueueTests(unittest.IsolatedAsyncioTestCase):
         retry_queue.enqueue.assert_called_once()
 
 
-    async def test_successful_delivery_finalizes_while_failed_delivery_is_queued(self):
+    def test_deliveries_completed_requires_at_least_one_sent_alert(self):
+        self.assertFalse(
+            worker_module._deliveries_completed(
+                [
+                    SimpleNamespace(status="cancelled"),
+                    SimpleNamespace(status="suppressed"),
+                ]
+            )
+        )
+        self.assertTrue(
+            worker_module._deliveries_completed(
+                [
+                    SimpleNamespace(status="sent"),
+                    SimpleNamespace(status="suppressed"),
+                ]
+            )
+        )
+
+
+    async def test_successful_delivery_waits_for_failed_delivery_before_finalizing(self):
         opportunity = SimpleNamespace()
         deliveries = [
             {
@@ -2210,7 +2229,11 @@ class AlertRetryQueueTests(unittest.IsolatedAsyncioTestCase):
             }],
         }]
         retry_queue = MagicMock()
-        retry_queue.enqueue.return_value = True
+        retry_queue.enqueue.side_effect = lambda item: setattr(
+            item["delivery"]["alert"],
+            "status",
+            "retry_queued",
+        ) or True
         alert_manager = SimpleNamespace(finalize_opportunity=AsyncMock())
 
         with patch(
@@ -2223,8 +2246,65 @@ class AlertRetryQueueTests(unittest.IsolatedAsyncioTestCase):
                 retry_queue,
             )
 
-        alert_manager.finalize_opportunity.assert_awaited_once_with(opportunity)
+        alert_manager.finalize_opportunity.assert_not_awaited()
         retry_queue.enqueue.assert_called_once()
+
+        retry_item = retry_queue.enqueue.call_args.args[0]
+        with patch(
+            "arbitrage_bot.worker.send_alert_immediately",
+            new=AsyncMock(return_value=True),
+        ), patch("arbitrage_bot.worker.AlertManager", return_value=alert_manager):
+            await worker_module._retry_alert_delivery(retry_item, SimpleNamespace())
+
+        alert_manager.finalize_opportunity.assert_awaited_once_with(opportunity)
+
+
+    async def test_digest_without_terminal_status_queues_each_delivery(self):
+        opportunity = SimpleNamespace()
+        deliveries = [
+            {
+                "alert": SimpleNamespace(
+                    telegram_chat_id="1001",
+                    status="queued",
+                    attempt_count=0,
+                    next_retry_at=None,
+                ),
+                "preferences": {},
+                "opportunity": SimpleNamespace(),
+            }
+            for _ in range(2)
+        ]
+        pair_results = [{
+            "deliveries": [{
+                "deliveries": deliveries,
+                "opportunity": opportunity,
+                "pair": SimpleNamespace(),
+                "market_a": SimpleNamespace(),
+                "market_b": SimpleNamespace(),
+                "directions": {},
+            }],
+        }]
+        retry_queue = MagicMock()
+        retry_queue.enqueue.side_effect = lambda item: setattr(
+            item["delivery"]["alert"],
+            "status",
+            "retry_queued",
+        ) or True
+        alert_manager = SimpleNamespace(finalize_opportunity=AsyncMock())
+
+        with patch(
+            "arbitrage_bot.worker.send_alert_digest",
+            new=AsyncMock(return_value=[]),
+        ), patch("arbitrage_bot.worker.AlertManager", return_value=alert_manager):
+            await worker_module._send_all_deliveries(
+                pair_results,
+                SimpleNamespace(),
+                retry_queue,
+            )
+
+        self.assertEqual(retry_queue.enqueue.call_count, 2)
+        self.assertTrue(all(delivery["alert"].status == "retry_queued" for delivery in deliveries))
+        alert_manager.finalize_opportunity.assert_not_awaited()
 
 
     async def test_multiple_opportunities_for_same_chat_use_digest(self):
@@ -2245,9 +2325,14 @@ class AlertRetryQueueTests(unittest.IsolatedAsyncioTestCase):
         } for opportunity in opportunities]
         alert_manager = SimpleNamespace(finalize_opportunity=AsyncMock())
 
+        async def send_digest(items, _calculator):
+            for item in items:
+                item["delivery"]["alert"].status = "sent"
+            return opportunities
+
         with patch(
             "arbitrage_bot.worker.send_alert_digest",
-            new=AsyncMock(return_value=opportunities),
+            new=AsyncMock(side_effect=send_digest),
         ) as digest_mock, patch(
             "arbitrage_bot.worker.send_alert_immediately",
             new=AsyncMock(),

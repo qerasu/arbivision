@@ -5,6 +5,7 @@ from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.logging import get_logger
 from arbitrage_bot.core.observability import incr_counter
 from arbitrage_bot.tg_bot.bot import load_alert_event_states
+from arbitrage_bot.tg_bot.bot import load_alert_event_states_batch
 from arbitrage_bot.tg_bot.bot import should_send_repeat_alert
 from arbitrage_bot.tg_bot.preferences import filter_reason_for_preferences
 from arbitrage_bot.tg_bot.preferences import get_global_preferences
@@ -43,6 +44,14 @@ class FanoutManager:
 
     def __init__(self, db_session):
         self.db = db_session
+        self._prefetched_event_states = None
+
+
+    async def prefetch_event_states(self, targets, opportunities):
+        self._prefetched_event_states = await load_alert_event_states_batch(
+            (target.get("telegram_chat_id") for target in targets),
+            opportunities,
+        )
 
 
     async def create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, directions=None, calculator=None):
@@ -62,10 +71,17 @@ class FanoutManager:
 
     async def _create_alert_deliveries(self, opportunity, market_a, market_b, delivery_targets=None, directions=None, calculator=None):
         targets = delivery_targets if delivery_targets is not None else await self._get_delivery_targets()
-        event_states = await load_alert_event_states(
-            (target.get("telegram_chat_id") for target in targets),
-            opportunity,
+        event_key = (
+            str(getattr(opportunity, "pair_hash", "") or ""),
+            str(getattr(opportunity, "direction", "") or ""),
         )
+        if self._prefetched_event_states is not None and event_key in self._prefetched_event_states:
+            event_states = self._prefetched_event_states[event_key]
+        else:
+            event_states = await load_alert_event_states(
+                (target.get("telegram_chat_id") for target in targets),
+                opportunity,
+            )
         eligible_targets, drop_reasons = self._filter_targets(
             opportunity,
             targets,
@@ -160,6 +176,7 @@ class FanoutManager:
         eligible_targets = []
         drop_reasons = set()
         event_states = event_states or {}
+        prepared_opportunities = {}
 
         for target in targets:
             if not target.get("telegram_chat_id"):
@@ -187,12 +204,22 @@ class FanoutManager:
                     "max_predict_fun_capital_usd",
                 )
             ):
-                prepared_opportunity = self._prepare_opportunity_for_target(
-                    opportunity,
-                    directions,
-                    calculator,
-                    preferences,
+                limits = tuple(
+                    preferences.get(field)
+                    for field in (
+                        "max_capital_usd",
+                        "max_polymarket_capital_usd",
+                        "max_predict_fun_capital_usd",
+                    )
                 )
+                if limits not in prepared_opportunities:
+                    prepared_opportunities[limits] = self._prepare_opportunity_for_target(
+                        opportunity,
+                        directions,
+                        calculator,
+                        preferences,
+                    )
+                prepared_opportunity = prepared_opportunities[limits]
                 if prepared_opportunity is None:
                     drop_reasons.add("opportunity_unavailable")
                     log.debug(

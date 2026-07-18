@@ -805,11 +805,34 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         await send_system_error_notification("worker", "fetch orderbooks batch", e)
         orderbooks_data = []
     _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
+    state_opportunities = []
+    for item in orderbooks_data:
+        if item.get("pair") is None:
+            continue
+        calculate_started_at = time.monotonic()
+        try:
+            item["_calc_results"] = calculator.calculate_opportunities(item.get("directions"))
+        except Exception:
+            continue
+        _record_timing("worker.timing.calculate", calculate_started_at)
+        state_opportunities.extend(
+            SimpleNamespace(pair_hash=item["pair"].pair_hash, direction=result["direction"])
+            for result in item["_calc_results"]
+        )
     orderbooks_by_pair_hash = {
         item["pair"].pair_hash: item
         for item in orderbooks_data
         if item.get("pair") is not None
     }
+    prefetches = []
+    prefetch_dedupe_states = getattr(alert_manager, "prefetch_dedupe_states", None)
+    if callable(prefetch_dedupe_states):
+        prefetches.append(prefetch_dedupe_states(state_opportunities))
+    prefetch_event_states = getattr(fanout_manager, "prefetch_event_states", None)
+    if callable(prefetch_event_states):
+        prefetches.append(prefetch_event_states(delivery_targets, state_opportunities))
+    if prefetches:
+        await asyncio.gather(*prefetches)
     pair_fetch_concurrency = max(1, int(settings.ORDERBOOK_PREDICT_FUN_CONCURRENCY or 1))
     semaphore = asyncio.Semaphore(pair_fetch_concurrency)
 
@@ -936,9 +959,12 @@ async def _process_candidate_pair(
     incr_counter("worker.pairs_with_orderbooks")
 
     directions = orderbook_data.get("directions")
-    calculate_started_at = time.monotonic()
-    calc_results = calculator.calculate_opportunities(directions)
-    _record_timing("worker.timing.calculate", calculate_started_at)
+    if "_calc_results" in orderbook_data:
+        calc_results = orderbook_data["_calc_results"]
+    else:
+        calculate_started_at = time.monotonic()
+        calc_results = calculator.calculate_opportunities(directions)
+        _record_timing("worker.timing.calculate", calculate_started_at)
     if not calc_results:
         incr_counter("calculator.drop.no_profitable_directions")
         return pair_stats
@@ -1013,11 +1039,20 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None, send_
 
     async def send_group(items):
         if len(items) > 1:
-            async with semaphore:
-                successful = await send_alert_digest(items, calculator)
-            if retry_queue is not None:
+            try:
+                async with semaphore:
+                    await send_alert_digest(items, calculator)
+            except Exception as e:
+                log.error("digest delivery failed", error=format_error_details(e))
                 for item in items:
-                    if getattr(item["delivery"]["alert"], "status", None) != "failed":
+                    _mark_delivery_failed(item["delivery"]["alert"], e)
+
+            for item in items:
+                alert = item["delivery"]["alert"]
+                if getattr(alert, "status", None) == "queued":
+                    _mark_delivery_failed(alert, "digest delivery returned without terminal status")
+                if retry_queue is not None:
+                    if getattr(alert, "status", None) != "failed":
                         continue
                     retry_queue.enqueue({
                         "delivery": item["delivery"],
@@ -1026,11 +1061,15 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None, send_
                         "market_a": item["market_a"],
                         "market_b": item["market_b"],
                         "directions": item["directions"],
+                        "delivery_alerts": [
+                            delivery["alert"]
+                            for delivery in item["deliveries"]
+                        ],
                     })
-            return successful
+            return
 
         delivery_batch = items[0]
-        sent_count = await _send_delivery_alerts(
+        await _send_delivery_alerts(
             [delivery_batch["delivery"]],
             delivery_batch["opportunity"],
             delivery_batch["pair"],
@@ -1040,21 +1079,29 @@ async def _send_all_deliveries(pair_results, calculator, retry_queue=None, send_
             calculator,
             retry_queue,
             send_semaphore=semaphore,
+            delivery_alerts=[
+                delivery["alert"]
+                for delivery in delivery_batch["deliveries"]
+            ],
         )
-        return [delivery_batch["opportunity"]] if sent_count else []
 
     results = await asyncio.gather(
         *(send_group(items) for items in delivery_groups.values()),
         return_exceptions=True,
     )
 
-    successful_opportunities = {}
     for idx, result in enumerate(results):
         if isinstance(result, Exception):
             log.error("delivery batch failed", batch_index=idx, error=format_error_details(result))
-            continue
-        for opportunity in result:
-            successful_opportunities[id(opportunity)] = opportunity
+
+    successful_opportunities = {
+        id(delivery_batch["opportunity"]): delivery_batch["opportunity"]
+        for delivery_batch in all_delivery_batches
+        if _deliveries_completed(
+            delivery["alert"]
+            for delivery in delivery_batch["deliveries"]
+        )
+    }
 
     if successful_opportunities:
         try:
@@ -1076,6 +1123,7 @@ async def _send_delivery_alerts(
     calculator,
     retry_queue=None,
     send_semaphore=None,
+    delivery_alerts=None,
 ):
     semaphore = send_semaphore or asyncio.Semaphore(max(1, len(deliveries)))
 
@@ -1087,6 +1135,7 @@ async def _send_delivery_alerts(
             "market_a": market_a,
             "market_b": market_b,
             "directions": directions,
+            "delivery_alerts": delivery_alerts or [delivery["alert"]],
         }
         async with semaphore:
             try:
@@ -1125,6 +1174,12 @@ async def _send_delivery_alerts(
     return sum(await asyncio.gather(*(send_one(delivery) for delivery in deliveries)))
 
 
+def _deliveries_completed(alerts):
+    terminal_statuses = {"sent", "cancelled", "suppressed"}
+    statuses = [getattr(alert, "status", None) for alert in alerts]
+    return "sent" in statuses and all(status in terminal_statuses for status in statuses)
+
+
 def _mark_delivery_failed(alert, error):
     alert.attempt_count = int(getattr(alert, "attempt_count", 0) or 0) + 1
     alert.status = "failed"
@@ -1146,10 +1201,14 @@ async def _retry_alert_delivery(item, calculator):
         prepared_opportunity=delivery.get("opportunity"),
     )
     if not sent:
+        if _deliveries_completed(item.get("delivery_alerts", [delivery["alert"]])):
+            await AlertManager(None).finalize_opportunity(item["opportunity"])
         incr_counter("worker.retry_send_failed")
         return False
 
-    await AlertManager(None).finalize_opportunity(item["opportunity"])
+    delivery["alert"].status = "sent"
+    if _deliveries_completed(item.get("delivery_alerts", [delivery["alert"]])):
+        await AlertManager(None).finalize_opportunity(item["opportunity"])
     incr_counter("worker.retry_send_success")
     return True
 

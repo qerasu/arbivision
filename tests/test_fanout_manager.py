@@ -202,13 +202,19 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
                     "subscription_id": 21,
                     "telegram_chat_id": "1001",
                     "preferences": {"max_capital_usd": 4.65},
-                }
+                },
+                {
+                    "user_id": 12,
+                    "subscription_id": 22,
+                    "telegram_chat_id": "1002",
+                    "preferences": {"max_capital_usd": 4.65},
+                },
             ],
             directions={"A_yes_B_no": {"poly": [(0.41, 12)], "pf": [(0.52, 12)]}},
             calculator=calculator,
         )
 
-        self.assertEqual(len(deliveries), 1)
+        self.assertEqual(len(deliveries), 2)
         calculator.calculate_opportunity.assert_called_once_with(
             poly_asks=[(0.41, 12)],
             pf_asks=[(0.52, 12)],
@@ -218,6 +224,47 @@ class FanoutManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertAlmostEqual(deliveries[0]["opportunity"].capital_required, 4.65)
         self.assertAlmostEqual(deliveries[0]["opportunity"].shares, 5.0)
+
+
+    async def test_prefetches_event_states_for_multiple_opportunities_in_one_request(self):
+        manager = FanoutManager(FakeDbSession())
+        opportunities = [
+            SimpleNamespace(
+                pair_hash="pair-1",
+                direction="A_yes_B_no",
+                message_hash="hash-1",
+                net_roi=0.12,
+                capital_required=10.0,
+                net_profit=5.0,
+            ),
+            SimpleNamespace(
+                pair_hash="pair-2",
+                direction="A_no_B_yes",
+                message_hash="hash-2",
+                net_roi=0.13,
+                capital_required=11.0,
+                net_profit=6.0,
+            ),
+        ]
+        targets = [{"telegram_chat_id": "1001", "preferences": {}}]
+        redis = FakeRedis({})
+        market_a, market_b = self._build_markets()
+
+        with patch("arbitrage_bot.tg_bot.bot.get_redis", return_value=redis):
+            await manager.prefetch_event_states(targets, opportunities)
+            deliveries = [
+                await manager.create_alert_deliveries(
+                    opportunity,
+                    market_a,
+                    market_b,
+                    delivery_targets=targets,
+                )
+                for opportunity in opportunities
+            ]
+
+        self.assertEqual([len(items) for items in deliveries], [1, 1])
+        self.assertEqual(len(redis.mget_calls), 1)
+        self.assertEqual(len(redis.mget_calls[0]), 2)
 
 
     async def test_fanout_suppresses_repeat_before_target_recalculation(self):

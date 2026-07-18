@@ -530,21 +530,37 @@ async def _load_alert_event_state(alert, opportunity, pair=None):
 
 
 async def load_alert_event_states(chat_ids, opportunity, pair=None):
+    pair_hash = str(getattr(opportunity, "pair_hash", "") or getattr(pair, "pair_hash", "") or "")
+    direction = str(getattr(opportunity, "direction", "") or "")
+    states = await load_alert_event_states_batch(chat_ids, [opportunity], pairs=[pair])
+    return states.get((pair_hash, direction), {})
+
+
+async def load_alert_event_states_batch(chat_ids, opportunities, pairs=None):
+    chat_ids = {str(chat_id or "") for chat_id in chat_ids if chat_id}
+    pairs = list(pairs or [])
     state_keys = {}
     raw_values = {}
-    for raw_chat_id in chat_ids:
-        chat_id = str(raw_chat_id or "")
-        state_key = _alert_event_state_key(
-            SimpleNamespace(telegram_chat_id=chat_id),
-            opportunity,
-            pair=pair,
-        )
-        if state_key is None or chat_id in state_keys:
-            continue
-        state_keys[chat_id] = state_key
-        fallback_state = _alert_event_fallback.get(state_key)
-        if fallback_state:
-            raw_values[chat_id] = fallback_state[0]
+    result = {}
+    for index, opportunity in enumerate(opportunities):
+        pair = pairs[index] if index < len(pairs) else None
+        pair_hash = str(getattr(opportunity, "pair_hash", "") or getattr(pair, "pair_hash", "") or "")
+        direction = str(getattr(opportunity, "direction", "") or "")
+        opportunity_key = (pair_hash, direction)
+        result[opportunity_key] = {}
+        for chat_id in chat_ids:
+            state_key = _alert_event_state_key(
+                SimpleNamespace(telegram_chat_id=chat_id),
+                opportunity,
+                pair=pair,
+            )
+            if state_key is None:
+                continue
+            item_key = (opportunity_key, chat_id)
+            state_keys[item_key] = state_key
+            fallback_state = _alert_event_fallback.get(state_key)
+            if fallback_state:
+                raw_values[item_key] = fallback_state[0]
 
     try:
         redis = get_redis()
@@ -554,18 +570,17 @@ async def load_alert_event_states(chat_ids, opportunity, pair=None):
                 redis_values = await redis.mget(keys)
             else:
                 redis_values = await asyncio.gather(*(redis.get(key) for key in keys))
-            for chat_id, raw_value in zip(state_keys, redis_values):
+            for item_key, raw_value in zip(state_keys, redis_values):
                 if raw_value:
-                    raw_values[chat_id] = raw_value
+                    raw_values[item_key] = raw_value
     except Exception:
         pass
 
-    states = {}
-    for chat_id, raw_value in raw_values.items():
+    for (opportunity_key, chat_id), raw_value in raw_values.items():
         state = _parse_alert_event_state(raw_value)
         if state is not None:
-            states[chat_id] = state
-    return states
+            result[opportunity_key][chat_id] = state
+    return result
 
 
 async def _store_alert_event_state(
