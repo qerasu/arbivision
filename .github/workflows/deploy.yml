@@ -33,13 +33,14 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          rsync -az \
+          rsync -az --delete \
             --exclude='.env' \
             --exclude='.env.*' \
             --exclude='.git/' \
             --exclude='.venv/' \
             --exclude='__pycache__/' \
             --exclude='.pytest_cache/' \
+            --exclude='backups/' \
             --exclude='graphify-out/' \
             --exclude='.codex/' \
             -e 'ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes' \
