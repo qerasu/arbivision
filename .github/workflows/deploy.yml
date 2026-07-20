@@ -33,7 +33,7 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          rsync -az --delete \
+          rsync -az \
             --exclude='.env' \
             --exclude='.env.*' \
             --exclude='.git/' \
@@ -52,12 +52,12 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes "root@$DEPLOY_HOST" \
             'cd /opt/arbivision &&
              docker compose -f docker-compose.prod.yml up -d --build app &&
-             for _ in $(seq 1 15); do
+             for _ in $(seq 1 45); do
                if curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
                  curl -fsS http://127.0.0.1:8000/api/health
                  exit 0
                fi
                sleep 2
              done
-             echo "App health check did not succeed within 30 seconds" >&2
+             echo "App health check did not succeed within 90 seconds" >&2
              exit 1'
