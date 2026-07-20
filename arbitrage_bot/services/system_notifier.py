@@ -89,7 +89,7 @@ def is_transient_network_error(error):
         return True
 
     status_code = getattr(getattr(error, "response", None), "status_code", None)
-    if status_code in {502, 503, 504}:
+    if status_code in {500, 502, 503, 504}:
         return True
 
     details = format_error_details(error).lower()
