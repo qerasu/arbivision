@@ -270,20 +270,20 @@ async def _run_market_sync_loop(state, ingestion, matcher):
 async def _run_market_sync_cycle(db, state, ingestion, matcher):
     sync_result = await ingestion.sync_markets()
     if _should_run_full_pair_rematch(time.monotonic(), state):
-        _invalidate_candidate_context_cache(state)
         hot_pair_hashes = await _upsert_market_pairs(db, matcher, None, state)
+        _invalidate_candidate_context_cache(state)
         _queue_hot_pairs(state, hot_pair_hashes)
         _mark_full_pair_rematch_completed(state)
     else:
         changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
         if _has_changed_market_ids(changed_market_ids_by_platform):
-            _invalidate_candidate_context_cache(state)
             hot_pair_hashes = await _upsert_market_pairs(
                 db,
                 matcher,
                 changed_market_ids_by_platform,
                 state,
             )
+            _invalidate_candidate_context_cache(state)
             _queue_hot_pairs(state, hot_pair_hashes)
     await _run_database_cleanup_if_due(db, state)
 
