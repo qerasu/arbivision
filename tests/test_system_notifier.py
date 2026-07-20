@@ -177,12 +177,13 @@ class SystemNotifierTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(system_notifier.is_transient_network_error(error))
 
 
-    def test_detects_transient_gateway_http_status(self):
+    def test_detects_transient_server_http_statuses(self):
         request = httpx.Request("GET", "https://api.predict.fun/v1/markets")
-        response = httpx.Response(502, request=request)
-        error = httpx.HTTPStatusError("Bad Gateway", request=request, response=response)
 
-        self.assertTrue(system_notifier.is_transient_network_error(error))
+        for status_code in (500, 502, 503, 504):
+            response = httpx.Response(status_code, request=request)
+            error = httpx.HTTPStatusError("Server error", request=request, response=response)
+            self.assertTrue(system_notifier.is_transient_network_error(error))
 
 
     def test_detects_httpx_read_error_as_transient(self):
