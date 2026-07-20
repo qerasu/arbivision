@@ -12,7 +12,7 @@ from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot import worker as worker_module
-from arbitrage_bot.worker import AlertRetryQueue, WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_signature, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _send_delivery_alerts, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
+from arbitrage_bot.worker import AlertRetryQueue, WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_signature, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _run_market_sync_cycle, _send_delivery_alerts, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
 
 
 def _fake_session_context(fake_db):
@@ -24,6 +24,23 @@ def _fake_session_context(fake_db):
 class WorkerPairLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.state = WorkerState()
+
+
+    def test_market_sync_invalidates_candidate_cache_after_pair_upsert(self):
+        self.state.candidate_context_loaded = True
+        ingestion = SimpleNamespace(sync_markets=AsyncMock(return_value={}))
+
+        async def upsert_pairs(*_args):
+            self.assertTrue(self.state.candidate_context_loaded)
+            return set()
+
+        with (
+            patch("arbitrage_bot.worker._upsert_market_pairs", side_effect=upsert_pairs),
+            patch("arbitrage_bot.worker._run_database_cleanup_if_due", new=AsyncMock()),
+        ):
+            asyncio.run(_run_market_sync_cycle(AsyncMock(), self.state, ingestion, MatcherService()))
+
+        self.assertFalse(self.state.candidate_context_loaded)
 
 
     def test_reconcile_updates_existing_pair_and_keeps_manual_approval(self):
