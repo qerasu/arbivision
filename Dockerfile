@@ -6,7 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN python -m pip install --no-cache-dir -r requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir -r requirements.txt
 
 COPY alembic ./alembic
 COPY arbitrage_bot ./arbitrage_bot
