@@ -35,7 +35,6 @@ jobs:
         run: |
           rsync -az --delete \
             --exclude='.env' \
-            --exclude='.env.*' \
             --exclude='.git/' \
             --exclude='.venv/' \
             --exclude='__pycache__/' \
