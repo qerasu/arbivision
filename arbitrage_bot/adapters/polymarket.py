@@ -22,8 +22,11 @@ class PolymarketAdapter(BaseAdapter):
     fallback_errors = (
         httpx.ConnectError,
         httpx.ConnectTimeout,
+        httpx.ReadError,
         httpx.ReadTimeout,
         httpx.RemoteProtocolError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
     )
 
     def __init__(self):
@@ -179,9 +182,12 @@ class PolymarketAdapter(BaseAdapter):
             )
 
             if returncode == 0:
-                return json.loads(stdout)
-
-            last_detail = stderr.decode().strip() or repr(original_exc)
+                try:
+                    return json.loads(stdout)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    last_detail = f"invalid JSON response: {exc}"
+            else:
+                last_detail = stderr.decode().strip() or repr(original_exc)
             if attempt < self.curl_max_attempts:
                 await asyncio.sleep(0.75 * attempt)
 
