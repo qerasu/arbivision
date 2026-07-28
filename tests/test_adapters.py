@@ -136,6 +136,42 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
         adapter._curl_get_json.assert_awaited_once()
 
 
+    async def test_get_json_uses_curl_fallback_for_invalid_json(self):
+        adapter = PolymarketAdapter()
+        adapter.client.get = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                content=b'{"data":"truncated',
+                request=httpx.Request("GET", "https://gamma-api.polymarket.com/markets"),
+            )
+        )
+        adapter._curl_get_json = AsyncMock(return_value={"data": []})
+
+        result = await adapter._get_json("/markets")
+
+        self.assertEqual(result, {"data": []})
+        adapter._curl_get_json.assert_awaited_once()
+
+
+    async def test_curl_fallback_retries_invalid_json(self):
+        adapter = PolymarketAdapter()
+        adapter._run_curl_process = AsyncMock(
+            side_effect=[
+                (0, b'{"data":"truncated', b""),
+                (0, b'{"data":[]}', b""),
+            ]
+        )
+
+        with patch(
+            "arbitrage_bot.adapters.polymarket.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            result = await adapter._curl_get_json("/markets")
+
+        self.assertEqual(result, {"data": []})
+        self.assertEqual(adapter._run_curl_process.await_count, 2)
+
+
     async def test_run_curl_process_falls_back_to_threaded_subprocess_when_async_subprocess_is_unsupported(self):
         adapter = PolymarketAdapter()
 
@@ -279,6 +315,42 @@ class PredictFunAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"data": []})
         adapter._curl_get_json.assert_awaited_once()
+
+
+    async def test_get_json_uses_curl_fallback_for_invalid_json(self):
+        adapter = PredictFunAdapter()
+        adapter.client.get = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                content=b'{"data":"truncated',
+                request=httpx.Request("GET", "https://api.predict.fun/v1/markets"),
+            )
+        )
+        adapter._curl_get_json = AsyncMock(return_value={"data": []})
+
+        result = await adapter._get_json("/markets")
+
+        self.assertEqual(result, {"data": []})
+        adapter._curl_get_json.assert_awaited_once()
+
+
+    async def test_curl_fallback_retries_invalid_json(self):
+        adapter = PredictFunAdapter()
+        adapter._run_curl_process = AsyncMock(
+            side_effect=[
+                (0, b'{"data":"truncated', b""),
+                (0, b'{"data":[]}', b""),
+            ]
+        )
+
+        with patch(
+            "arbitrage_bot.adapters.predict_fun.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            result = await adapter._curl_get_json("/markets")
+
+        self.assertEqual(result, {"data": []})
+        self.assertEqual(adapter._run_curl_process.await_count, 2)
 
 
     async def test_curl_fallback_passes_api_key_through_stdin(self):
