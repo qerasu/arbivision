@@ -118,11 +118,13 @@ class IngestionOutcomeNormalizationTests(unittest.TestCase):
 
 
     def test_map_polymarket_market_skips_missing_id(self):
-        mapped = self.service._map_polymarket_market(
-            {"title": "No identifier", "tradable": False}
-        )
+        for market_id in (None, ""):
+            with self.subTest(market_id=market_id):
+                mapped = self.service._map_polymarket_market(
+                    {"id": market_id, "title": "No identifier", "tradable": False}
+                )
 
-        self.assertIsNone(mapped)
+                self.assertIsNone(mapped)
 
 
     def test_map_polymarket_market_closes_explicitly_closed_market(self):
@@ -794,6 +796,69 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
             service._changed_market_ids_by_platform["predict_fun"],
             set(),
         )
+
+
+    async def test_complete_sync_with_only_rejected_rows_skips_mass_closing_markets(self):
+        class FakeDbSession:
+            def __init__(self):
+                self.commit_calls = 0
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+            async def rollback(self):
+                pass
+
+
+        db = FakeDbSession()
+        service = IngestionService(db_session=db)
+        service._upsert_markets = AsyncMock(return_value=set())
+        service._mark_missing_markets_closed = AsyncMock(return_value=set())
+        adapter = SimpleNamespace(last_fetch_partial=False, last_fetch_complete=True)
+
+        synced = await service._sync_source(
+            "polymarket",
+            [{"title": "Missing identifier"}],
+            service._map_polymarket_market,
+            adapter=adapter,
+        )
+
+        self.assertFalse(synced)
+        self.assertEqual(db.commit_calls, 0)
+        service._upsert_markets.assert_not_awaited()
+        service._mark_missing_markets_closed.assert_not_awaited()
+
+
+    async def test_complete_sync_with_valid_and_rejected_rows_skips_stale_detection(self):
+        class FakeDbSession:
+            async def commit(self):
+                pass
+
+
+            async def rollback(self):
+                pass
+
+
+        service = IngestionService(db_session=FakeDbSession())
+        service._upsert_markets = AsyncMock(return_value={101})
+        service._mark_missing_markets_closed = AsyncMock(return_value=set())
+        adapter = SimpleNamespace(last_fetch_partial=False, last_fetch_complete=True)
+
+        synced = await service._sync_source(
+            "polymarket",
+            [
+                {"id": "100", "title": "Valid", "tradable": True},
+                {"title": "Missing identifier"},
+            ],
+            service._map_polymarket_market,
+            adapter=adapter,
+        )
+
+        self.assertFalse(synced)
+        service._upsert_markets.assert_awaited_once()
+        service._mark_missing_markets_closed.assert_not_awaited()
 
 
     async def test_upsert_markets_builds_json_diff_condition_without_astext(self):

@@ -108,6 +108,33 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.assertFalse(self.state.candidate_context_loaded)
 
 
+    def test_market_sync_invalidates_candidate_cache_when_pair_upsert_fails(self):
+        self.state.last_full_pair_rematch_completed_at = time.monotonic()
+        self.state.candidate_context_loaded = True
+        ingestion = SimpleNamespace(
+            sync_markets=AsyncMock(
+                return_value={
+                    "changed_market_ids_by_platform": {
+                        "polymarket": {1},
+                        "predict_fun": set(),
+                    },
+                }
+            )
+        )
+
+        with (
+            patch(
+                "arbitrage_bot.worker._upsert_market_pairs",
+                new=AsyncMock(side_effect=RuntimeError("pair upsert failed")),
+            ),
+            patch("arbitrage_bot.worker._run_database_cleanup_if_due", new=AsyncMock()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pair upsert failed"):
+                asyncio.run(_run_market_sync_cycle(AsyncMock(), self.state, ingestion, MatcherService()))
+
+        self.assertFalse(self.state.candidate_context_loaded)
+
+
     def test_market_sync_recovers_stale_pairs_after_successful_startup_sync(self):
         self.state.last_full_pair_rematch_completed_at = time.monotonic()
         self.state.candidate_context_loaded = True
@@ -954,6 +981,80 @@ class WorkerCandidateContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(market_map[10], original_market)
         self.assertEqual(pairs[0].pair_hash, original_pair.pair_hash)
         self.assertEqual(market_map[10].platform_market_id, original_market.platform_market_id)
+
+
+    async def test_load_candidate_context_retries_when_cache_is_invalidated_mid_load(self):
+        def pair(pair_id, market_id):
+            return SimpleNamespace(
+                id=pair_id,
+                market_id_a=market_id,
+                market_id_b=market_id + 1,
+                pair_hash=f"pair-{pair_id}",
+                status="approved",
+                match_score=0.9,
+                match_reason_json={},
+                outcome_mapping_json={},
+            )
+
+
+        def market(market_id):
+            return SimpleNamespace(
+                id=market_id,
+                platform="polymarket",
+                platform_market_id=f"poly-{market_id}",
+                status="active",
+                tradable=True,
+                title="Market",
+                normalized_title="market",
+                description="",
+                outcomes_json=[],
+                raw_payload_json={},
+                category="",
+                slug="",
+                updated_at=None,
+                created_at=None,
+            )
+
+
+        class FakeScalars:
+            def __init__(self, values):
+                self._values = values
+
+
+            def all(self):
+                return list(self._values)
+
+
+        class FakeDb:
+            def __init__(self):
+                self.pair_rows = [[pair(1, 10)], [pair(2, 20)]]
+
+
+            async def execute(self, _stmt):
+                return SimpleNamespace(scalars=lambda: FakeScalars(self.pair_rows.pop(0)))
+
+
+        state = WorkerState()
+        calls = 0
+
+        async def load_market_map(_db, pairs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                worker_module._invalidate_candidate_context_cache(state)
+                return {10: market(10)}
+            return {20: market(20)}
+
+
+        with patch(
+            "arbitrage_bot.worker._load_market_map_for_pairs",
+            side_effect=load_market_map,
+        ):
+            pairs, market_map = await _load_candidate_context(FakeDb(), state)
+
+        self.assertEqual([pair.pair_hash for pair in pairs], ["pair-2"])
+        self.assertEqual(set(market_map), {20})
+        self.assertTrue(state.candidate_context_loaded)
 
 
 class FakePipeline:

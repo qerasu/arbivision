@@ -179,7 +179,7 @@ class IngestionService:
 
     def _map_polymarket_market(self, market):
         market_id = market.get("id")
-        if market_id is None:
+        if market_id is None or not str(market_id).strip():
             return None
 
         title = market.get("title") or market.get("question") or market.get("name") or ""
@@ -451,9 +451,10 @@ class IngestionService:
             pending_items = []
             unchanged_count = 0
             fetched_market_rows = 0
+            rejected_market_rows = 0
 
             async def upsert_pending_items(raw_chunk):
-                nonlocal duplicate_count, platform, unchanged_count
+                nonlocal duplicate_count, platform, rejected_market_rows, unchanged_count
 
                 mapped_items = []
                 for item in raw_chunk:
@@ -462,6 +463,8 @@ class IngestionService:
                     mapped_item = mapper(item)
                     if mapped_item is not None:
                         mapped_items.append(mapped_item)
+                    else:
+                        rejected_market_rows += 1
                 mapped_items, chunk_duplicate_count, chunk_duplicate_metadata = self._dedupe_market_items(mapped_items)
                 duplicate_count += chunk_duplicate_count
                 duplicate_market_ids.update(chunk_duplicate_metadata["market_ids"])
@@ -540,6 +543,14 @@ class IngestionService:
                     source=source_name,
                     skipped_markets=unchanged_count,
                 )
+            if rejected_market_rows:
+                log.warning(
+                    "sync completed with rejected market rows, skipping stale market detection",
+                    source=source_name,
+                    fetched_markets=fetched_market_rows,
+                    rejected_markets=rejected_market_rows,
+                )
+                return False
             if not seen_market_keys:
                 self._changed_market_ids_by_platform.setdefault(platform, set())
                 if is_partial:

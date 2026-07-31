@@ -49,6 +49,7 @@ class WorkerState:
     candidate_context_loaded: bool = False
     candidate_pairs: list = field(default_factory=list)
     candidate_market_map: dict = field(default_factory=dict)
+    candidate_context_generation: int = 0
     last_full_pair_rematch_completed_at: float | None = None
     last_db_cleanup_completed_at: float | None = None
     pair_cycle_offsets: dict = field(default_factory=dict)
@@ -357,37 +358,42 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
         changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
         has_market_changes = _has_changed_market_ids(changed_market_ids_by_platform)
         hot_pair_hashes = set()
-        if has_market_changes:
-            upserted_pair_hashes = await _upsert_market_pairs(
-                db,
-                matcher,
-                changed_market_ids_by_platform,
-                state,
-            )
-            hot_pair_hashes.update(upserted_pair_hashes)
+        try:
+            if has_market_changes:
+                upserted_pair_hashes = await _upsert_market_pairs(
+                    db,
+                    matcher,
+                    changed_market_ids_by_platform,
+                    state,
+                )
+                hot_pair_hashes.update(upserted_pair_hashes)
 
-        should_recover_stale_pairs = (
-            state.stale_pair_recovery_ready
-            and (
-                state.stale_pair_recovery_pending
-                or has_market_changes
+            should_recover_stale_pairs = (
+                state.stale_pair_recovery_ready
+                and (
+                    state.stale_pair_recovery_pending
+                    or has_market_changes
+                )
             )
-        )
-        if should_recover_stale_pairs:
-            if has_market_changes and not state.stale_pair_recovery_pending:
-                state.stale_pair_recovery_after_id = 0
-            recovery_result = await _recover_active_stale_pairs(
-                db,
-                matcher,
-                state.stale_pair_recovery_after_id,
-            )
-            recovered_pair_hashes, recovery_completed, next_pair_id = recovery_result
-            hot_pair_hashes.update(recovered_pair_hashes)
-            state.stale_pair_recovery_pending = not recovery_completed
-            state.stale_pair_recovery_after_id = 0 if recovery_completed else next_pair_id
+            if should_recover_stale_pairs:
+                if has_market_changes and not state.stale_pair_recovery_pending:
+                    state.stale_pair_recovery_after_id = 0
+                recovery_result = await _recover_active_stale_pairs(
+                    db,
+                    matcher,
+                    state.stale_pair_recovery_after_id,
+                )
+                recovered_pair_hashes, recovery_completed, next_pair_id = recovery_result
+                hot_pair_hashes.update(recovered_pair_hashes)
+                state.stale_pair_recovery_pending = not recovery_completed
+                state.stale_pair_recovery_after_id = 0 if recovery_completed else next_pair_id
+        finally:
+            if has_market_changes:
+                _invalidate_candidate_context_cache(state)
 
-        if has_market_changes or hot_pair_hashes:
-            _invalidate_candidate_context_cache(state)
+        if hot_pair_hashes:
+            if not has_market_changes:
+                _invalidate_candidate_context_cache(state)
             _queue_hot_pairs(state, hot_pair_hashes)
     await _run_database_cleanup_if_due(db, state)
 
@@ -515,6 +521,7 @@ async def _cleanup_database_records(db, state):
 
 
 def _invalidate_candidate_context_cache(state):
+    state.candidate_context_generation += 1
     state.candidate_context_loaded = False
     state.candidate_pairs = []
     state.candidate_market_map = {}
@@ -527,20 +534,25 @@ async def _load_candidate_context(db, state, force_refresh=False):
             dict(state.candidate_market_map),
         )
 
-    pair_stmt = select(MarketPair).where(
-        MarketPair.status.in_(["auto_approved", "approved"])
-    )
-    pairs = (await db.execute(pair_stmt)).scalars().all()
-    market_map = await _load_market_map_for_pairs(db, pairs)
-    pair_snapshots = [_snapshot_pair(pair) for pair in pairs]
-    market_snapshots = {
-        market_id: _snapshot_market(market)
-        for market_id, market in market_map.items()
-    }
-    state.candidate_context_loaded = True
-    state.candidate_pairs = list(pair_snapshots)
-    state.candidate_market_map = dict(market_snapshots)
-    return pair_snapshots, market_snapshots
+    while True:
+        generation = state.candidate_context_generation
+        pair_stmt = select(MarketPair).where(
+            MarketPair.status.in_(["auto_approved", "approved"])
+        )
+        pairs = (await db.execute(pair_stmt)).scalars().all()
+        market_map = await _load_market_map_for_pairs(db, pairs)
+        pair_snapshots = [_snapshot_pair(pair) for pair in pairs]
+        market_snapshots = {
+            market_id: _snapshot_market(market)
+            for market_id, market in market_map.items()
+        }
+        if generation != state.candidate_context_generation:
+            continue
+
+        state.candidate_context_loaded = True
+        state.candidate_pairs = list(pair_snapshots)
+        state.candidate_market_map = dict(market_snapshots)
+        return pair_snapshots, market_snapshots
 
 
 async def _upsert_market_pairs(
