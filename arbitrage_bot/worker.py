@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 import traceback
 from cachetools import TTLCache
@@ -10,7 +11,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 from arbitrage_bot.core.database import AsyncSessionLocal
 from arbitrage_bot.core.redis import get_redis
-from arbitrage_bot.models.orm import Market, MarketPair
+from arbitrage_bot.models.orm import Market, MarketPair, SettingsRecord
 from arbitrage_bot.services.ingestion import IngestionService
 from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot.services.orderbook import OrderbookService
@@ -34,6 +35,7 @@ _SIGNATURE_CACHE_MAX_SIZE = 20000
 _EMPTY_COUNT_TTL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 20, 3600)
 _EMPTY_PROBE_INTERVAL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 12, 60)
 _ALERT_BATCH_WINDOW_SECONDS = 0.25
+_FULL_PAIR_REMATCH_STATE_KEY = "worker:full_pair_rematch"
 
 
 @dataclass
@@ -264,12 +266,12 @@ async def _run_market_sync_loop(state, ingestion, matcher):
         try:
             if state.last_full_pair_rematch_completed_at is None:
                 async with AsyncSessionLocal() as session:
-                    resumed = await _resume_periodic_work_from_existing_pairs(
+                    resumed = await _restore_full_pair_rematch_schedule(
                         session,
                         state,
                     )
                 if resumed:
-                    log.info("existing pairs found, deferring full startup rematch")
+                    log.info("restored full pair rematch schedule")
 
             async with AsyncSessionLocal() as session:
                 await _run_market_sync_cycle(session, state, ingestion, matcher)
@@ -287,29 +289,61 @@ async def _run_market_sync_loop(state, ingestion, matcher):
         await asyncio.sleep(settings.MARKET_REFRESH_SECONDS)
 
 
-async def _resume_periodic_work_from_existing_pairs(db, state):
-    stmt = (
-        select(MarketPair.id)
-        .where(MarketPair.status.in_(["auto_approved", "approved"]))
-        .limit(1)
-    )
-    existing_pair_id = (await db.execute(stmt)).scalar_one_or_none()
-    if existing_pair_id is None:
+async def _restore_full_pair_rematch_schedule(db, state):
+    stmt = select(SettingsRecord).where(SettingsRecord.key == _FULL_PAIR_REMATCH_STATE_KEY)
+    setting = (await db.execute(stmt)).scalars().first()
+    value = setting.value_json if setting is not None else None
+    completed_at = value.get("completed_at") if isinstance(value, dict) else None
+    try:
+        elapsed_seconds = time.time() - float(completed_at)
+    except (TypeError, ValueError):
         return False
 
-    # ponytail: frequent restarts can postpone full rematches;
-    # persist schedules if deployments become continuous
-    _mark_full_pair_rematch_completed(state)
+    interval = max(
+        float(settings.MATCHER_FULL_REMATCH_INTERVAL_SECONDS),
+        float(settings.MARKET_REFRESH_SECONDS),
+    )
+    if not math.isfinite(elapsed_seconds) or elapsed_seconds < 0 or elapsed_seconds >= interval:
+        return False
+
+    state.last_full_pair_rematch_completed_at = time.monotonic() - elapsed_seconds
     return True
+
+
+async def _persist_full_pair_rematch_completion(db, state):
+    completed_at = time.time()
+    stmt = select(SettingsRecord).where(SettingsRecord.key == _FULL_PAIR_REMATCH_STATE_KEY)
+    setting = (await db.execute(stmt)).scalars().first()
+    if setting is None:
+        db.add(SettingsRecord(
+            key=_FULL_PAIR_REMATCH_STATE_KEY,
+            value_json={"completed_at": completed_at},
+        ))
+    else:
+        setting.value_json = {"completed_at": completed_at}
+        setting.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    _mark_full_pair_rematch_completed(state)
 
 
 async def _run_market_sync_cycle(db, state, ingestion, matcher):
     sync_result = await ingestion.sync_markets()
     if _should_run_full_pair_rematch(time.monotonic(), state):
-        hot_pair_hashes = await _upsert_market_pairs(db, matcher, None, state)
+        hot_pair_hashes, rematch_completed = await _upsert_market_pairs(
+            db,
+            matcher,
+            None,
+            state,
+            report_completion=True,
+        )
         _invalidate_candidate_context_cache(state)
         _queue_hot_pairs(state, hot_pair_hashes)
-        _mark_full_pair_rematch_completed(state)
+        if rematch_completed:
+            await _persist_full_pair_rematch_completion(db, state)
+        else:
+            # ponytail: no persisted cursor; restart retries the full rematch
+            _mark_full_pair_rematch_completed(state)
+            log.warning("full pair rematch reached configured limit")
     else:
         changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
         if _has_changed_market_ids(changed_market_ids_by_platform):
@@ -475,7 +509,13 @@ async def _load_candidate_context(db, state, force_refresh=False):
     return pair_snapshots, market_snapshots
 
 
-async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, state):
+async def _upsert_market_pairs(
+    db,
+    matcher,
+    changed_market_ids_by_platform,
+    state,
+    report_completion=False,
+):
     full_rematch = changed_market_ids_by_platform is None
     changed_poly_ids = set()
     changed_pf_ids = set()
@@ -555,7 +595,7 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         stale_pairs = [pair for pair in existing_pairs if pair.status == "stale"]
         await _clear_empty_counts_for_pairs(stale_pairs, state)
     if not new_pairs and not has_updates:
-        return hot_pair_hashes
+        return (hot_pair_hashes, not reached_limit) if report_completion else hot_pair_hashes
 
     if new_pairs:
         db.add_all(new_pairs)
@@ -564,9 +604,11 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
         await db.commit()
     except IntegrityError:
         await db.rollback()
+        if full_rematch:
+            raise
         hot_pair_hashes = set()
 
-    return hot_pair_hashes
+    return (hot_pair_hashes, not reached_limit) if report_completion else hot_pair_hashes
 
 
 async def _load_active_markets(db, platform, market_ids=None):
