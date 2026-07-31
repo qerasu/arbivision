@@ -171,6 +171,7 @@ async def run_sync_loop(state=None):
     )
     try:
         while True:
+            cycle_started_at = time.monotonic()
             try:
                 incr_counter("worker.cycle_started")
                 async with AsyncSessionLocal() as session:
@@ -200,6 +201,11 @@ async def run_sync_loop(state=None):
                 continue
 
             await orderbook_service.wait_for_updates(settings.MARKET_REFRESH_SECONDS)
+            remaining_delay = settings.MARKET_REFRESH_SECONDS - (
+                time.monotonic() - cycle_started_at
+            )
+            if remaining_delay > 0:
+                await asyncio.sleep(remaining_delay)
     finally:
         retry_task.cancel()
         market_sync_task.cancel()
