@@ -178,16 +178,37 @@ class IngestionService:
 
 
     def _map_polymarket_market(self, market):
+        market_id = market.get("id")
+        if market_id is None:
+            return None
+
         title = market.get("title") or market.get("question") or market.get("name") or ""
         active = market.get("active")
         closed = market.get("closed")
         tradable = market.get("tradable")
+        explicitly_closed = tradable is False or closed is True
 
-        if tradable is None:
+        if closed is True:
+            tradable = False
+        elif tradable is None:
             tradable = bool(active) and not bool(closed)
 
         if not tradable:
-            return None
+            if not explicitly_closed:
+                return None
+            return {
+                "platform": "polymarket",
+                "platform_market_id": str(market_id),
+                "status": "closed",
+                "tradable": False,
+                "title": title,
+                "normalized_title": title.lower(),
+                "description": market.get("description") or market.get("details") or "",
+                "outcomes_json": [],
+                "raw_payload_json": dict(market),
+                "category": market.get("category") or market.get("groupItemTitle") or "",
+                "slug": market.get("slug") or market.get("ticker") or "",
+            }
 
         normalized_outcomes = self._normalize_outcomes(
             market.get("outcomes") or market.get("tokens") or []
@@ -217,7 +238,7 @@ class IngestionService:
 
         return {
             "platform": "polymarket",
-            "platform_market_id": str(market.get("id")),
+            "platform_market_id": str(market_id),
             "status": "active",
             "tradable": True,
             "title": title,
