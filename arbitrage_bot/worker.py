@@ -386,7 +386,7 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
             state.stale_pair_recovery_pending = not recovery_completed
             state.stale_pair_recovery_after_id = 0 if recovery_completed else next_pair_id
 
-        if hot_pair_hashes:
+        if has_market_changes or hot_pair_hashes:
             _invalidate_candidate_context_cache(state)
             _queue_hot_pairs(state, hot_pair_hashes)
     await _run_database_cleanup_if_due(db, state)

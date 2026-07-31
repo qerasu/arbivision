@@ -80,6 +80,34 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.assertFalse(self.state.candidate_context_loaded)
 
 
+    def test_market_sync_invalidates_candidate_cache_when_pairs_only_become_stale(self):
+        self.state.last_full_pair_rematch_completed_at = time.monotonic()
+        self.state.candidate_context_loaded = True
+        ingestion = SimpleNamespace(
+            sync_markets=AsyncMock(
+                return_value={
+                    "successful_sources": ["polymarket"],
+                    "changed_market_ids_by_platform": {
+                        "polymarket": {1},
+                        "predict_fun": set(),
+                    },
+                }
+            )
+        )
+
+        with (
+            patch("arbitrage_bot.worker._upsert_market_pairs", new=AsyncMock(return_value=set())),
+            patch(
+                "arbitrage_bot.worker._recover_active_stale_pairs",
+                new=AsyncMock(return_value=(set(), True, 0)),
+            ),
+            patch("arbitrage_bot.worker._run_database_cleanup_if_due", new=AsyncMock()),
+        ):
+            asyncio.run(_run_market_sync_cycle(AsyncMock(), self.state, ingestion, MatcherService()))
+
+        self.assertFalse(self.state.candidate_context_loaded)
+
+
     def test_market_sync_recovers_stale_pairs_after_successful_startup_sync(self):
         self.state.last_full_pair_rematch_completed_at = time.monotonic()
         self.state.candidate_context_loaded = True
