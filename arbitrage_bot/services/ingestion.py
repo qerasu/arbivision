@@ -282,6 +282,11 @@ class IngestionService:
         self._changed_market_ids_by_platform = self._empty_changed_market_ids()
         source_jobs = []
         successful_sources = []
+        complete_sources = []
+        source_adapters = {
+            "polymarket": self.polymarket,
+            "predict.fun": self.predict_fun,
+        }
         now = time.monotonic()
 
         if self._should_sync_source("polymarket", now):
@@ -329,11 +334,14 @@ class IngestionService:
             if synced:
                 successful_sources.append(source_name)
                 self._source_last_sync_completed_at[source_name] = time.monotonic()
+                if getattr(source_adapters[source_name], "last_fetch_complete", False):
+                    complete_sources.append(source_name)
 
         return self._build_sync_result(
             bool(successful_sources),
             attempted=bool(source_jobs),
             successful_sources=successful_sources,
+            complete_sources=complete_sources,
         )
 
 
@@ -361,11 +369,12 @@ class IngestionService:
         }
 
 
-    def _build_sync_result(self, synced, attempted=False, successful_sources=None):
+    def _build_sync_result(self, synced, attempted=False, successful_sources=None, complete_sources=None):
         return {
             "synced": bool(synced),
             "attempted": bool(attempted),
             "successful_sources": list(successful_sources or []),
+            "complete_sources": list(complete_sources or []),
             "changed_market_ids_by_platform": {
                 platform: set(market_ids)
                 for platform, market_ids in self._changed_market_ids_by_platform.items()

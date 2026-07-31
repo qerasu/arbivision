@@ -38,6 +38,7 @@ _EMPTY_PROBE_INTERVAL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 12, 60)
 _ALERT_BATCH_WINDOW_SECONDS = 0.25
 _FULL_PAIR_REMATCH_STATE_KEY = "worker:full_pair_rematch"
 _STALE_PAIR_RECOVERY_BATCH_SIZE = 1000
+_STALE_PAIR_RECOVERY_SOURCES = frozenset({"polymarket", "predict.fun"})
 
 
 @dataclass
@@ -55,6 +56,8 @@ class WorkerState:
     pair_cycle_offsets: dict = field(default_factory=dict)
     stale_pair_recovery_pending: bool = True
     stale_pair_recovery_ready: bool = False
+    stale_pair_recovery_sources: set = field(default_factory=set)
+    stale_pair_recovery_restart_pending: bool = False
     stale_pair_recovery_after_id: int = 0
 
 
@@ -334,9 +337,12 @@ async def _persist_full_pair_rematch_completion(db, state):
 
 async def _run_market_sync_cycle(db, state, ingestion, matcher):
     sync_result = await ingestion.sync_markets()
-    successful_sources = sync_result.get("successful_sources") if isinstance(sync_result, dict) else []
-    if successful_sources:
-        state.stale_pair_recovery_ready = True
+    complete_sources = sync_result.get("complete_sources") if isinstance(sync_result, dict) else []
+    if isinstance(complete_sources, (list, set, tuple)):
+        state.stale_pair_recovery_sources.update(complete_sources)
+    state.stale_pair_recovery_ready = _STALE_PAIR_RECOVERY_SOURCES.issubset(
+        state.stale_pair_recovery_sources
+    )
 
     if _should_run_full_pair_rematch(time.monotonic(), state):
         hot_pair_hashes, rematch_completed = await _upsert_market_pairs(
@@ -348,7 +354,12 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
         )
         _invalidate_candidate_context_cache(state)
         _queue_hot_pairs(state, hot_pair_hashes)
+        state.stale_pair_recovery_pending = not rematch_completed
+        state.stale_pair_recovery_restart_pending = False
+        state.stale_pair_recovery_after_id = 0
         if rematch_completed:
+            state.stale_pair_recovery_sources.clear()
+            state.stale_pair_recovery_ready = False
             await _persist_full_pair_rematch_completion(db, state)
         else:
             # ponytail: no persisted cursor; restart retries the full rematch
@@ -367,6 +378,8 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
                     state,
                 )
                 hot_pair_hashes.update(upserted_pair_hashes)
+                if state.stale_pair_recovery_pending and state.stale_pair_recovery_after_id:
+                    state.stale_pair_recovery_restart_pending = True
 
             should_recover_stale_pairs = (
                 state.stale_pair_recovery_ready
@@ -385,8 +398,16 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
                 )
                 recovered_pair_hashes, recovery_completed, next_pair_id = recovery_result
                 hot_pair_hashes.update(recovered_pair_hashes)
-                state.stale_pair_recovery_pending = not recovery_completed
-                state.stale_pair_recovery_after_id = 0 if recovery_completed else next_pair_id
+                if recovery_completed and state.stale_pair_recovery_restart_pending:
+                    state.stale_pair_recovery_restart_pending = False
+                    state.stale_pair_recovery_pending = True
+                    state.stale_pair_recovery_after_id = 0
+                else:
+                    state.stale_pair_recovery_pending = not recovery_completed
+                    state.stale_pair_recovery_after_id = 0 if recovery_completed else next_pair_id
+                    if recovery_completed:
+                        state.stale_pair_recovery_sources.clear()
+                        state.stale_pair_recovery_ready = False
         finally:
             if has_market_changes:
                 _invalidate_candidate_context_cache(state)
@@ -395,7 +416,8 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
             if not has_market_changes:
                 _invalidate_candidate_context_cache(state)
             _queue_hot_pairs(state, hot_pair_hashes)
-    await _run_database_cleanup_if_due(db, state)
+    if not state.stale_pair_recovery_pending:
+        await _run_database_cleanup_if_due(db, state)
 
 
 def _extract_changed_market_ids_by_platform(sync_result):

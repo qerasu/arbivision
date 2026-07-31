@@ -225,6 +225,29 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.predict_fun.fetch_markets.await_count, 1)
 
 
+    async def test_sync_markets_reports_only_complete_sources_for_recovery(self):
+        class FakeDbSession:
+            async def commit(self):
+                pass
+
+
+            async def rollback(self):
+                pass
+
+        service = IngestionService(db_session=FakeDbSession())
+        service.polymarket.iter_market_pages = MagicMock(return_value=object())
+        service.predict_fun.fetch_markets = AsyncMock(return_value=[])
+        service._sync_source_pages = AsyncMock(return_value=True)
+        service._sync_source = AsyncMock(return_value=True)
+        service.polymarket.last_fetch_complete = False
+        service.predict_fun.last_fetch_complete = True
+
+        result = await service.sync_markets()
+
+        self.assertEqual(set(result["successful_sources"]), {"polymarket", "predict.fun"})
+        self.assertEqual(result["complete_sources"], ["predict.fun"])
+
+
     async def test_sync_markets_uses_separate_sessions_for_concurrent_sources(self):
         created_sessions = []
         used_sessions = []
