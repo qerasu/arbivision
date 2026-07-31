@@ -833,6 +833,40 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         self.system_error_patcher.stop()
 
 
+    async def test_existing_pairs_defer_full_startup_rematch(self):
+        class FakeResult:
+            def scalar_one_or_none(self):
+                return 1
+
+
+        db = SimpleNamespace(execute=AsyncMock(return_value=FakeResult()))
+
+        with patch(
+            "arbitrage_bot.worker.time.monotonic",
+            return_value=42.0,
+        ):
+            resumed = await worker_module._resume_periodic_work_from_existing_pairs(
+                db,
+                self.state,
+            )
+
+        self.assertTrue(resumed)
+        self.assertEqual(self.state.last_full_pair_rematch_completed_at, 42.0)
+
+
+    async def test_empty_database_keeps_full_startup_scans_due(self):
+        result = SimpleNamespace(scalar_one_or_none=Mock(return_value=None))
+        db = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+        resumed = await worker_module._resume_periodic_work_from_existing_pairs(
+            db,
+            self.state,
+        )
+
+        self.assertFalse(resumed)
+        self.assertIsNone(self.state.last_full_pair_rematch_completed_at)
+
+
     async def test_run_sync_loop_checks_candidates_while_market_sync_is_running(self):
         sync_started = asyncio.Event()
         candidate_started = asyncio.Event()

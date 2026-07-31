@@ -53,6 +53,11 @@ class IngestionService:
         "resolve_date",
         "resolutionDate",
         "resolution_date",
+        "url",
+        "marketUrl",
+        "market_url",
+        "shareUrl",
+        "share_url",
     )
 
     def __init__(self, db_session, session_factory=None):
@@ -268,7 +273,7 @@ class IngestionService:
                         ),
                         self._map_polymarket_market,
                         self.polymarket,
-                        skip_unchanged=not polymarket_full_sync,
+                        skip_unchanged=True,
                     ),
                 )
             )
@@ -668,9 +673,14 @@ class IngestionService:
             Market.normalized_title.is_distinct_from(excluded.normalized_title),
             Market.description.is_distinct_from(excluded.description),
             cast(Market.outcomes_json, Text).is_distinct_from(cast(excluded.outcomes_json, Text)),
-            cast(Market.raw_payload_json, Text).is_distinct_from(cast(excluded.raw_payload_json, Text)),
             Market.category.is_distinct_from(excluded.category),
             Market.slug.is_distinct_from(excluded.slug),
+            *(
+                cast(Market.raw_payload_json[field_name], Text).is_distinct_from(
+                    cast(excluded.raw_payload_json[field_name], Text)
+                )
+                for field_name in self.MARKET_DEFINITION_RAW_FIELDS
+            ),
         )
         stmt = insert_stmt.on_conflict_do_update(
             index_elements=[Market.platform, Market.platform_market_id],

@@ -262,6 +262,15 @@ async def _run_candidate_cycle(db, state, orderbook_service, calculator, alert_m
 async def _run_market_sync_loop(state, ingestion, matcher):
     while True:
         try:
+            if state.last_full_pair_rematch_completed_at is None:
+                async with AsyncSessionLocal() as session:
+                    resumed = await _resume_periodic_work_from_existing_pairs(
+                        session,
+                        state,
+                    )
+                if resumed:
+                    log.info("existing pairs found, deferring full startup rematch")
+
             async with AsyncSessionLocal() as session:
                 await _run_market_sync_cycle(session, state, ingestion, matcher)
         except asyncio.CancelledError:
@@ -276,6 +285,22 @@ async def _run_market_sync_loop(state, ingestion, matcher):
             await send_system_error_notification("worker", "market sync loop", e)
 
         await asyncio.sleep(settings.MARKET_REFRESH_SECONDS)
+
+
+async def _resume_periodic_work_from_existing_pairs(db, state):
+    stmt = (
+        select(MarketPair.id)
+        .where(MarketPair.status.in_(["auto_approved", "approved"]))
+        .limit(1)
+    )
+    existing_pair_id = (await db.execute(stmt)).scalar_one_or_none()
+    if existing_pair_id is None:
+        return False
+
+    # ponytail: frequent restarts can postpone full rematches;
+    # persist schedules if deployments become continuous
+    _mark_full_pair_rematch_completed(state)
+    return True
 
 
 async def _run_market_sync_cycle(db, state, ingestion, matcher):

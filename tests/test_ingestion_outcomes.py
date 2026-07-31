@@ -335,6 +335,12 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         second_call = service.polymarket.iter_market_pages.call_args_list[1]
         self.assertIsNone(first_call.kwargs["max_pages"])
         self.assertEqual(second_call.kwargs["max_pages"], 7)
+        self.assertTrue(
+            service._sync_source_pages.await_args_list[0].kwargs["skip_unchanged"]
+        )
+        self.assertTrue(
+            service._sync_source_pages.await_args_list[1].kwargs["skip_unchanged"]
+        )
 
 
     async def test_sync_markets_waits_before_retrying_incomplete_full_polymarket_sync(self):
@@ -730,10 +736,12 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         class FakeDbSession:
             async def execute(self, stmt):
+                self.stmt = stmt
                 return FakeResult()
 
 
-        service = IngestionService(db_session=FakeDbSession())
+        db = FakeDbSession()
+        service = IngestionService(db_session=db)
 
         changed_ids = await service._upsert_markets_postgresql(
             [
@@ -746,14 +754,26 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     "normalized_title": "title",
                     "description": "",
                     "outcomes_json": [],
-                    "raw_payload_json": {"id": "100"},
+                    "raw_payload_json": {
+                        "conditionId": "condition-100",
+                        "marketUrl": "/market/100",
+                        "volume": "10",
+                    },
                     "category": "",
                     "slug": "",
                 }
             ]
         )
 
+        string_params = {
+            value
+            for value in db.stmt.compile().params.values()
+            if isinstance(value, str)
+        }
         self.assertEqual(changed_ids, set())
+        self.assertIn("conditionId", string_params)
+        self.assertIn("marketUrl", string_params)
+        self.assertNotIn("volume", string_params)
 
 
     async def test_sync_source_partial_empty_payload_does_not_count_as_success(self):
