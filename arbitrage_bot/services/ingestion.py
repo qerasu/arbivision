@@ -577,7 +577,11 @@ class IngestionService:
                     )
                     return True
                 if not fetched_market_rows:
-                    return True
+                    log.warning(
+                        "complete sync returned no market rows, rejecting empty snapshot",
+                        source=source_name,
+                    )
+                    return False
                 stale_market_ids = await self._mark_missing_markets_closed(
                     platform,
                     set(),

@@ -791,7 +791,7 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service._changed_market_ids_by_platform["polymarket"], {101})
 
 
-    async def test_sync_source_with_empty_payload_skips_mass_closing_markets(self):
+    async def test_sync_source_with_empty_complete_payload_rejects_snapshot(self):
         class FakeDbSession:
             def __init__(self):
                 self.commit_calls = 0
@@ -812,7 +812,7 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         synced = await service._sync_source("predict.fun", [], service._map_predict_fun_market)
 
-        self.assertTrue(synced)
+        self.assertFalse(synced)
         service._upsert_markets.assert_not_awaited()
         service._mark_missing_markets_closed.assert_not_awaited()
         self.assertEqual(

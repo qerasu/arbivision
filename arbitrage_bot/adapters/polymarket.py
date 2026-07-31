@@ -90,7 +90,7 @@ class PolymarketAdapter(BaseAdapter):
                 next_cursor = payload.get("next_cursor") if isinstance(payload, dict) else None
 
                 if items is None:
-                    had_failures = yielded_items
+                    had_failures = True
                     break
                 if not items:
                     break
