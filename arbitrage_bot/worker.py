@@ -228,6 +228,7 @@ async def _run_cycle(db, state, ingestion, matcher, orderbook_service, calculato
 
 
 async def _run_candidate_cycle(db, state, orderbook_service, calculator, alert_manager, fanout_manager, retry_queue=None):
+    cycle_started_at = time.monotonic()
     cycle_stats = await _process_candidates(
         db,
         orderbook_service,
@@ -245,6 +246,10 @@ async def _run_candidate_cycle(db, state, orderbook_service, calculator, alert_m
         skipped_pairs=cycle_stats["skipped_pairs"],
         opportunities=cycle_stats["opportunities"],
         deliverable_opportunities=cycle_stats["deliverable_opportunities"],
+        duration_ms=max(0, int((time.monotonic() - cycle_started_at) * 1000)),
+        setup_ms=cycle_stats.get("setup_ms", 0),
+        orderbook_fetch_ms=cycle_stats.get("orderbook_fetch_ms", 0),
+        pair_processing_ms=cycle_stats.get("pair_processing_ms", 0),
     )
     await record_worker_cycle(
         active_pairs=cycle_stats["active_pairs"],
@@ -540,14 +545,26 @@ async def _upsert_market_pairs(db, matcher, changed_market_ids_by_platform, stat
 
 
 async def _load_active_markets(db, platform, market_ids=None):
-    stmt = select(Market).where(
-        and_(Market.platform == platform, Market.status == "active")
+    filters = (
+        Market.platform == platform,
+        Market.status == "active",
     )
-    if market_ids is not None:
-        if not market_ids:
-            return []
-        stmt = stmt.where(Market.id.in_(market_ids))
-    return (await db.execute(stmt)).scalars().all()
+    if market_ids is None:
+        stmt = select(Market).where(*filters)
+        return (await db.execute(stmt)).scalars().all()
+    if not market_ids:
+        return []
+
+    market_id_list = list(market_ids)
+    markets = []
+    batch_size = 10000
+    for offset in range(0, len(market_id_list), batch_size):
+        stmt = select(Market).where(
+            *filters,
+            Market.id.in_(market_id_list[offset:offset + batch_size]),
+        )
+        markets.extend((await db.execute(stmt)).scalars().all())
+    return markets
 
 
 async def _iter_active_market_batches(db, platform, batch_size=500):
@@ -760,9 +777,11 @@ def _record_timing(metric_name, started_at):
     elapsed_ms = max(0, int((time.monotonic() - started_at) * 1000))
     incr_counter(f"{metric_name}_ms_total", elapsed_ms)
     incr_counter(f"{metric_name}_count")
+    return elapsed_ms
 
 
 async def _process_candidates(db, orderbook_service, calculator, alert_manager, fanout_manager, state, retry_queue=None):
+    setup_started_at = time.monotonic()
     pairs, market_map = await _load_candidate_context(db, state)
     if not pairs:
         return {
@@ -798,6 +817,7 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
     consume_updates = getattr(orderbook_service, "consume_pair_updates", None)
     if consume_updates is not None:
         consume_updates(active_pairs)
+    setup_ms = max(0, int((time.monotonic() - setup_started_at) * 1000))
     orderbook_started_at = time.monotonic()
     try:
         orderbooks_data = await orderbook_service.fetch_orderbooks_for_pairs(
@@ -810,7 +830,8 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         incr_counter("worker.orderbook_batch_failed")
         await send_system_error_notification("worker", "fetch orderbooks batch", e)
         orderbooks_data = []
-    _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
+    orderbook_fetch_ms = _record_timing("worker.timing.orderbook_fetch", orderbook_started_at)
+    pair_processing_started_at = time.monotonic()
     state_opportunities = []
     for item in orderbooks_data:
         if item.get("pair") is None:
@@ -922,6 +943,7 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         if result.get("processing_failed")
     }
     await _update_empty_counts(active_pairs, pairs_without_empty_evidence, state)
+    pair_processing_ms = max(0, int((time.monotonic() - pair_processing_started_at) * 1000))
 
     return {
         "approved_pairs": len(pairs),
@@ -930,6 +952,9 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
         "skipped_pairs": max(0, len(active_pairs) - len(pairs_with_data)),
         "opportunities": sum(result["opportunities"] for result in pair_results),
         "deliverable_opportunities": sum(result["deliverable_opportunities"] for result in pair_results),
+        "setup_ms": setup_ms,
+        "orderbook_fetch_ms": orderbook_fetch_ms,
+        "pair_processing_ms": pair_processing_ms,
     }
 
 
