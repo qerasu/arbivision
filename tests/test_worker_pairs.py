@@ -66,13 +66,14 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.state.candidate_context_loaded = True
         ingestion = SimpleNamespace(sync_markets=AsyncMock(return_value={}))
 
-        async def upsert_pairs(*_args):
+        async def upsert_pairs(*_args, **_kwargs):
             self.assertTrue(self.state.candidate_context_loaded)
-            return set()
+            return set(), True
 
         with (
             patch("arbitrage_bot.worker._upsert_market_pairs", side_effect=upsert_pairs),
             patch("arbitrage_bot.worker._run_database_cleanup_if_due", new=AsyncMock()),
+            patch("arbitrage_bot.worker._persist_full_pair_rematch_completion", new=AsyncMock()),
         ):
             asyncio.run(_run_market_sync_cycle(AsyncMock(), self.state, ingestion, MatcherService()))
 
@@ -833,38 +834,124 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         self.system_error_patcher.stop()
 
 
-    async def test_existing_pairs_defer_full_startup_rematch(self):
-        class FakeResult:
-            def scalar_one_or_none(self):
-                return 1
+    async def test_recent_persisted_rematch_defers_startup_rematch(self):
+        setting = SimpleNamespace(value_json={"completed_at": 100.0})
+        result = SimpleNamespace(scalars=Mock(return_value=SimpleNamespace(first=Mock(return_value=setting))))
+        db = SimpleNamespace(execute=AsyncMock(return_value=result))
 
-
-        db = SimpleNamespace(execute=AsyncMock(return_value=FakeResult()))
-
-        with patch(
-            "arbitrage_bot.worker.time.monotonic",
-            return_value=42.0,
-        ):
-            resumed = await worker_module._resume_periodic_work_from_existing_pairs(
+        with patch("arbitrage_bot.worker.time.time", return_value=105.0), patch(
+            "arbitrage_bot.worker.time.monotonic", return_value=205.0,
+        ), patch.object(worker_module.settings, "MATCHER_FULL_REMATCH_INTERVAL_SECONDS", 10.0):
+            resumed = await worker_module._restore_full_pair_rematch_schedule(
                 db,
                 self.state,
             )
 
         self.assertTrue(resumed)
-        self.assertEqual(self.state.last_full_pair_rematch_completed_at, 42.0)
+        self.assertEqual(self.state.last_full_pair_rematch_completed_at, 200.0)
 
 
-    async def test_empty_database_keeps_full_startup_scans_due(self):
-        result = SimpleNamespace(scalar_one_or_none=Mock(return_value=None))
+    async def test_stale_persisted_rematch_keeps_startup_rematch_due(self):
+        setting = SimpleNamespace(value_json={"completed_at": 90.0})
+        result = SimpleNamespace(scalars=Mock(return_value=SimpleNamespace(first=Mock(return_value=setting))))
         db = SimpleNamespace(execute=AsyncMock(return_value=result))
 
-        resumed = await worker_module._resume_periodic_work_from_existing_pairs(
-            db,
-            self.state,
-        )
+        with patch("arbitrage_bot.worker.time.time", return_value=105.0), patch.object(
+            worker_module.settings, "MATCHER_FULL_REMATCH_INTERVAL_SECONDS", 10.0,
+        ):
+            resumed = await worker_module._restore_full_pair_rematch_schedule(db, self.state)
 
         self.assertFalse(resumed)
         self.assertIsNone(self.state.last_full_pair_rematch_completed_at)
+
+
+    async def test_future_persisted_rematch_keeps_startup_rematch_due(self):
+        setting = SimpleNamespace(value_json={"completed_at": 106.0})
+        result = SimpleNamespace(scalars=Mock(return_value=SimpleNamespace(first=Mock(return_value=setting))))
+        db = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+        with patch("arbitrage_bot.worker.time.time", return_value=105.0):
+            resumed = await worker_module._restore_full_pair_rematch_schedule(db, self.state)
+
+        self.assertFalse(resumed)
+        self.assertIsNone(self.state.last_full_pair_rematch_completed_at)
+
+
+    async def test_invalid_persisted_rematch_keeps_startup_rematch_due(self):
+        setting = SimpleNamespace(value_json={"completed_at": "nan"})
+        result = SimpleNamespace(scalars=Mock(return_value=SimpleNamespace(first=Mock(return_value=setting))))
+        db = SimpleNamespace(execute=AsyncMock(return_value=result))
+
+        with patch("arbitrage_bot.worker.time.time", return_value=105.0):
+            resumed = await worker_module._restore_full_pair_rematch_schedule(db, self.state)
+
+        self.assertFalse(resumed)
+        self.assertIsNone(self.state.last_full_pair_rematch_completed_at)
+
+
+    async def test_persist_full_rematch_marks_state_only_after_commit(self):
+        added = []
+        db = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    scalars=Mock(return_value=SimpleNamespace(first=Mock(return_value=None)))
+                )
+            ),
+            add=added.append,
+            commit=AsyncMock(),
+        )
+
+        with patch("arbitrage_bot.worker.time.time", return_value=100.0), patch(
+            "arbitrage_bot.worker.time.monotonic", return_value=200.0,
+        ):
+            await worker_module._persist_full_pair_rematch_completion(db, self.state)
+
+        db.commit.assert_awaited_once()
+        self.assertEqual(added[0].key, "worker:full_pair_rematch")
+        self.assertEqual(added[0].value_json, {"completed_at": 100.0})
+        self.assertEqual(self.state.last_full_pair_rematch_completed_at, 200.0)
+
+
+    async def test_failed_marker_commit_keeps_full_rematch_due(self):
+        db = SimpleNamespace(
+            execute=AsyncMock(
+                return_value=SimpleNamespace(
+                    scalars=Mock(return_value=SimpleNamespace(first=Mock(return_value=None)))
+                )
+            ),
+            add=Mock(),
+            commit=AsyncMock(side_effect=RuntimeError("database unavailable")),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            await worker_module._persist_full_pair_rematch_completion(db, self.state)
+
+        self.assertIsNone(self.state.last_full_pair_rematch_completed_at)
+
+
+    async def test_limited_full_rematch_is_not_persisted(self):
+        ingestion = SimpleNamespace(sync_markets=AsyncMock(return_value={}))
+        persist = AsyncMock()
+
+        with patch(
+            "arbitrage_bot.worker._upsert_market_pairs",
+            new=AsyncMock(return_value=(set(), False)),
+        ), patch(
+            "arbitrage_bot.worker._persist_full_pair_rematch_completion",
+            new=persist,
+        ), patch(
+            "arbitrage_bot.worker._run_database_cleanup_if_due",
+            new=AsyncMock(),
+        ):
+            await worker_module._run_market_sync_cycle(
+                SimpleNamespace(),
+                self.state,
+                ingestion,
+                SimpleNamespace(),
+            )
+
+        persist.assert_not_awaited()
+        self.assertIsNotNone(self.state.last_full_pair_rematch_completed_at)
 
 
     async def test_run_sync_loop_checks_candidates_while_market_sync_is_running(self):
@@ -1032,7 +1119,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "arbitrage_bot.worker._upsert_market_pairs",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=(set(), True)),
         ) as upsert_mock, patch(
             "arbitrage_bot.worker._process_candidates",
             new=AsyncMock(
@@ -1067,7 +1154,7 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "arbitrage_bot.worker._upsert_market_pairs",
-            new=AsyncMock(),
+            new=AsyncMock(return_value=(set(), True)),
         ) as upsert_mock, patch(
             "arbitrage_bot.worker._process_candidates",
             new=AsyncMock(
@@ -1083,6 +1170,9 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "arbitrage_bot.worker._should_run_full_pair_rematch",
             return_value=True,
+        ), patch(
+            "arbitrage_bot.worker._persist_full_pair_rematch_completion",
+            new=AsyncMock(),
         ):
             await _run_cycle(fake_db, self.state, ingestion, matcher, orderbook_service, calculator, alert_manager, fanout_manager)
 
