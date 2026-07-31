@@ -404,6 +404,8 @@ class OrderbookStream:
         for change in message.get("price_changes") or []:
             if not isinstance(change, dict):
                 continue
+            if str(change.get("side") or "").upper() != "SELL":
+                continue
             token_id = str(change.get("asset_id") or "")
             if not token_id:
                 continue

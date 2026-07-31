@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import time
 from contextvars import ContextVar
@@ -23,6 +24,36 @@ log = get_logger("ingestion")
 class IngestionService:
 
     UPSERT_LOOKUP_BATCH_SIZE = 500
+    MARKET_DEFINITION_RAW_FIELDS = (
+        "conditionId",
+        "polymarketConditionIds",
+        "title",
+        "name",
+        "groupItemTitle",
+        "question",
+        "description",
+        "category",
+        "subcategory",
+        "endDate",
+        "end_date",
+        "endTime",
+        "end_time",
+        "closeDate",
+        "close_date",
+        "closeTime",
+        "close_time",
+        "closedTime",
+        "closed_time",
+        "expiration",
+        "expirationTime",
+        "expiration_time",
+        "expiresAt",
+        "expires_at",
+        "resolveDate",
+        "resolve_date",
+        "resolutionDate",
+        "resolution_date",
+    )
 
     def __init__(self, db_session, session_factory=None):
         self.db = db_session
@@ -34,6 +65,7 @@ class IngestionService:
         self._changed_market_ids_by_platform = self._empty_changed_market_ids()
         self._source_last_sync_completed_at = {}
         self._source_last_full_sync_attempted_at = {}
+        self._market_definition_fingerprints = {}
 
 
     async def close(self):
@@ -236,6 +268,7 @@ class IngestionService:
                         ),
                         self._map_polymarket_market,
                         self.polymarket,
+                        skip_unchanged=not polymarket_full_sync,
                     ),
                 )
             )
@@ -368,7 +401,14 @@ class IngestionService:
         return await self._sync_source_pages(source_name, pages(), mapper, adapter)
 
 
-    async def _sync_source_pages(self, source_name, pages, mapper, adapter=None):
+    async def _sync_source_pages(
+        self,
+        source_name,
+        pages,
+        mapper,
+        adapter=None,
+        skip_unchanged=False,
+    ):
         db = self._current_db()
         try:
             platform = self._source_platform_name(source_name)
@@ -379,9 +419,10 @@ class IngestionService:
             duplicate_market_ids = set()
             sample_market_ids = []
             pending_items = []
+            unchanged_count = 0
 
             async def upsert_pending_items(raw_chunk):
-                nonlocal duplicate_count, platform
+                nonlocal duplicate_count, platform, unchanged_count
 
                 mapped_items = [mapper(item) for item in raw_chunk if isinstance(item, dict)]
                 mapped_items, chunk_duplicate_count, chunk_duplicate_metadata = self._dedupe_market_items(mapped_items)
@@ -409,8 +450,20 @@ class IngestionService:
                 if not unique_items:
                     return
 
-                batch_changed_market_ids = await self._upsert_markets(unique_items)
+                items_to_upsert, fingerprints = self._filter_unchanged_market_items(
+                    platform,
+                    unique_items,
+                    skip_unchanged=skip_unchanged,
+                )
+                unchanged_count += len(unique_items) - len(items_to_upsert)
+                if not items_to_upsert:
+                    return
+
+                batch_changed_market_ids = await self._upsert_markets(items_to_upsert)
                 await db.commit()
+                self._market_definition_fingerprints.setdefault(platform, {}).update(
+                    fingerprints
+                )
                 changed_market_ids.update(batch_changed_market_ids)
                 self._changed_market_ids_by_platform.setdefault(platform, set()).update(
                     batch_changed_market_ids
@@ -441,6 +494,12 @@ class IngestionService:
                 await record_duplicate_markets(source_name, duplicate_count)
             else:
                 await record_duplicate_markets(source_name, 0)
+            if unchanged_count:
+                log.info(
+                    "unchanged markets skipped before upsert",
+                    source=source_name,
+                    skipped_markets=unchanged_count,
+                )
             if not seen_market_keys:
                 self._changed_market_ids_by_platform.setdefault(platform, set())
                 if is_partial:
@@ -475,6 +534,15 @@ class IngestionService:
                     seen_market_ids,
                 )
                 await db.commit()
+                cached_fingerprints = self._market_definition_fingerprints.get(
+                    platform,
+                    {},
+                )
+                self._market_definition_fingerprints[platform] = {
+                    market_id: fingerprint
+                    for market_id, fingerprint in cached_fingerprints.items()
+                    if market_id in seen_market_ids
+                }
                 changed_market_ids.update(stale_market_ids)
                 self._changed_market_ids_by_platform.setdefault(platform, set()).update(
                     stale_market_ids
@@ -490,6 +558,60 @@ class IngestionService:
                     await send_system_error_notification(source_name, "markets sync", e)
             await db.rollback()
             return False
+
+
+    def _filter_unchanged_market_items(
+        self,
+        platform,
+        items,
+        skip_unchanged,
+    ):
+        cached_fingerprints = self._market_definition_fingerprints.setdefault(
+            platform,
+            {},
+        )
+        pending_items = []
+        fingerprints = {}
+
+        for item in items:
+            market_id = str(item["platform_market_id"])
+            fingerprint = self._market_definition_fingerprint(item)
+            if skip_unchanged and cached_fingerprints.get(market_id) == fingerprint:
+                continue
+            pending_items.append(item)
+            fingerprints[market_id] = fingerprint
+
+        return pending_items, fingerprints
+
+
+    def _market_definition_fingerprint(self, item):
+        raw_payload = item.get("raw_payload_json")
+        if not isinstance(raw_payload, dict):
+            raw_payload = {}
+        relevant_raw_payload = {
+            field_name: raw_payload[field_name]
+            for field_name in self.MARKET_DEFINITION_RAW_FIELDS
+            if field_name in raw_payload
+        }
+        definition = {
+            "status": item.get("status"),
+            "tradable": item.get("tradable"),
+            "title": item.get("title"),
+            "normalized_title": item.get("normalized_title"),
+            "description": item.get("description"),
+            "outcomes_json": item.get("outcomes_json"),
+            "category": item.get("category"),
+            "slug": item.get("slug"),
+            "raw_payload_json": relevant_raw_payload,
+        }
+        encoded = json.dumps(
+            definition,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+        return hashlib.blake2b(encoded, digest_size=16).digest()
 
 
     def _dedupe_market_items(self, items):

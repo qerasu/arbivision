@@ -68,6 +68,8 @@ class PolymarketAdapter(BaseAdapter):
                     "limit": self.page_limit,
                     "active": "true",
                     "closed": "false",
+                    "order": "updatedAt",
+                    "ascending": False,
                 }
                 if cursor:
                     params["after_cursor"] = cursor

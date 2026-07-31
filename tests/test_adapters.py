@@ -26,6 +26,9 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(result), 101)
         self.assertEqual(adapter._get_json.await_count, 2)
+        first_params = adapter._get_json.await_args_list[0].kwargs["params"]
+        self.assertEqual(first_params["order"], "updatedAt")
+        self.assertFalse(first_params["ascending"])
         self.assertEqual(
             adapter._get_json.await_args_list[1].kwargs["params"]["after_cursor"],
             "cursor-100",
