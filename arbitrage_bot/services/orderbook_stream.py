@@ -425,20 +425,34 @@ class OrderbookStream:
         if price_key is None or size is None:
             return
 
-        levels = {
-            self._price_key(level.get("price")): dict(level)
-            for level in book.get(side_key) or []
-            if isinstance(level, dict) and self._price_key(level.get("price")) is not None
-        }
+        levels = book.get(side_key)
+        if not isinstance(levels, list):
+            levels = []
+            book[side_key] = levels
         try:
             is_empty = float(size) == 0.0
         except (TypeError, ValueError):
             return
+
+        matching_indexes = [
+            index
+            for index, level in enumerate(levels)
+            if isinstance(level, dict)
+            and self._price_key(level.get("price")) == price_key
+        ]
         if is_empty:
-            levels.pop(price_key, None)
-        else:
-            levels[price_key] = {"price": str(price), "size": str(size)}
-        book[side_key] = list(levels.values())
+            for index in reversed(matching_indexes):
+                levels.pop(index)
+            return
+
+        updated_level = {"price": str(price), "size": str(size)}
+        if not matching_indexes:
+            levels.append(updated_level)
+            return
+
+        levels[matching_indexes[0]] = updated_level
+        for index in reversed(matching_indexes[1:]):
+            levels.pop(index)
 
 
     def _price_key(self, value):

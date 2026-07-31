@@ -44,6 +44,19 @@ class OrderbookStreamTests(unittest.IsolatedAsyncioTestCase):
             "asks": [{"price": "0.40", "size": "2"}],
             "bids": [],
         })
+        asks = stream.polymarket_books["poly-yes"]["asks"]
+        stream._handle_polymarket_message({
+            "event_type": "price_change",
+            "price_changes": [{
+                "asset_id": "poly-yes",
+                "price": "0.4",
+                "size": "3",
+                "side": "SELL",
+            }],
+        })
+        self.assertIs(stream.polymarket_books["poly-yes"]["asks"], asks)
+        self.assertEqual(asks, [{"price": "0.4", "size": "3"}])
+
         stream._handle_polymarket_message({
             "event_type": "price_change",
             "price_changes": [{
@@ -54,6 +67,7 @@ class OrderbookStreamTests(unittest.IsolatedAsyncioTestCase):
             }],
         })
 
+        self.assertIs(stream.polymarket_books["poly-yes"]["asks"], asks)
         self.assertEqual(stream.polymarket_books["poly-yes"]["asks"], [])
         self.assertEqual(stream.dirty_pair_hashes, {"pair-1"})
 
