@@ -26,6 +26,9 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(result), 101)
         self.assertEqual(adapter._get_json.await_count, 2)
+        first_params = adapter._get_json.await_args_list[0].kwargs["params"]
+        self.assertNotIn("order", first_params)
+        self.assertNotIn("ascending", first_params)
         self.assertEqual(
             adapter._get_json.await_args_list[1].kwargs["params"]["after_cursor"],
             "cursor-100",
@@ -123,6 +126,9 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(adapter.last_fetch_partial)
         self.assertFalse(adapter.last_fetch_complete)
         self.assertEqual(adapter._get_json.await_count, 1)
+        params = adapter._get_json.await_args.kwargs["params"]
+        self.assertEqual(params["order"], "updatedAt")
+        self.assertFalse(params["ascending"])
 
 
     async def test_get_json_uses_curl_fallback_for_remote_protocol_error(self):

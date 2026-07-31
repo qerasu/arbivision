@@ -69,6 +69,9 @@ class PolymarketAdapter(BaseAdapter):
                     "active": "true",
                     "closed": "false",
                 }
+                if max_pages is not None:
+                    params["order"] = "updatedAt"
+                    params["ascending"] = False
                 if cursor:
                     params["after_cursor"] = cursor
 

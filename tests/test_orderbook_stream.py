@@ -72,6 +72,31 @@ class OrderbookStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream.dirty_pair_hashes, {"pair-1"})
 
 
+    def test_polymarket_bid_change_does_not_dirty_pair(self):
+        stream = OrderbookStream("key")
+        stream.polymarket_books["poly-yes"] = {
+            "asks": [{"price": "0.4", "size": "2"}],
+            "bids": [{"price": "0.3", "size": "4"}],
+        }
+        stream._polymarket_pairs["poly-yes"].add("pair-1")
+
+        stream._handle_polymarket_message({
+            "event_type": "price_change",
+            "price_changes": [{
+                "asset_id": "poly-yes",
+                "price": "0.3",
+                "size": "5",
+                "side": "BUY",
+            }],
+        })
+
+        self.assertEqual(
+            stream.polymarket_books["poly-yes"]["bids"],
+            [{"price": "0.3", "size": "4"}],
+        )
+        self.assertEqual(stream.dirty_pair_hashes, set())
+
+
     def test_service_skips_clean_pairs_after_stream_initialization(self):
         service = OrderbookService()
         stream = OrderbookStream("key")

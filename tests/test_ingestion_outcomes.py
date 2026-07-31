@@ -533,6 +533,71 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service._changed_market_ids_by_platform["polymarket"], {101})
 
 
+    async def test_incremental_sync_skips_dynamic_only_market_changes(self):
+        class FakeDbSession:
+            def __init__(self):
+                self.commit_calls = 0
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+            async def rollback(self):
+                pass
+
+
+        async def page(payload):
+            yield [payload]
+
+
+        db = FakeDbSession()
+        service = IngestionService(db_session=db)
+        service._upsert_markets = AsyncMock(return_value={101})
+        adapter = SimpleNamespace(last_fetch_partial=False, last_fetch_complete=False)
+        initial = {
+            "id": "100",
+            "question": "Will it happen?",
+            "active": True,
+            "closed": False,
+            "updatedAt": "2026-07-31T07:00:00Z",
+            "volume": "10",
+        }
+
+        await service._sync_source_pages(
+            "polymarket",
+            page(initial),
+            service._map_polymarket_market,
+            adapter,
+        )
+        await service._sync_source_pages(
+            "polymarket",
+            page({
+                **initial,
+                "updatedAt": "2026-07-31T07:01:00Z",
+                "volume": "20",
+            }),
+            service._map_polymarket_market,
+            adapter,
+            skip_unchanged=True,
+        )
+        await service._sync_source_pages(
+            "polymarket",
+            page({
+                **initial,
+                "question": "Will it definitely happen?",
+                "updatedAt": "2026-07-31T07:02:00Z",
+                "volume": "30",
+            }),
+            service._map_polymarket_market,
+            adapter,
+            skip_unchanged=True,
+        )
+
+        self.assertEqual(service._upsert_markets.await_count, 2)
+        self.assertEqual(db.commit_calls, 2)
+
+
     async def test_sync_source_partial_payload_skips_stale_detection_and_returns_incomplete(self):
         class FakeDbSession:
             def __init__(self):
