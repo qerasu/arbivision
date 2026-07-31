@@ -791,6 +791,9 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
             "skipped_pairs": 0,
             "opportunities": 0,
             "deliverable_opportunities": 0,
+            "setup_ms": max(0, int((time.monotonic() - setup_started_at) * 1000)),
+            "orderbook_fetch_ms": 0,
+            "pair_processing_ms": 0,
         }
 
     active_pairs = await _filter_skippable_pairs(pairs, state)
@@ -811,6 +814,9 @@ async def _process_candidates(db, orderbook_service, calculator, alert_manager, 
             "skipped_pairs": len(pairs),
             "opportunities": 0,
             "deliverable_opportunities": 0,
+            "setup_ms": max(0, int((time.monotonic() - setup_started_at) * 1000)),
+            "orderbook_fetch_ms": 0,
+            "pair_processing_ms": 0,
         }
 
     delivery_targets = await fanout_manager.get_delivery_targets()
