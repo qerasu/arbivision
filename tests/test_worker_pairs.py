@@ -26,6 +26,42 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.state = WorkerState()
 
 
+    def test_load_active_markets_batches_large_id_sets(self):
+        class FakeResult:
+            def scalars(self):
+                return self
+
+
+            def all(self):
+                return []
+
+        statements = []
+
+        async def execute(stmt):
+            statements.append(stmt)
+            return FakeResult()
+
+        db = SimpleNamespace(execute=execute)
+
+        result = asyncio.run(
+            worker_module._load_active_markets(
+                db,
+                "polymarket",
+                range(10001),
+            )
+        )
+
+        self.assertEqual(result, [])
+        self.assertEqual(len(statements), 2)
+        batch_lengths = sorted(
+            len(value)
+            for stmt in statements
+            for value in stmt.compile().params.values()
+            if isinstance(value, list)
+        )
+        self.assertEqual(batch_lengths, [1, 10000])
+
+
     def test_market_sync_invalidates_candidate_cache_after_pair_upsert(self):
         self.state.candidate_context_loaded = True
         ingestion = SimpleNamespace(sync_markets=AsyncMock(return_value={}))
@@ -1366,6 +1402,9 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             result = await _process_candidates(fake_db, orderbook_service, calculator, alert_manager, fanout_manager, self.state)
 
         self.assertEqual(result["opportunities"], 0)
+        self.assertGreaterEqual(result["setup_ms"], 0)
+        self.assertGreaterEqual(result["orderbook_fetch_ms"], 0)
+        self.assertGreaterEqual(result["pair_processing_ms"], 0)
         counters = snapshot_counters()
         self.assertEqual(counters["worker.active_pairs_loaded"], 1)
         self.assertEqual(counters["worker.pairs_with_orderbooks"], 1)
