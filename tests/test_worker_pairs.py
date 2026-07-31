@@ -1274,10 +1274,36 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("arbitrage_bot.worker._filter_skippable_pairs", new=AsyncMock(return_value=[])):
-            await _process_candidates(fake_db, orderbook_service, calculator, alert_manager, fanout_manager, self.state)
-            await _process_candidates(fake_db, orderbook_service, calculator, alert_manager, fanout_manager, self.state)
+            first = await _process_candidates(fake_db, orderbook_service, calculator, alert_manager, fanout_manager, self.state)
+            second = await _process_candidates(fake_db, orderbook_service, calculator, alert_manager, fanout_manager, self.state)
 
         self.assertEqual(fake_db.execute_calls, 2)
+        for result in (first, second):
+            self.assertIn("setup_ms", result)
+            self.assertEqual(result["orderbook_fetch_ms"], 0)
+            self.assertEqual(result["pair_processing_ms"], 0)
+
+
+    async def test_process_candidates_records_setup_timing_without_pairs(self):
+        with patch(
+            "arbitrage_bot.worker._load_candidate_context",
+            new=AsyncMock(return_value=([], {})),
+        ), patch(
+            "arbitrage_bot.worker.time.monotonic",
+            side_effect=[10.0, 10.5],
+        ):
+            result = await _process_candidates(
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                self.state,
+            )
+
+        self.assertEqual(result["setup_ms"], 500)
+        self.assertEqual(result["orderbook_fetch_ms"], 0)
+        self.assertEqual(result["pair_processing_ms"], 0)
 
 
     async def test_filter_skippable_pairs_probes_one_quarantined_pair(self):
