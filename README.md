@@ -125,19 +125,19 @@ Redis также хранит отметку о доставленном тек�
 Только API без фоновых циклов:
 
 ```bash
-APP_RUNTIME_MODE=api python -m uvicorn arbitrage_bot.main:app --reload
+APP_RUNTIME_MODE=api python3 -m uvicorn arbitrage_bot.main:app --reload
 ```
 
 API + worker:
 
 ```bash
-APP_RUNTIME_MODE=worker python -m uvicorn arbitrage_bot.main:app --reload
+APP_RUNTIME_MODE=worker python3 -m uvicorn arbitrage_bot.main:app --reload
 ```
 
 API + Telegram:
 
 ```bash
-APP_RUNTIME_MODE=telegram python -m uvicorn arbitrage_bot.main:app --reload
+APP_RUNTIME_MODE=telegram python3 -m uvicorn arbitrage_bot.main:app --reload
 ```
 
 ## Telegram-бот
@@ -197,13 +197,13 @@ Swagger, ReDoc и OpenAPI schema отключены. `GET /api/health` оста�
 Запуск:
 
 ```bash
-python utilities/run_tests.py
+python3 utilities/run_tests.py
 ```
 
 Для полного запуска тестов нужны переменные окружения (работает только при локально запущенном проекте и наличии хотя бы 1 записи в базе данных)
 
 ```bash
-RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python utilities/run_tests.py
+RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python3 utilities/run_tests.py
 ```
 
 ## Примечания

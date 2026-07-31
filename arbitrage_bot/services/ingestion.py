@@ -178,10 +178,38 @@ class IngestionService:
 
 
     def _map_polymarket_market(self, market):
+        market_id = market.get("id")
+        if market_id is None or not str(market_id).strip():
+            return None
+
         title = market.get("title") or market.get("question") or market.get("name") or ""
         active = market.get("active")
         closed = market.get("closed")
         tradable = market.get("tradable")
+        explicitly_closed = tradable is False or closed is True
+
+        if closed is True:
+            tradable = False
+        elif tradable is None:
+            tradable = bool(active) and not bool(closed)
+
+        if not tradable:
+            if not explicitly_closed:
+                return None
+            return {
+                "platform": "polymarket",
+                "platform_market_id": str(market_id),
+                "status": "closed",
+                "tradable": False,
+                "title": title,
+                "normalized_title": title.lower(),
+                "description": market.get("description") or market.get("details") or "",
+                "outcomes_json": [],
+                "raw_payload_json": dict(market),
+                "category": market.get("category") or market.get("groupItemTitle") or "",
+                "slug": market.get("slug") or market.get("ticker") or "",
+            }
+
         normalized_outcomes = self._normalize_outcomes(
             market.get("outcomes") or market.get("tokens") or []
         )
@@ -208,14 +236,11 @@ class IngestionService:
             if uses_fallback_index or not has_explicit_token_id:
                 normalized_outcome["id"] = clob_token_id
 
-        if tradable is None:
-            tradable = bool(active) and not bool(closed)
-
         return {
             "platform": "polymarket",
-            "platform_market_id": str(market.get("id")),
-            "status": "active" if tradable else "closed",
-            "tradable": bool(tradable),
+            "platform_market_id": str(market_id),
+            "status": "active",
+            "tradable": True,
             "title": title,
             "normalized_title": title.lower(),
             "description": market.get("description") or market.get("details") or "",
@@ -257,6 +282,11 @@ class IngestionService:
         self._changed_market_ids_by_platform = self._empty_changed_market_ids()
         source_jobs = []
         successful_sources = []
+        complete_sources = []
+        source_adapters = {
+            "polymarket": self.polymarket,
+            "predict.fun": self.predict_fun,
+        }
         now = time.monotonic()
 
         if self._should_sync_source("polymarket", now):
@@ -304,11 +334,14 @@ class IngestionService:
             if synced:
                 successful_sources.append(source_name)
                 self._source_last_sync_completed_at[source_name] = time.monotonic()
+                if getattr(source_adapters[source_name], "last_fetch_complete", False):
+                    complete_sources.append(source_name)
 
         return self._build_sync_result(
             bool(successful_sources),
             attempted=bool(source_jobs),
             successful_sources=successful_sources,
+            complete_sources=complete_sources,
         )
 
 
@@ -336,11 +369,12 @@ class IngestionService:
         }
 
 
-    def _build_sync_result(self, synced, attempted=False, successful_sources=None):
+    def _build_sync_result(self, synced, attempted=False, successful_sources=None, complete_sources=None):
         return {
             "synced": bool(synced),
             "attempted": bool(attempted),
             "successful_sources": list(successful_sources or []),
+            "complete_sources": list(complete_sources or []),
             "changed_market_ids_by_platform": {
                 platform: set(market_ids)
                 for platform, market_ids in self._changed_market_ids_by_platform.items()
@@ -425,11 +459,21 @@ class IngestionService:
             sample_market_ids = []
             pending_items = []
             unchanged_count = 0
+            fetched_market_rows = 0
+            rejected_market_rows = 0
 
             async def upsert_pending_items(raw_chunk):
-                nonlocal duplicate_count, platform, unchanged_count
+                nonlocal duplicate_count, platform, rejected_market_rows, unchanged_count
 
-                mapped_items = [mapper(item) for item in raw_chunk if isinstance(item, dict)]
+                mapped_items = []
+                for item in raw_chunk:
+                    if not isinstance(item, dict):
+                        continue
+                    mapped_item = mapper(item)
+                    if mapped_item is not None:
+                        mapped_items.append(mapped_item)
+                    else:
+                        rejected_market_rows += 1
                 mapped_items, chunk_duplicate_count, chunk_duplicate_metadata = self._dedupe_market_items(mapped_items)
                 duplicate_count += chunk_duplicate_count
                 duplicate_market_ids.update(chunk_duplicate_metadata["market_ids"])
@@ -477,6 +521,9 @@ class IngestionService:
             async for raw_items in pages:
                 if not isinstance(raw_items, list):
                     raw_items = list(raw_items or [])
+                fetched_market_rows += sum(
+                    isinstance(item, dict) for item in raw_items
+                )
                 pending_items.extend(raw_items)
                 while len(pending_items) >= self.UPSERT_LOOKUP_BATCH_SIZE:
                     raw_chunk = pending_items[:self.UPSERT_LOOKUP_BATCH_SIZE]
@@ -505,6 +552,14 @@ class IngestionService:
                     source=source_name,
                     skipped_markets=unchanged_count,
                 )
+            if rejected_market_rows:
+                log.warning(
+                    "sync completed with rejected market rows, skipping stale market detection",
+                    source=source_name,
+                    fetched_markets=fetched_market_rows,
+                    rejected_markets=rejected_market_rows,
+                )
+                return False
             if not seen_market_keys:
                 self._changed_market_ids_by_platform.setdefault(platform, set())
                 if is_partial:
@@ -520,6 +575,23 @@ class IngestionService:
                         source=source_name,
                         fetched_markets=0,
                     )
+                    return True
+                if not fetched_market_rows:
+                    log.warning(
+                        "complete sync returned no market rows, rejecting empty snapshot",
+                        source=source_name,
+                    )
+                    return False
+                stale_market_ids = await self._mark_missing_markets_closed(
+                    platform,
+                    set(),
+                )
+                await db.commit()
+                self._market_definition_fingerprints[platform] = {}
+                changed_market_ids.update(stale_market_ids)
+                self._changed_market_ids_by_platform.setdefault(platform, set()).update(
+                    stale_market_ids
+                )
                 return True
             if is_partial:
                 log.warning(

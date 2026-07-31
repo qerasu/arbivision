@@ -88,6 +88,17 @@ class PolymarketAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter._get_json.await_count, 2)
 
 
+    async def test_fetch_markets_marks_malformed_first_page_incomplete(self):
+        adapter = PolymarketAdapter()
+        adapter._get_json = AsyncMock(return_value={"unexpected": "response"})
+
+        result = await adapter.fetch_markets()
+
+        self.assertEqual(result, [])
+        self.assertTrue(adapter.last_fetch_partial)
+        self.assertFalse(adapter.last_fetch_complete)
+
+
     async def test_fetch_markets_stops_after_failed_page_and_marks_partial(self):
         adapter = PolymarketAdapter()
         adapter._get_json = AsyncMock(
