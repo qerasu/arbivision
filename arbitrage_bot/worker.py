@@ -581,7 +581,7 @@ async def _upsert_market_pairs(
                 break
 
     if full_rematch:
-        existing_pairs = await _load_active_pairs(db)
+        existing_pairs = await _load_existing_pairs(db)
     else:
         existing_pairs = await _load_pairs_for_market_ids(db, changed_market_ids)
     if reached_limit:
@@ -654,10 +654,8 @@ async def _iter_active_market_batches(db, platform, batch_size=500):
         last_market_id = markets[-1].id
 
 
-async def _load_active_pairs(db):
-    stmt = select(MarketPair).where(
-        MarketPair.status.in_(["auto_approved", "approved"])
-    )
+async def _load_existing_pairs(db):
+    stmt = select(MarketPair)
     return (await db.execute(stmt)).scalars().all()
 
 
