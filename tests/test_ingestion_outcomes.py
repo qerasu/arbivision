@@ -100,6 +100,20 @@ class IngestionOutcomeNormalizationTests(unittest.TestCase):
         self.assertEqual(mapped["outcomes_json"][1]["clob_token_id"], "clob-b")
 
 
+    def test_map_polymarket_market_skips_nontradable_market(self):
+        mapped = self.service._map_polymarket_market(
+            {
+                "id": 89,
+                "title": "Closed market",
+                "active": True,
+                "closed": False,
+                "tradable": False,
+            }
+        )
+
+        self.assertIsNone(mapped)
+
+
     def test_dedupe_market_items_returns_duplicate_metadata(self):
         items, duplicate_count, duplicate_metadata = self.service._dedupe_market_items(
             [
@@ -809,4 +823,52 @@ class IngestionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             service._changed_market_ids_by_platform["polymarket"],
             set(),
+        )
+
+
+    async def test_complete_polymarket_sync_closes_active_markets_when_only_nontradable_rows_remain(self):
+        class FakeDbSession:
+            def __init__(self):
+                self.commit_calls = 0
+                self.rollback_calls = 0
+
+
+            async def commit(self):
+                self.commit_calls += 1
+
+
+            async def rollback(self):
+                self.rollback_calls += 1
+
+
+        async def pages():
+            yield [{"id": "100", "active": True, "closed": False, "tradable": False}]
+
+
+        db = FakeDbSession()
+        service = IngestionService(db_session=db)
+        service._market_definition_fingerprints["polymarket"] = {"100": b"stale"}
+        service._upsert_markets = AsyncMock(return_value=set())
+        service._mark_missing_markets_closed = AsyncMock(return_value={101})
+        adapter = SimpleNamespace(last_fetch_partial=False, last_fetch_complete=True)
+
+        synced = await service._sync_source_pages(
+            "polymarket",
+            pages(),
+            service._map_polymarket_market,
+            adapter=adapter,
+            skip_unchanged=True,
+        )
+
+        self.assertTrue(synced)
+        service._upsert_markets.assert_not_awaited()
+        service._mark_missing_markets_closed.assert_awaited_once_with(
+            "polymarket",
+            set(),
+        )
+        self.assertEqual(db.commit_calls, 1)
+        self.assertEqual(service._market_definition_fingerprints["polymarket"], {})
+        self.assertEqual(
+            service._changed_market_ids_by_platform["polymarket"],
+            {101},
         )

@@ -182,6 +182,13 @@ class IngestionService:
         active = market.get("active")
         closed = market.get("closed")
         tradable = market.get("tradable")
+
+        if tradable is None:
+            tradable = bool(active) and not bool(closed)
+
+        if not tradable:
+            return None
+
         normalized_outcomes = self._normalize_outcomes(
             market.get("outcomes") or market.get("tokens") or []
         )
@@ -208,14 +215,11 @@ class IngestionService:
             if uses_fallback_index or not has_explicit_token_id:
                 normalized_outcome["id"] = clob_token_id
 
-        if tradable is None:
-            tradable = bool(active) and not bool(closed)
-
         return {
             "platform": "polymarket",
             "platform_market_id": str(market.get("id")),
-            "status": "active" if tradable else "closed",
-            "tradable": bool(tradable),
+            "status": "active",
+            "tradable": True,
             "title": title,
             "normalized_title": title.lower(),
             "description": market.get("description") or market.get("details") or "",
@@ -425,11 +429,18 @@ class IngestionService:
             sample_market_ids = []
             pending_items = []
             unchanged_count = 0
+            fetched_market_rows = 0
 
             async def upsert_pending_items(raw_chunk):
                 nonlocal duplicate_count, platform, unchanged_count
 
-                mapped_items = [mapper(item) for item in raw_chunk if isinstance(item, dict)]
+                mapped_items = []
+                for item in raw_chunk:
+                    if not isinstance(item, dict):
+                        continue
+                    mapped_item = mapper(item)
+                    if mapped_item is not None:
+                        mapped_items.append(mapped_item)
                 mapped_items, chunk_duplicate_count, chunk_duplicate_metadata = self._dedupe_market_items(mapped_items)
                 duplicate_count += chunk_duplicate_count
                 duplicate_market_ids.update(chunk_duplicate_metadata["market_ids"])
@@ -477,6 +488,9 @@ class IngestionService:
             async for raw_items in pages:
                 if not isinstance(raw_items, list):
                     raw_items = list(raw_items or [])
+                fetched_market_rows += sum(
+                    isinstance(item, dict) for item in raw_items
+                )
                 pending_items.extend(raw_items)
                 while len(pending_items) >= self.UPSERT_LOOKUP_BATCH_SIZE:
                     raw_chunk = pending_items[:self.UPSERT_LOOKUP_BATCH_SIZE]
@@ -520,6 +534,19 @@ class IngestionService:
                         source=source_name,
                         fetched_markets=0,
                     )
+                    return True
+                if not fetched_market_rows:
+                    return True
+                stale_market_ids = await self._mark_missing_markets_closed(
+                    platform,
+                    set(),
+                )
+                await db.commit()
+                self._market_definition_fingerprints[platform] = {}
+                changed_market_ids.update(stale_market_ids)
+                self._changed_market_ids_by_platform.setdefault(platform, set()).update(
+                    stale_market_ids
+                )
                 return True
             if is_partial:
                 log.warning(

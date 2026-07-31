@@ -12,7 +12,7 @@ from arbitrage_bot.core.observability import reset_counters
 from arbitrage_bot.core.observability import snapshot_counters
 from arbitrage_bot.services.matcher import MatcherService
 from arbitrage_bot import worker as worker_module
-from arbitrage_bot.worker import AlertRetryQueue, WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_signature, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _run_cycle, _run_market_sync_cycle, _send_delivery_alerts, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
+from arbitrage_bot.worker import AlertRetryQueue, WorkerState, _build_cached_market_signatures, _build_candidate_index_from_signatures, _candidate_markets_for_signature, _cleanup_database_records, _filter_skippable_pairs, _load_candidate_context, _mark_db_cleanup_completed, _mark_stale_pairs, _process_candidates, _prune_market_signature_cache, _reconcile_market_pairs, _recover_active_stale_pairs, _run_cycle, _run_market_sync_cycle, _send_delivery_alerts, _should_run_db_cleanup, _update_empty_counts, _upsert_market_pairs
 
 
 def _fake_session_context(fake_db):
@@ -78,6 +78,64 @@ class WorkerPairLifecycleTests(unittest.TestCase):
             asyncio.run(_run_market_sync_cycle(AsyncMock(), self.state, ingestion, MatcherService()))
 
         self.assertFalse(self.state.candidate_context_loaded)
+
+
+    def test_market_sync_recovers_stale_pairs_after_successful_startup_sync(self):
+        self.state.last_full_pair_rematch_completed_at = time.monotonic()
+        self.state.candidate_context_loaded = True
+        ingestion = SimpleNamespace(
+            sync_markets=AsyncMock(
+                return_value={
+                    "successful_sources": ["polymarket"],
+                    "changed_market_ids_by_platform": {
+                        "polymarket": set(),
+                        "predict_fun": set(),
+                    },
+                }
+            )
+        )
+
+        with (
+            patch(
+                "arbitrage_bot.worker._recover_active_stale_pairs",
+                new=AsyncMock(return_value=({"pair-1"}, True, 0)),
+            ) as recover_mock,
+            patch("arbitrage_bot.worker._run_database_cleanup_if_due", new=AsyncMock()),
+        ):
+            asyncio.run(_run_market_sync_cycle(AsyncMock(), self.state, ingestion, MatcherService()))
+
+        recover_mock.assert_awaited_once()
+        self.assertTrue(self.state.stale_pair_recovery_ready)
+        self.assertFalse(self.state.stale_pair_recovery_pending)
+        self.assertFalse(self.state.candidate_context_loaded)
+        self.assertEqual(self.state.hot_pair_hashes, ["pair-1"])
+
+
+    def test_market_sync_waits_for_successful_source_before_stale_recovery(self):
+        self.state.last_full_pair_rematch_completed_at = time.monotonic()
+        ingestion = SimpleNamespace(
+            sync_markets=AsyncMock(
+                return_value={
+                    "successful_sources": [],
+                    "changed_market_ids_by_platform": {
+                        "polymarket": set(),
+                        "predict_fun": set(),
+                    },
+                }
+            )
+        )
+
+        with (
+            patch(
+                "arbitrage_bot.worker._recover_active_stale_pairs",
+                new=AsyncMock(),
+            ) as recover_mock,
+            patch("arbitrage_bot.worker._run_database_cleanup_if_due", new=AsyncMock()),
+        ):
+            asyncio.run(_run_market_sync_cycle(AsyncMock(), self.state, ingestion, MatcherService()))
+
+        recover_mock.assert_not_awaited()
+        self.assertTrue(self.state.stale_pair_recovery_pending)
 
 
     def test_reconcile_updates_existing_pair_and_keeps_manual_approval(self):
@@ -152,6 +210,85 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.assertTrue(has_updates)
         self.assertEqual(hot_pair_hashes, {"pair-1"})
         self.assertEqual(existing_pair.status, "auto_approved")
+
+
+    def test_recover_active_stale_pairs_reactivates_only_current_matches(self):
+        stale_pair = SimpleNamespace(
+            id=1,
+            pair_hash="1-2",
+            status="stale",
+            match_score=0.8,
+            match_reason_json={"old": True},
+            outcome_mapping_json={},
+        )
+        poly_market = SimpleNamespace(id=1, platform="polymarket", status="active")
+        predict_market = SimpleNamespace(id=2, platform="predict_fun", status="active")
+        matched_pair = SimpleNamespace(
+            pair_hash="1-2",
+            status="auto_approved",
+            match_score=1.0,
+            match_reason_json={"current": True},
+            outcome_mapping_json={"yes": "yes"},
+        )
+        result = SimpleNamespace(all=Mock(return_value=[(stale_pair, poly_market, predict_market)]))
+        db = SimpleNamespace(execute=AsyncMock(return_value=result), commit=AsyncMock())
+        matcher = SimpleNamespace(match_candidates=Mock(return_value=matched_pair))
+
+        recovered, completed, next_pair_id = asyncio.run(_recover_active_stale_pairs(db, matcher))
+
+        self.assertEqual(recovered, {"1-2"})
+        self.assertTrue(completed)
+        self.assertEqual(next_pair_id, 1)
+        self.assertEqual(stale_pair.status, "auto_approved")
+        matcher.match_candidates.assert_called_once_with(poly_market, predict_market)
+        db.commit.assert_awaited_once()
+
+
+    def test_recover_active_stale_pairs_keeps_rejected_pairs_stale(self):
+        stale_pair = SimpleNamespace(
+            id=1,
+            pair_hash="1-2",
+            status="stale",
+            match_score=0.8,
+            match_reason_json={"old": True},
+            outcome_mapping_json={},
+        )
+        poly_market = SimpleNamespace(id=1, platform="polymarket", status="active")
+        predict_market = SimpleNamespace(id=2, platform="predict_fun", status="active")
+        result = SimpleNamespace(all=Mock(return_value=[(stale_pair, poly_market, predict_market)]))
+        db = SimpleNamespace(execute=AsyncMock(return_value=result), commit=AsyncMock())
+        matcher = SimpleNamespace(match_candidates=Mock(return_value=None))
+
+        recovered, completed, next_pair_id = asyncio.run(_recover_active_stale_pairs(db, matcher))
+
+        self.assertEqual(recovered, set())
+        self.assertTrue(completed)
+        self.assertEqual(next_pair_id, 1)
+        self.assertEqual(stale_pair.status, "stale")
+        db.commit.assert_not_awaited()
+
+
+    def test_recover_active_stale_pairs_reports_incomplete_batch(self):
+        stale_pair = SimpleNamespace(
+            id=1,
+            pair_hash="1-2",
+            status="stale",
+            match_score=0.8,
+            match_reason_json={},
+            outcome_mapping_json={},
+        )
+        poly_market = SimpleNamespace(id=1, platform="polymarket", status="active")
+        predict_market = SimpleNamespace(id=2, platform="predict_fun", status="active")
+        result = SimpleNamespace(all=Mock(return_value=[(stale_pair, poly_market, predict_market)]))
+        db = SimpleNamespace(execute=AsyncMock(return_value=result), commit=AsyncMock())
+        matcher = SimpleNamespace(match_candidates=Mock(return_value=None))
+
+        with patch.object(worker_module, "_STALE_PAIR_RECOVERY_BATCH_SIZE", 1):
+            recovered, completed, next_pair_id = asyncio.run(_recover_active_stale_pairs(db, matcher))
+
+        self.assertEqual(recovered, set())
+        self.assertFalse(completed)
+        self.assertEqual(next_pair_id, 1)
 
 
     def test_reconcile_creates_new_pairs(self):
@@ -1240,6 +1377,9 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
             "arbitrage_bot.worker._upsert_market_pairs",
             new=AsyncMock(),
         ) as upsert_mock, patch(
+            "arbitrage_bot.worker._recover_active_stale_pairs",
+            new=AsyncMock(return_value=(set(), True, 0)),
+        ) as recover_mock, patch(
             "arbitrage_bot.worker._process_candidates",
             new=AsyncMock(
                 return_value={
@@ -1264,9 +1404,11 @@ class WorkerEmptyOrderbookStateTests(unittest.IsolatedAsyncioTestCase):
                 "predict_fun": set(),
             },
         )
+        recover_mock.assert_awaited_once()
 
 
     async def test_run_cycle_skips_pair_rebuild_when_sync_had_no_market_changes(self):
+        self.state.stale_pair_recovery_pending = False
         fake_db = SimpleNamespace()
         ingestion = SimpleNamespace(
             sync_markets=AsyncMock(

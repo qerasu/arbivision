@@ -28,6 +28,7 @@ from arbitrage_bot.tg_bot.preferences import extract_pair_close_datetime
 from sqlalchemy.future import select
 from sqlalchemy import and_, delete, or_
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 log = get_logger("worker")
 _EMPTY_COUNTS_MAX_SIZE = 1000
@@ -36,6 +37,7 @@ _EMPTY_COUNT_TTL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 20, 3600)
 _EMPTY_PROBE_INTERVAL_SECONDS = max(settings.MARKET_REFRESH_SECONDS * 12, 60)
 _ALERT_BATCH_WINDOW_SECONDS = 0.25
 _FULL_PAIR_REMATCH_STATE_KEY = "worker:full_pair_rematch"
+_STALE_PAIR_RECOVERY_BATCH_SIZE = 1000
 
 
 @dataclass
@@ -50,6 +52,9 @@ class WorkerState:
     last_full_pair_rematch_completed_at: float | None = None
     last_db_cleanup_completed_at: float | None = None
     pair_cycle_offsets: dict = field(default_factory=dict)
+    stale_pair_recovery_pending: bool = True
+    stale_pair_recovery_ready: bool = False
+    stale_pair_recovery_after_id: int = 0
 
 
 class AlertRetryQueue:
@@ -328,6 +333,10 @@ async def _persist_full_pair_rematch_completion(db, state):
 
 async def _run_market_sync_cycle(db, state, ingestion, matcher):
     sync_result = await ingestion.sync_markets()
+    successful_sources = sync_result.get("successful_sources") if isinstance(sync_result, dict) else []
+    if successful_sources:
+        state.stale_pair_recovery_ready = True
+
     if _should_run_full_pair_rematch(time.monotonic(), state):
         hot_pair_hashes, rematch_completed = await _upsert_market_pairs(
             db,
@@ -346,13 +355,38 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
             log.warning("full pair rematch reached configured limit")
     else:
         changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
-        if _has_changed_market_ids(changed_market_ids_by_platform):
-            hot_pair_hashes = await _upsert_market_pairs(
+        has_market_changes = _has_changed_market_ids(changed_market_ids_by_platform)
+        hot_pair_hashes = set()
+        if has_market_changes:
+            upserted_pair_hashes = await _upsert_market_pairs(
                 db,
                 matcher,
                 changed_market_ids_by_platform,
                 state,
             )
+            hot_pair_hashes.update(upserted_pair_hashes)
+
+        should_recover_stale_pairs = (
+            state.stale_pair_recovery_ready
+            and (
+                state.stale_pair_recovery_pending
+                or has_market_changes
+            )
+        )
+        if should_recover_stale_pairs:
+            if has_market_changes and not state.stale_pair_recovery_pending:
+                state.stale_pair_recovery_after_id = 0
+            recovery_result = await _recover_active_stale_pairs(
+                db,
+                matcher,
+                state.stale_pair_recovery_after_id,
+            )
+            recovered_pair_hashes, recovery_completed, next_pair_id = recovery_result
+            hot_pair_hashes.update(recovered_pair_hashes)
+            state.stale_pair_recovery_pending = not recovery_completed
+            state.stale_pair_recovery_after_id = 0 if recovery_completed else next_pair_id
+
+        if hot_pair_hashes:
             _invalidate_candidate_context_cache(state)
             _queue_hot_pairs(state, hot_pair_hashes)
     await _run_database_cleanup_if_due(db, state)
@@ -657,6 +691,51 @@ async def _iter_active_market_batches(db, platform, batch_size=500):
 async def _load_existing_pairs(db):
     stmt = select(MarketPair)
     return (await db.execute(stmt)).scalars().all()
+
+
+async def _recover_active_stale_pairs(db, matcher, after_pair_id=0):
+    market_a = aliased(Market)
+    market_b = aliased(Market)
+    stmt = (
+        select(MarketPair, market_a, market_b)
+        .join(market_a, MarketPair.market_id_a == market_a.id)
+        .join(market_b, MarketPair.market_id_b == market_b.id)
+        .where(
+            MarketPair.status == "stale",
+            MarketPair.id > max(0, int(after_pair_id or 0)),
+            market_a.status == "active",
+            market_b.status == "active",
+        )
+        .order_by(MarketPair.id)
+        .limit(_STALE_PAIR_RECOVERY_BATCH_SIZE)
+    )
+    rows = (await db.execute(stmt)).all()
+    recovered_pair_hashes = set()
+
+    for pair, market_a, market_b in rows:
+        if market_a.platform == "polymarket" and market_b.platform == "predict_fun":
+            poly_market, predict_market = market_a, market_b
+        elif market_b.platform == "polymarket" and market_a.platform == "predict_fun":
+            poly_market, predict_market = market_b, market_a
+        else:
+            continue
+
+        matched_pair = matcher.match_candidates(poly_market, predict_market)
+        if matched_pair is None or matched_pair.pair_hash != pair.pair_hash:
+            continue
+        if _refresh_existing_pair(pair, matched_pair):
+            recovered_pair_hashes.add(pair.pair_hash)
+
+    if recovered_pair_hashes:
+        await db.commit()
+        log.info("recovered active stale pairs", recovered_pairs=len(recovered_pair_hashes))
+
+    next_pair_id = rows[-1][0].id if rows else max(0, int(after_pair_id or 0))
+    return (
+        recovered_pair_hashes,
+        len(rows) < _STALE_PAIR_RECOVERY_BATCH_SIZE,
+        next_pair_id,
+    )
 
 
 async def _load_pairs_for_market_ids(db, market_ids):
