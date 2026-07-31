@@ -127,6 +127,33 @@ class WorkerPairLifecycleTests(unittest.TestCase):
         self.assertEqual(existing_pair.status, "stale")
 
 
+    def test_reconcile_reactivates_matching_stale_pair(self):
+        existing_pair = SimpleNamespace(
+            pair_hash="pair-1",
+            status="stale",
+            match_score=0.88,
+            match_reason_json={"title": "old"},
+            outcome_mapping_json={"market_a": {"yes": "old-y", "no": "old-n"}},
+        )
+        matched_pair = SimpleNamespace(
+            pair_hash="pair-1",
+            status="auto_approved",
+            match_score=0.91,
+            match_reason_json={"title": "new"},
+            outcome_mapping_json={"market_a": {"yes": "new-y", "no": "new-n"}},
+        )
+
+        new_pairs, has_updates, hot_pair_hashes = _reconcile_market_pairs(
+            [existing_pair],
+            {"pair-1": matched_pair},
+        )
+
+        self.assertEqual(new_pairs, [])
+        self.assertTrue(has_updates)
+        self.assertEqual(hot_pair_hashes, {"pair-1"})
+        self.assertEqual(existing_pair.status, "auto_approved")
+
+
     def test_reconcile_creates_new_pairs(self):
         matched_pair = SimpleNamespace(
             pair_hash="pair-2",
@@ -494,6 +521,13 @@ class WorkerPairLifecycleTests(unittest.TestCase):
             commit=AsyncMock(),
             rollback=AsyncMock(),
         )
+        stale_pair = SimpleNamespace(
+            pair_hash="1-10",
+            status="stale",
+            match_score=0.8,
+            match_reason_json={"old": True},
+            outcome_mapping_json={"market_a": {}},
+        )
 
         async def poly_batches():
             for market in poly_markets:
@@ -506,13 +540,14 @@ class WorkerPairLifecycleTests(unittest.TestCase):
             "arbitrage_bot.worker._iter_active_market_batches",
             return_value=poly_batches(),
         ), patch(
-            "arbitrage_bot.worker._load_active_pairs",
-            new=AsyncMock(return_value=[]),
+            "arbitrage_bot.worker._load_existing_pairs",
+            new=AsyncMock(return_value=[stale_pair]),
         ):
             asyncio.run(_upsert_market_pairs(fake_db, matcher, None, self.state))
 
         self.assertEqual(set(self.state.market_signature_cache), {pf_market.id})
-        self.assertEqual(len(fake_db.add_all.call_args.args[0]), 2)
+        self.assertEqual(stale_pair.status, "auto_approved")
+        self.assertEqual(len(fake_db.add_all.call_args.args[0]), 1)
 
 
     def test_upsert_market_pairs_keeps_unvisited_pairs_active_when_limit_is_hit(self):
