@@ -26,6 +26,7 @@ class PredictFunAdapter(BaseAdapter):
         httpx.ConnectTimeout,
         httpx.ReadError,
         httpx.ReadTimeout,
+        httpx.WriteTimeout,
         httpx.RemoteProtocolError,
         json.JSONDecodeError,
         UnicodeDecodeError,
