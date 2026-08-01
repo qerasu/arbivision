@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from math import isclose
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -457,6 +458,12 @@ def format_setting_prompt(field_name, preferences, language=None):
     )
 
 
+def _exceeds_capital_limit(value, limit):
+    value = float(value)
+    limit = float(limit)
+    return value > limit and not isclose(value, limit, rel_tol=1e-12, abs_tol=1e-9)
+
+
 def filter_reason_for_preferences(opportunity, market_a, market_b, preferences, now=None, skip_max_capital=False):
     min_roi = effective_min_roi(preferences)
     if min_roi is not None and opportunity.net_roi * 100 < float(min_roi):
@@ -467,16 +474,16 @@ def filter_reason_for_preferences(opportunity, market_a, market_b, preferences, 
         return "min_capital"
 
     max_capital = preferences.get("max_capital_usd")
-    if not skip_max_capital and max_capital is not None and opportunity.capital_required > float(max_capital):
+    if not skip_max_capital and max_capital is not None and _exceeds_capital_limit(opportunity.capital_required, max_capital):
         return "max_capital"
 
     platform_capitals = _extract_platform_capitals(opportunity, market_a, market_b)
     max_polymarket_capital = preferences.get("max_polymarket_capital_usd")
-    if not skip_max_capital and max_polymarket_capital is not None and platform_capitals["polymarket"] > float(max_polymarket_capital):
+    if not skip_max_capital and max_polymarket_capital is not None and _exceeds_capital_limit(platform_capitals["polymarket"], max_polymarket_capital):
         return "max_polymarket_capital"
 
     max_predict_fun_capital = preferences.get("max_predict_fun_capital_usd")
-    if not skip_max_capital and max_predict_fun_capital is not None and platform_capitals["predict_fun"] > float(max_predict_fun_capital):
+    if not skip_max_capital and max_predict_fun_capital is not None and _exceeds_capital_limit(platform_capitals["predict_fun"], max_predict_fun_capital):
         return "max_predict_fun_capital"
 
     min_profit = preferences.get("min_profit_usd")

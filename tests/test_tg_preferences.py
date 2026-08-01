@@ -75,6 +75,33 @@ class TelegramPreferencesTests(unittest.TestCase):
         self.assertEqual(reason, "max_capital")
 
 
+    def test_filter_reason_ignores_float_noise_at_capital_limits(self):
+        opportunity = SimpleNamespace(
+            net_roi=0.20,
+            capital_required=90.00000000000003,
+            shares=100.0,
+            avg_price_leg_1=0.4000000000000001,
+            avg_price_leg_2=0.5000000000000001,
+        )
+        market_a = SimpleNamespace(platform="polymarket", raw_payload_json={})
+        market_b = SimpleNamespace(platform="predict_fun", raw_payload_json={})
+
+        reason = filter_reason_for_preferences(
+            opportunity,
+            market_a,
+            market_b,
+            {
+                "min_roi_percent": None,
+                "max_capital_usd": 90.0,
+                "max_polymarket_capital_usd": 40.0,
+                "max_predict_fun_capital_usd": 50.0,
+                "max_days_to_close": None,
+            },
+        )
+
+        self.assertIsNone(reason)
+
+
     def test_filter_reason_blocks_by_min_capital(self):
         opportunity = SimpleNamespace(net_roi=0.20, capital_required=40.0, net_profit=20.0)
         market = SimpleNamespace(raw_payload_json={})
