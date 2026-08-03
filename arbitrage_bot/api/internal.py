@@ -1,5 +1,6 @@
 import asyncio
 import secrets
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
@@ -38,7 +39,6 @@ async def health_check(db=Depends(get_db)):
     try:
         await db.execute(text("SELECT 1"))
     except Exception as exc:
-        import logging
         logging.getLogger("uvicorn.error").error("Health check DB error: %s", exc, exc_info=True)
         raise HTTPException(status_code=503, detail="database unavailable") from exc
 
