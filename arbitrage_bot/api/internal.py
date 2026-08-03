@@ -4,8 +4,8 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.security import HTTPBearer
-from sqlalchemy import func
 from sqlalchemy.future import select
+from sqlalchemy import text, func
 
 from arbitrage_bot.core.config import settings
 from arbitrage_bot.core.database import get_db
@@ -36,7 +36,7 @@ def require_internal_api_token(
 @router.get("/health")
 async def health_check(db=Depends(get_db)):
     try:
-        await db.execute(select(1))
+        await db.execute(text("SELECT 1"))
     except Exception as exc:
         raise HTTPException(status_code=503, detail="database unavailable") from exc
 
