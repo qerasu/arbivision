@@ -33,6 +33,9 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
+          ssh -i ~/.ssh/id_ed25519 -o BatchMode=yes "root@$DEPLOY_HOST" \
+            'if [ -d /opt/arbivision ]; then rsync -a --delete --exclude="backups/" /opt/arbivision/ /opt/arbivision_backup/; fi'
+          
           rsync -az --delete \
             --exclude='.env' \
             --exclude='.git/' \
@@ -59,5 +62,11 @@ jobs:
                fi
                sleep 2
              done
-             echo "App health check did not succeed within 90 seconds" >&2
+             echo "App health check did not succeed within 90 seconds. Initiating rollback..." >&2
+             if [ -d /opt/arbivision_backup ]; then
+               rsync -a --delete --exclude="backups/" /opt/arbivision_backup/ /opt/arbivision/
+               cd /opt/arbivision
+               docker compose -f docker-compose.prod.yml up -d --build app
+               echo "Rollback complete. The previous version has been restored." >&2
+             fi
              exit 1'
