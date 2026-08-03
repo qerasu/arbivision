@@ -369,6 +369,7 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
         changed_market_ids_by_platform = _extract_changed_market_ids_by_platform(sync_result)
         has_market_changes = _has_changed_market_ids(changed_market_ids_by_platform)
         hot_pair_hashes = set()
+        recovery_attempted = False
         try:
             if has_market_changes:
                 upserted_pair_hashes = await _upsert_market_pairs(
@@ -389,6 +390,7 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
                 )
             )
             if should_recover_stale_pairs:
+                recovery_attempted = True
                 if has_market_changes and not state.stale_pair_recovery_pending:
                     state.stale_pair_recovery_after_id = 0
                 recovery_result = await _recover_active_stale_pairs(
@@ -409,7 +411,7 @@ async def _run_market_sync_cycle(db, state, ingestion, matcher):
                         state.stale_pair_recovery_sources.clear()
                         state.stale_pair_recovery_ready = False
         finally:
-            if has_market_changes:
+            if has_market_changes or recovery_attempted:
                 _invalidate_candidate_context_cache(state)
 
         if hot_pair_hashes:
@@ -551,10 +553,12 @@ def _invalidate_candidate_context_cache(state):
 
 async def _load_candidate_context(db, state, force_refresh=False):
     if state.candidate_context_loaded and not force_refresh:
-        return (
-            list(state.candidate_pairs),
-            dict(state.candidate_market_map),
-        )
+        if state.candidate_pairs:
+            return (
+                list(state.candidate_pairs),
+                dict(state.candidate_market_map),
+            )
+        # empty context may be stale due to a race with market sync; re-query
 
     while True:
         generation = state.candidate_context_generation
