@@ -45,6 +45,7 @@ class PredictFunAdapter(BaseAdapter):
             timeout=timeout,
             headers=headers,
             limits=limits,
+            verify=False,
         )
         self.last_fetch_partial = False
         self.last_fetch_complete = True
