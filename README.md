@@ -5,9 +5,9 @@
 - синхронизирует рынки с обеих площадок
 - пересчитывает пары рынков только при изменениях
 - асинхронно проверяет ордербуки и рассчитывает прибыльные направления
-- создаёт и доставляет Telegram-алерты
+- создаёт и доставляет алерты в Telegram
 - поддерживает пользовательские фильтры
-- даёт внутренние API-ручки для health и status, показывает админ-статистику в Telegram
+- предоставляет внутренние маршруты health и status, показывает статистику для администраторов в Telegram
 
 ## Стек
 
@@ -39,19 +39,19 @@ APP_RUNTIME_MODE=api .venv/bin/python -m uvicorn arbitrage_bot.main:app --host 1
 curl http://127.0.0.1:8000/api/health
 ```
 
-Режим `api` нужен для проверки HTTP-ручек. Для worker и Telegram замените его на `all`, `worker` или `telegram`. Начальные значения и список переменных находятся в [`.env.example`](.env.example).
+Режим `api` нужен для проверки HTTP API. Для worker и Telegram замените его на `all`, `worker` или `telegram`. Начальные значения и список переменных находятся в [`.env.example`](.env.example).
 
 ## Структура проекта
 
 ```text
 arbitrage_bot/
   adapters/         интеграции с Polymarket и Predict.Fun
-  api/              внутренние HTTP-ручки
+  api/              маршруты внутреннего API
   core/             конфигурация, БД, Redis и логирование
-  models/           SQLAlchemy ORM-модели
+  models/           модели ORM на SQLAlchemy
   services/         загрузка, сопоставление, стаканы, расчёты и алерты
   tg_bot/           Telegram UI, обработчики и настройки пользователей
-  main.py           FastAPI-приложение и его жизненный цикл
+  main.py           приложение на FastAPI и его жизненный цикл
   runtime.py        запуск worker и Telegram
   worker.py         основной цикл обработки рынков
 alembic/            миграции базы данных
@@ -92,12 +92,12 @@ utilities/
 
 | Переменная | По умолчанию | Назначение |
 |---|---:|---|
-| `PREDICT_FUN_API_KEY` | — | API-ключ Predict.Fun для worker |
-| `PREDICT_FUN_REST_RPS` | `4` | лимит всех REST-запросов к Predict.Fun в секунду |
-| `ADMIN_API_TOKEN` | — | Bearer-токен для доступа к `GET /api/status` |
-| `TELEGRAM_BOT_TOKEN` | — | токен Telegram-бота |
-| `TELEGRAM_DEFAULT_CHAT_IDS` | - | резервный список получателей через запятую |
-| `TELEGRAM_SYSTEM_ERROR_CHAT_IDS` | - | чаты с доступом к `/stats` и основной список для системных ошибок |
+| `PREDICT_FUN_API_KEY` | — | ключ API Predict.Fun для worker |
+| `PREDICT_FUN_REST_RPS` | `4` | лимит всех запросов по REST к Predict.Fun в секунду |
+| `ADMIN_API_TOKEN` | — | токен типа Bearer для доступа к `GET /api/status` |
+| `TELEGRAM_BOT_TOKEN` | — | токен бота в Telegram |
+| `TELEGRAM_DEFAULT_CHAT_IDS` | — | резервный список получателей через запятую |
+| `TELEGRAM_SYSTEM_ERROR_CHAT_IDS` | — | чаты с доступом к `/stats` и основной список для системных ошибок |
 | `APP_RUNTIME_MODE` | `all` | `all`, `worker`, `telegram` или `api` |
 | `LOG_LEVEL` | `info` | уровень логирования |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `arb_user` / `arb_pass` / `arbitrage_db` | учётные данные PostgreSQL |
@@ -108,7 +108,7 @@ utilities/
 | `ALERTS_DEDUPE_TTL_SECONDS` | `600` | TTL общего состояния дедупликации `AlertManager` |
 | `ALERTS_DELTA_PROFIT_THRESHOLD_USD` | `3` | минимальный рост прибыли для повторного уведомления |
 | `ALERTS_DELTA_ROI_THRESHOLD_PERCENT` | `0.5` | минимальный рост ROI для повторного уведомления |
-| `MARKET_REFRESH_SECONDS` / `MARKET_SYNC_INTERVAL_SECONDS` | `5` / `60` | частота worker-цикла и синхронизации рынков |
+| `MARKET_REFRESH_SECONDS` / `MARKET_SYNC_INTERVAL_SECONDS` | `5` / `60` | частота цикла worker и синхронизации рынков |
 | `POLYMARKET_INCREMENTAL_MAX_PAGES` | `20` | максимум страниц инкрементальной синхронизации Polymarket |
 | `POLYMARKET_FULL_SYNC_INTERVAL_SECONDS` | `1800` | период полной синхронизации Polymarket |
 | `MATCHER_FULL_REMATCH_INTERVAL_SECONDS` | `21600` | период полного повторного сопоставления рынков |
@@ -119,7 +119,7 @@ utilities/
 | `ORDERBOOK_CACHE_TTL_SECONDS` / `ORDERBOOK_CACHE_MAX_ITEMS` | `1` / `5000` | TTL и максимальный размер кеша стаканов |
 | `ORDERBOOK_POLYMARKET_BATCH_SIZE` | `100` | размер пачки запросов стаканов Polymarket |
 | `ORDERBOOK_PREDICT_FUN_CONCURRENCY` | `12` | параллельность запросов Predict.Fun orderbook |
-| `ORDERBOOK_STREAMING_ENABLED` | `true` | получать live-стаканы через WebSocket; REST остаётся резервом |
+| `ORDERBOOK_STREAMING_ENABLED` | `true` | получать стаканы в реальном времени через WebSocket; REST остаётся резервом |
 | `TELEGRAM_SEND_CONCURRENCY` | `8` | число параллельных отправок в Telegram |
 | `FANOUT_TARGET_CACHE_TTL_SECONDS` | `2` | TTL кеша получателей алертов |
 | `TELEGRAM_SYSTEM_ERROR_COOLDOWN_SECONDS` | `300` | пауза между повторными системными уведомлениями |
@@ -128,7 +128,7 @@ utilities/
 | `TELEGRAM_ALERT_RETRY_QUEUE_MAX_SIZE` | `1000` | максимальный размер очереди повторных отправок |
 | `DB_CLEANUP_INTERVAL_SECONDS` / `DB_CLEANUP_RETENTION_SECONDS` | `10800` / `21600` | период очистки и срок хранения служебных записей |
 
-Полный список параметров и их значения по умолчанию находится в [`arbitrage_bot/core/config.py`](arbitrage_bot/core/config.py). Переменные `APP_HOST`, `APP_PORT` и `APP_SCHEME` используются live-тестами как адрес уже запущенного API.
+Полный список параметров и их значения по умолчанию находится в [`arbitrage_bot/core/config.py`](arbitrage_bot/core/config.py). Переменные `APP_HOST`, `APP_PORT` и `APP_SCHEME` используются в тестах для подключения к уже запущенному API.
 
 ## Ограничения и отказоустойчивость
 
@@ -160,20 +160,20 @@ APP_RUNTIME_MODE=telegram .venv/bin/python -m uvicorn arbitrage_bot.main:app --r
 ```
 
 
-## Telegram-бот
+## Бот в Telegram
 
 Команда `/start` открывает экран выбора языка (English / Русский). После выбора открывается главное меню. Бот поддерживает:
 
 - выбор языка интерфейса при первом запуске (English / Русский)
 - паузу и возобновление алертов
-- пользовательские фильтры через inline-кнопки: `min ROI`, `min volume`, `max volume`, `Polymarket balance`, `Predict.Fun balance`, `min profit`, `min market end`, `max market end`
+- пользовательские фильтры через кнопки под сообщениями Telegram: `min ROI`, `min volume`, `max volume`, `Polymarket balance`, `Predict.Fun balance`, `min profit`, `min market end`, `max market end`
 - отдельные лимиты требуемого капитала на `Polymarket` и `Predict.Fun`
 - ввод числовых значений следующим сообщением
 - выключение числового фильтра через `off` / `выкл`
 - сброс всех фильтров в `None` через кнопку «Disable all» / «Отключить всё»
 - отдельную команду `/stats` для админской статистики в чатах из `TELEGRAM_SYSTEM_ERROR_CHAT_IDS`
 
-Новые Telegram-пользователи по умолчанию получают фильтры:
+Новые пользователи Telegram по умолчанию получают фильтры:
 
 - `min ROI = 2%`
 - `min volume = $10`
@@ -204,7 +204,7 @@ APP_RUNTIME_MODE=telegram .venv/bin/python -m uvicorn arbitrage_bot.main:app --r
 
 `GET /api/health` возвращает `503`, если PostgreSQL недоступен; состояние Redis показывается как `ok` или `degraded`, поскольку сервис умеет временно работать без него.
 
-`GET /api/status` требует заголовок `Authorization: Bearer <ADMIN_API_TOKEN>` и возвращает агрегаты по рынкам, парам и runtime-метрикам в полях `opportunity_counts.total`, `opportunity_counts.filtered_runtime` и `alert_counts.sent_runtime`. Неправильный или отсутствующий заголовок даёт `401`. Если токен не настроен, ручка отвечает `503`. Runtime-счётчики начинаются заново после перезапуска процесса.
+`GET /api/status` требует заголовок `Authorization: Bearer <ADMIN_API_TOKEN>` и возвращает агрегаты по рынкам, парам и показателям работы приложения в полях `opportunity_counts.total`, `opportunity_counts.filtered_runtime` и `alert_counts.sent_runtime`. Неправильный или отсутствующий заголовок даёт `401`. Если токен не настроен, ручка отвечает `503`. Счётчики текущего запуска сбрасываются после перезапуска процесса.
 
 Примеры запросов:
 
@@ -214,7 +214,7 @@ curl http://127.0.0.1:8000/api/health
 curl -H "Authorization: Bearer $ADMIN_API_TOKEN" http://127.0.0.1:8000/api/status
 ```
 
-Swagger, ReDoc и OpenAPI schema отключены. `GET /api/health` остаётся публичным для health-проб.
+Swagger, ReDoc и OpenAPI schema отключены. `GET /api/health` остаётся публичным для проверок состояния.
 
 ## Тесты
 
@@ -226,7 +226,7 @@ Swagger, ReDoc и OpenAPI schema отключены. `GET /api/health` оста�
 python3 utilities/run_tests.py
 ```
 
-Обычный запуск не включает live smoke-тесты. `RUN_LIVE_TESTS=1` требует уже запущенный API по адресу из `APP_SCHEME`, `APP_HOST` и `APP_PORT`, а также `ADMIN_API_TOKEN` в локальном env-файле. `RUN_LIVE_DB_TESTS=1` требует доступную БД и хотя бы одну сохранённую запись рынка.
+Обычный запуск не включает проверки запущенного API. `RUN_LIVE_TESTS=1` требует уже запущенный API по адресу из `APP_SCHEME`, `APP_HOST` и `APP_PORT`, а также `ADMIN_API_TOKEN` в локальном файле переменных окружения. `RUN_LIVE_DB_TESTS=1` требует доступную БД и хотя бы одну сохранённую запись рынка.
 
 ```bash
 RUN_LIVE_TESTS=1 RUN_LIVE_DB_TESTS=1 python3 utilities/run_tests.py
